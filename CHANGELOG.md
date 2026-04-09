@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0-beta.7] - 2026-04-09
+
+### Added
+- Actionable error messages for 401 (auth hint + `luma sync`), 403 (permission check), 529 (Anthropic overloaded)
+- Network error formatting — connection failures and timeouts now include guidance instead of raw reqwest output
+- 529 (overloaded) treated as retryable in `send_with_retry`
+
+### Changed
+- `format_http_error` dispatches on status code instead of only handling 429
+- TUI-side `format_provider_error` simplified — defers to `has_actionable_guidance` to avoid double-wrapping
+
+### Fixed
+- Mouse scroll not working on Windows — removed region bounds guard on `ScrollUp`/`ScrollDown` events that failed when `parse_relative_y` produced coordinates outside region bounds
+
 ## [0.3.0-beta.4] - 2026-04-08
 
 ### Added
