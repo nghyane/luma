@@ -148,6 +148,8 @@ async fn agent_loop(
                         .messages
                         .insert(0, Message::system(config.system_prompt.clone()));
                 }
+                // Repair any orphaned tool_use blocks from a crash or forced exit.
+                fix_orphaned_tool_uses(&mut session.messages);
             }
             AgentCommand::SetModel { model_id, source } => {
                 config.model_id = model_id;
