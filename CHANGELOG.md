@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-beta.2] - 2026-04-09
+
+### Fixed
+- Spinner flicker on Windows — spinner chars (`·`, `✽`) have `east_asian_width=Ambiguous`, rendering as 2 columns on CJK terminals while cell buffer counted 1; now padded to fixed 2-column width (same approach as Claude Code's `<Box width={2}>`)
+- Scroll not working during streaming — arrow keys (Up/Down/PageUp/PageDown) now scroll output while agent is responding; previously went to prompt history
+- Scroll up silently ignored during streaming — removed bounce detection that depended on stale state; `scroll_up` now always locks viewport
+
+### Changed
+- Spinner chars match Claude Code style (`·✢✳✶✻✽`) with platform-specific substitution (`✳→*` on non-macOS)
+- `ScrollView` simplified to 2 fields (`offset`, `is_user_scrolled`) — no more `just_hit_bottom`, `last_bottom_max`, or `cached_total`
+
 ## [0.4.0-beta.1] - 2026-04-09
 
 ### Added
