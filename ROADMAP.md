@@ -45,8 +45,8 @@ Current: ~12K lines Rust, 290 tests, 3 providers, 12 tools. Cross-platform (macO
 - [ ] Streaming resize stability across providers
 - [ ] Large-session profiling (65K+ tokens) — render throughput, memory, freeze points
 - [ ] Tool output polish — clearer summaries and more consistent formatting
-- [~] Provider error surfacing — clearer transient/network failure messages in TUI
-- [~] Rate limit UX — surface provider `429` errors clearly in TUI with actionable guidance
+- [x] Provider error surfacing — clearer transient/network failure messages in TUI
+- [x] Rate limit UX — surface provider `429` errors clearly in TUI with actionable guidance
 
 ## v0.5 — UX & Extensibility
 

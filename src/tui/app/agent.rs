@@ -194,23 +194,28 @@ impl super::App {
 }
 
 fn format_provider_error(msg: &str) -> String {
-    let lower = msg.to_ascii_lowercase();
-    if lower.contains("hard quota exceeded") {
-        return msg.to_owned();
-    }
-    if lower.contains("temporary throttling") {
+    // retry.rs already formats HTTP errors with actionable guidance.
+    // Only wrap raw 429 messages that bypass format_http_error.
+    if has_actionable_guidance(msg) {
         return msg.to_owned();
     }
     if is_rate_limit_error(msg) {
-        if msg.to_ascii_lowercase().contains("switch model/provider") {
-            return msg.to_owned();
-        }
         return format!(
             "provider rate limit hit (429)\n\n{}\n\nTry again in a bit, reduce request frequency, or switch model/provider.",
             msg.trim()
         );
     }
     msg.to_owned()
+}
+
+/// Whether the error message already contains provider-level guidance.
+fn has_actionable_guidance(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("switch model/provider")
+        || lower.contains("try another model/provider")
+        || lower.contains("check your api key")
+        || lower.contains("check your internet")
+        || lower.contains("luma sync")
 }
 
 fn is_rate_limit_error(msg: &str) -> bool {
@@ -422,6 +427,18 @@ mod tests {
     #[test]
     fn preserves_provider_temporary_throttling_message() {
         let msg = "claude temporary throttling (429): too many requests. Wait a bit, reduce request frequency, or switch model/provider.";
+        assert_eq!(format_provider_error(msg), msg);
+    }
+
+    #[test]
+    fn preserves_auth_error_with_guidance() {
+        let msg = "claude auth failed (401): invalid token. Check your API key or run 'luma sync' to refresh credentials.";
+        assert_eq!(format_provider_error(msg), msg);
+    }
+
+    #[test]
+    fn preserves_network_error_with_guidance() {
+        let msg = "connection failed: Connection refused. Check your internet connection and any proxy/firewall settings.";
         assert_eq!(format_provider_error(msg), msg);
     }
 }

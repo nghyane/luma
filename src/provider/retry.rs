@@ -11,17 +11,55 @@ const OPENAI_RESET_HEADERS: &[&str] = &["x-ratelimit-reset-requests", "x-ratelim
 /// Format provider HTTP errors with clearer guidance for TUI.
 pub fn format_http_error(provider: &str, status: reqwest::StatusCode, msg: &str) -> String {
     let detail = msg.trim();
-    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        if is_hard_quota_error(detail) {
-            return format!(
-                "{provider} hard quota exceeded (429): {detail}. Quota/billing must recover before retrying; try another model/provider if needed."
-            );
+    let code = status.as_u16();
+    match code {
+        429 => {
+            if is_hard_quota_error(detail) {
+                format!(
+                    "{provider} hard quota exceeded (429): {detail}. Quota/billing must recover before retrying; try another model/provider if needed."
+                )
+            } else {
+                format!(
+                    "{provider} temporary throttling (429): {detail}. Wait a bit, reduce request frequency, or switch model/provider."
+                )
+            }
         }
+        401 => format!(
+            "{provider} auth failed (401): {detail}. Check your API key or run 'luma sync' to refresh credentials."
+        ),
+        403 => format!(
+            "{provider} access denied (403): {detail}. Verify your API key has the required permissions."
+        ),
+        // Anthropic returns 529 when overloaded
+        529 => format!(
+            "{provider} overloaded (529): {detail}. The API is temporarily at capacity; retry shortly or switch provider."
+        ),
+        _ => format!("{status}: {detail}"),
+    }
+}
+
+/// Format a network/transport error with actionable guidance.
+pub fn format_network_error(err: &reqwest::Error) -> String {
+    if err.is_connect() {
         return format!(
-            "{provider} temporary throttling (429): {detail}. Wait a bit, reduce request frequency, or switch model/provider."
+            "connection failed: {}. Check your internet connection and any proxy/firewall settings.",
+            brief_reqwest_cause(err)
         );
     }
-    format!("{status}: {detail}")
+    if err.is_timeout() {
+        return "request timed out. The provider may be slow or unreachable; try again shortly."
+            .to_owned();
+    }
+    format!("network error: {err}")
+}
+
+/// Extract the innermost cause from a reqwest error for a concise message.
+fn brief_reqwest_cause(err: &reqwest::Error) -> String {
+    let mut source: &dyn std::error::Error = err;
+    while let Some(inner) = source.source() {
+        source = inner;
+    }
+    source.to_string()
 }
 
 fn is_hard_quota_error(msg: &str) -> bool {
@@ -171,7 +209,12 @@ where
     Fut: Future<Output = Result<reqwest::Response, reqwest::Error>>,
 {
     for attempt in 1..=MAX_RETRIES {
-        let resp = send().await?;
+        let resp = match send().await {
+            Ok(r) => r,
+            Err(e) => {
+                bail!(format_network_error(&e));
+            }
+        };
         if resp.status().is_success() {
             return Ok(resp);
         }
@@ -184,7 +227,8 @@ where
         let retryable = status == reqwest::StatusCode::TOO_MANY_REQUESTS
             || status == reqwest::StatusCode::BAD_GATEWAY
             || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
-            || status == reqwest::StatusCode::GATEWAY_TIMEOUT;
+            || status == reqwest::StatusCode::GATEWAY_TIMEOUT
+            || status.as_u16() == 529;
 
         if !retryable
             || attempt == MAX_RETRIES
@@ -306,5 +350,38 @@ mod tests {
         let d = doy - (153 * mp + 2) / 5 + 1;
         let m = mp + if mp < 10 { 3 } else { -9 };
         ((y + if m <= 2 { 1 } else { 0 }) as i32, m as u32, d as u32)
+    }
+
+    #[test]
+    fn formats_401_with_auth_guidance() {
+        let msg = format_http_error("claude", reqwest::StatusCode::UNAUTHORIZED, "invalid token");
+        assert!(msg.contains("auth failed (401)"));
+        assert!(msg.contains("luma sync"));
+    }
+
+    #[test]
+    fn formats_403_with_permission_guidance() {
+        let msg = format_http_error("openai", reqwest::StatusCode::FORBIDDEN, "access denied");
+        assert!(msg.contains("access denied (403)"));
+        assert!(msg.contains("permissions"));
+    }
+
+    #[test]
+    fn formats_529_overloaded() {
+        let status = reqwest::StatusCode::from_u16(529).unwrap();
+        let msg = format_http_error("claude", status, "overloaded");
+        assert!(msg.contains("overloaded (529)"));
+        assert!(msg.contains("retry shortly"));
+    }
+
+    #[test]
+    fn formats_unknown_status_as_raw() {
+        let msg = format_http_error(
+            "openai",
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "something broke",
+        );
+        assert!(msg.contains("500"));
+        assert!(msg.contains("something broke"));
     }
 }
