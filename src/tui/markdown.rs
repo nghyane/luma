@@ -146,11 +146,22 @@ fn detect_fence(raw: &str) -> Option<&str> {
 }
 
 fn is_horizontal_rule(trimmed: &str) -> bool {
-    let stripped: String = trimmed.chars().filter(|c| *c != ' ').collect();
-    stripped.len() >= 3
-        && (stripped.chars().all(|c| c == '-')
-            || stripped.chars().all(|c| c == '*')
-            || stripped.chars().all(|c| c == '_'))
+    let mut count = 0u32;
+    let mut rule_char = None;
+    for c in trimmed.chars() {
+        if c == ' ' {
+            continue;
+        }
+        match rule_char {
+            None if c == '-' || c == '*' || c == '_' => {
+                rule_char = Some(c);
+                count += 1;
+            }
+            Some(rc) if c == rc => count += 1,
+            _ => return false,
+        }
+    }
+    count >= 3
 }
 
 struct ListCapture {

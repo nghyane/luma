@@ -142,7 +142,7 @@ pub fn highlight_code_with_lang(code: &str, lang: Option<&str>) -> SmallVec<[Spa
 }
 
 fn find_comment_start(code: &str, lang: Option<&str>) -> Option<usize> {
-    match normalise_lang(lang) {
+    match lang {
         Some("py") => code
             .match_indices('#')
             .map(|(i, _)| i)
@@ -464,12 +464,22 @@ fn keywords_for(lang: Option<&str>) -> &'static [&'static str] {
     }
 }
 
-fn normalise_lang(lang: Option<&str>) -> Option<&str> {
-    match lang?.trim().to_ascii_lowercase().as_str() {
-        "rust" | "rs" => Some("rust"),
-        "python" | "py" => Some("py"),
-        "javascript" | "js" | "typescript" | "ts" | "tsx" | "jsx" => Some("js"),
-        _ => None,
+fn normalise_lang(lang: Option<&str>) -> Option<&'static str> {
+    let s = lang?.trim();
+    if s.eq_ignore_ascii_case("rust") || s.eq_ignore_ascii_case("rs") {
+        Some("rust")
+    } else if s.eq_ignore_ascii_case("python") || s.eq_ignore_ascii_case("py") {
+        Some("py")
+    } else if s.eq_ignore_ascii_case("javascript")
+        || s.eq_ignore_ascii_case("js")
+        || s.eq_ignore_ascii_case("typescript")
+        || s.eq_ignore_ascii_case("ts")
+        || s.eq_ignore_ascii_case("tsx")
+        || s.eq_ignore_ascii_case("jsx")
+    {
+        Some("js")
+    } else {
+        None
     }
 }
 
