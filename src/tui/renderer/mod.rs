@@ -251,8 +251,9 @@ impl Renderer {
         self.prev_hashes.resize(total_rows, 0);
         let mut any_diff = false;
 
-        // Mode 2026 (synchronized output) — not supported on Windows conhost.
-        #[cfg(not(windows))]
+        // Synchronized output (Mode 2026) — prevents flicker by batching
+        // all row updates into a single visible frame. Terminals that don't
+        // support it (e.g. legacy conhost) silently ignore these sequences.
         let _ = write!(self.out, "\x1b[?2026h");
         let _ = write!(self.out, "\x1b[?25l");
         for row in 0..self.buf.height {
@@ -268,7 +269,6 @@ impl Renderer {
             let _ = write!(self.out, "\x1b[{row};{col}H\x1b[?25h");
             any_diff = true;
         }
-        #[cfg(not(windows))]
         let _ = write!(self.out, "\x1b[?2026l");
         if any_diff {
             self.out.flush()?;
