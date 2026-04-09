@@ -1,6 +1,6 @@
 [package]
 name = "luma"
-version = "0.3.0-beta.8"
+version = "0.3.0-beta.9"
 edition = "2024"
 description = "Lightweight, token-optimized coding agent with multi-provider AI support (Anthropic Claude + OpenAI)"
 authors = ["Nghyane"]

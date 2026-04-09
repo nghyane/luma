@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0-beta.9] - 2026-04-09
+
+### Fixed
+- Spinner flicker on Windows status bar — synchronized output (Mode 2026) was disabled at compile time for all Windows builds; now enabled unconditionally (harmless on terminals that don't support it, fixes flicker on Windows Terminal)
+- Session resume fails with 400 Bad Request when previous session crashed mid-tool-execution — orphaned `tool_use` blocks without matching `tool_result` now repaired on `LoadSession`
+- Panic crashes leave terminal in broken state (raw mode, no cursor) — added global panic hook that restores terminal before exit
+- Crash diagnostics: panic info + backtrace written to `luma-crash.log` in temp directory
+
 ## [0.3.0-beta.8] - 2026-04-09
 
 ### Fixed
