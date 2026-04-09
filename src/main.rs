@@ -30,6 +30,39 @@ use std::process::Command;
 
 #[tokio::main]
 async fn main() {
+    // Restore terminal on panic so the shell isn't left in raw mode.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Restore terminal first — must happen before printing.
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
+            std::io::stderr(),
+            crossterm::event::DisableBracketedPaste,
+            crossterm::event::DisableMouseCapture,
+            crossterm::cursor::Show,
+            crossterm::terminal::LeaveAlternateScreen,
+        );
+
+        // Write crash log for diagnostics.
+        let crash_path = std::env::temp_dir().join("luma-crash.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&crash_path)
+        {
+            use std::io::Write;
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let _ = writeln!(f, "[{ts}] {info}");
+            let bt = std::backtrace::Backtrace::force_capture();
+            let _ = writeln!(f, "{bt}\n");
+        }
+
+        default_hook(info);
+    }));
+
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(|s| s.as_str());
 
