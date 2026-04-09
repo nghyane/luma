@@ -45,8 +45,8 @@ pub mod icon {
     pub const WARN: &str = "!";
     pub const INFO: &str = "·";
 
-    /// Spinner frames — growing star, bounce forward+reverse (Claude Code style).
-    pub const SPINNER: &[&str] = &["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
+    /// Spinner frames — braille dots cycle (all Narrow east_asian_width, safe on CJK terminals).
+    pub const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 }
 
 /// Horizontal padding inside output/input regions (cells).
