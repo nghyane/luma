@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-beta.1] - 2026-04-09
+
+### Added
+- Myers O(nd) diff algorithm replacing LCS O(n*m) — faster diffs for large files
+- Diff stats in tool output (`Updated file.rs +5 -3`)
+- Actionable error messages for 401, 403, 429, 529 HTTP status codes with provider-specific guidance
+- Network error formatting — connection failures and timeouts include troubleshooting hints
+- 529 (Anthropic overloaded) treated as retryable with automatic backoff
+- Stream-level retry with mid-turn session save — recovers from transient network failures
+- Global panic hook — restores terminal (raw mode, cursor, alternate screen) on any crash
+- Crash diagnostics — panic info + backtrace written to `luma-crash.log` in temp directory
+- Dynamic input height — prompt area grows/shrinks with content, scroll indicator when overflow
+
+### Changed
+- `install.ps1` rewritten for Windows PowerShell 5.1+ — uses `curl.exe`/`tar.exe` (Win10 built-in), `WM_SETTINGCHANGE` broadcast for cmd.exe PATH, TLS 1.2 forced
+- `install.sh` rewritten with structured functions, `curl`/`wget` fallback, `unzip`/`python3` fallback, colored output, fish shell support
+- Self-update adds `-ExecutionPolicy Bypass` and TLS 1.2 for Windows PowerShell 5.1
+- Scroll bounce detection no longer depends on stale cached layout size — uses `last_bottom_max` from the most recent scroll-down that hit bottom
+- `ViewState` removes `cached_total` field; scroll operations read `layout.total_lines()` directly
+- Synchronized output (Mode 2026) enabled on all platforms — fixes spinner flicker on Windows Terminal, harmlessly ignored by legacy terminals
+
+### Fixed
+- Mouse scroll not working on Windows — removed region bounds guard that failed with crossterm's `parse_relative_y` on Windows
+- Scroll-up during streaming silently ignored — stale `cached_total` caused bounce detection to always trigger, preventing scroll lock from engaging
+- Mouse scroll and keyboard input dropped during heavy streaming — `blocking_send` replaces `try_send` in stdin reader
+- Session resume fails with 400 Bad Request after crash — orphaned `tool_use` blocks now repaired with `[aborted]` placeholder on `LoadSession`
+- Spinner flicker on Windows status bar — Mode 2026 was compile-time disabled for all Windows builds
+- Panic crashes leave terminal in broken raw mode state
+- `luma update` fails on Windows PowerShell 5.1 (`New-TemporaryFile`, inline `if`, `Expand-Archive` incompatible)
+- Install scripts not updating PATH for cmd.exe
+- Fish shell PATH hint using wrong syntax (`export` instead of `fish_add_path`)
+- Install script fails on systems without `curl`
+- Clipboard copy using OSC 52 — now uses `pbcopy` on macOS, `clip.exe` on Windows
+- Prompt input not wrapping at region boundary
+- Cursor position not tracking actual wrap boundaries
+- Non-portable escape sequences crash on Windows conhost
+- Cancel in-flight turn not triggered on mode switch
+- Partial SSE stream message lost on incomplete stream
+
 ## [0.3.0-beta.9] - 2026-04-09
 
 ### Fixed

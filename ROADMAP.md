@@ -1,6 +1,6 @@
 # Roadmap
 
-Current: ~12K lines Rust, 290 tests, 3 providers, 12 tools. Cross-platform (macOS, Linux, Windows).
+Current: ~20K lines Rust, 360 tests, 3 providers, 12 tools. Cross-platform (macOS, Linux, Windows).
 
 ## v0.2 — Done
 
@@ -37,16 +37,22 @@ Current: ~12K lines Rust, 290 tests, 3 providers, 12 tools. Cross-platform (macO
 - [x] **Install/update polish** — PATH handling and platform-aware self-update
 - [x] Legacy cleanup — removed custom deserializer, OutputLog, viewport, composite_overlay
 
-## v0.4 — Performance & Polish
+## v0.4 — Performance & Polish — In Progress
 
 - [x] Diff algorithm: Myers O(nd) replacing LCS O(n*m)
 - [x] Diff stats in tool output ("Updated file.rs +5 -3")
+- [x] Provider error surfacing — clearer transient/network failure messages in TUI
+- [x] Rate limit UX — surface provider `429` errors clearly in TUI with actionable guidance
+- [x] Stream retry with mid-turn save — automatic recovery from transient failures
+- [x] Install scripts rewrite — cross-version PowerShell/bash compatibility
+- [x] Scroll stability — eliminate stale state in bounce detection during streaming
+- [x] Windows rendering — synchronized output, clipboard, escape sequence guards
+- [x] Crash safety — panic hook, crash log, orphaned tool_use repair on resume
+- [x] Input polish — dynamic height, wrap, cursor tracking
 - [ ] Bare URL highlighting in markdown
 - [ ] Streaming resize stability across providers
 - [ ] Large-session profiling (65K+ tokens) — render throughput, memory, freeze points
 - [ ] Tool output polish — clearer summaries and more consistent formatting
-- [x] Provider error surfacing — clearer transient/network failure messages in TUI
-- [x] Rate limit UX — surface provider `429` errors clearly in TUI with actionable guidance
 
 ## v0.5 — UX & Extensibility
 
