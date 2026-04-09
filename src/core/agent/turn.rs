@@ -1,7 +1,8 @@
-/// Turn execution — auth, provider, tool loop, summaries.
+/// Turn execution — auth, provider, tool loop, summaries, mid-turn save.
 use super::AgentConfig;
 use crate::core::provider::Provider;
 use crate::core::registry::Registry;
+use crate::core::session::Session;
 use crate::core::types::{Message, ToolCall};
 use crate::event::Event;
 use anyhow::Result;
@@ -9,15 +10,15 @@ use tokio::sync::mpsc;
 
 const MAX_ITERATIONS: usize = 50;
 const MAX_RESULT_LEN: usize = 32_000;
+const STREAM_RETRIES: u8 = 2;
+const STREAM_RETRY_DELAY_SECS: u64 = 2;
 
 /// Run a chat turn: resolve auth → build provider → run tool loop.
 /// Retries once on 401.
 pub async fn run_chat_turn(
-    messages: &mut Vec<Message>,
+    session: &mut Session,
     config: &AgentConfig,
     registry: &Registry,
-    session_id: &str,
-    session_usage: &mut crate::core::session::SessionUsage,
     tx: &mpsc::Sender<Event>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
@@ -29,19 +30,9 @@ pub async fn run_chat_turn(
     };
 
     let auth = auth::resolve(provider_kind).await?;
-    let provider = build_provider(config, &auth, session_id);
+    let provider = build_provider(config, &auth, &session.id);
 
-    match run_turn(
-        messages,
-        &*provider,
-        registry,
-        session_id,
-        session_usage,
-        tx,
-        cancel.clone(),
-    )
-    .await
-    {
+    match run_turn(session, &*provider, registry, tx, cancel.clone()).await {
         Ok(()) => Ok(()),
         Err(e) if e.to_string().contains("401") || e.to_string().contains("Unauthorized") => {
             let _ = tx
@@ -52,17 +43,8 @@ pub async fn run_chat_turn(
                 .await;
             auth::clear_cached(provider_kind);
             let auth = auth::resolve(provider_kind).await?;
-            let provider = build_provider(config, &auth, session_id);
-            run_turn(
-                messages,
-                &*provider,
-                registry,
-                session_id,
-                session_usage,
-                tx,
-                cancel,
-            )
-            .await
+            let provider = build_provider(config, &auth, &session.id);
+            run_turn(session, &*provider, registry, tx, cancel).await
         }
         Err(e) => Err(e),
     }
@@ -101,42 +83,119 @@ fn build_provider(
     }
 }
 
+/// Whether an error is a transient stream failure worth retrying.
+fn is_stream_retryable(err: &anyhow::Error) -> bool {
+    let msg = err.to_string();
+    msg.contains("stream timeout")
+        || msg.contains("missing message_stop")
+        || msg.contains("missing [DONE]")
+        || msg.contains("missing response.completed")
+        || msg.contains("connection reset")
+        || msg.contains("connection closed")
+        || msg.contains("broken pipe")
+        || msg.contains("unexpected EOF")
+}
+
+/// Stream with automatic retry on transient network failures.
+///
+/// On a retryable failure, notifies the UI via ProviderRetry event and
+/// re-sends the request. The caller's messages are immutable here —
+/// only the caller (run_turn) mutates session state.
+async fn stream_with_retry(
+    messages: &[Message],
+    provider: &dyn Provider,
+    schemas: &[crate::core::types::ToolSchema],
+    server_schemas: &[serde_json::Value],
+    resolve_image: &crate::core::provider::ImageResolver,
+    tx: &mpsc::Sender<Event>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<(Message, crate::core::types::Usage)> {
+    let mut last_err: Option<anyhow::Error> = None;
+
+    for attempt in 0..=STREAM_RETRIES {
+        if cancel.is_cancelled() {
+            anyhow::bail!("Aborted");
+        }
+
+        if attempt > 0 {
+            if let Some(ref e) = last_err {
+                crate::dbg_log!("stream retry attempt {attempt}: {e}");
+            }
+            let _ = tx
+                .send(Event::ProviderRetry {
+                    provider: provider.name().to_owned(),
+                    delay_secs: STREAM_RETRY_DELAY_SECS,
+                    attempt,
+                    max_attempts: STREAM_RETRIES + 1,
+                })
+                .await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(STREAM_RETRY_DELAY_SECS)) => {}
+                _ = cancel.cancelled() => anyhow::bail!("Aborted"),
+            }
+        }
+
+        match provider
+            .stream(
+                messages,
+                schemas,
+                server_schemas,
+                resolve_image,
+                tx.clone(),
+                cancel.clone(),
+            )
+            .await
+        {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                if !is_stream_retryable(&e) || attempt == STREAM_RETRIES {
+                    return Err(e);
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+
+    // Unreachable — loop returns or breaks above.
+    anyhow::bail!("stream failed after retries")
+}
+
 /// Run one turn: provider call → tool execution loop.
 async fn run_turn(
-    messages: &mut Vec<Message>,
+    session: &mut Session,
     provider: &dyn Provider,
     registry: &Registry,
-    session_id: &str,
-    session_usage: &mut crate::core::session::SessionUsage,
     tx: &mpsc::Sender<Event>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let schemas = registry.schemas();
     let server_schemas = provider.server_tool_schemas(registry.server_capabilities());
-    let resolve_image = crate::core::session::image_resolver(session_id);
+    let resolve_image = crate::core::session::image_resolver(&session.id);
 
     for _ in 0..MAX_ITERATIONS {
         if cancel.is_cancelled() {
             anyhow::bail!("Aborted");
         }
 
-        let (response, usage) = provider
-            .stream(
-                messages,
-                &schemas,
-                &server_schemas,
-                &*resolve_image,
-                tx.clone(),
-                cancel.clone(),
-            )
-            .await?;
+        let (response, usage) = stream_with_retry(
+            &session.messages,
+            provider,
+            &schemas,
+            &server_schemas,
+            &*resolve_image,
+            tx,
+            &cancel,
+        )
+        .await?;
 
-        session_usage.input_tokens += usage.input_tokens;
-        session_usage.output_tokens += usage.output_tokens;
-        session_usage.cache_read += usage.cache_read.unwrap_or(0);
-        session_usage.cache_write += usage.cache_write.unwrap_or(0);
+        session.usage.input_tokens += usage.input_tokens;
+        session.usage.output_tokens += usage.output_tokens;
+        session.usage.cache_read += usage.cache_read.unwrap_or(0);
+        session.usage.cache_write += usage.cache_write.unwrap_or(0);
 
-        messages.push(response.clone());
+        session.messages.push(response.clone());
+        // Mid-turn save: persist after each assistant message.
+        session.save();
 
         if cancel.is_cancelled() {
             anyhow::bail!("Aborted");
@@ -157,8 +216,10 @@ async fn run_turn(
                 truncated.truncate(MAX_RESULT_LEN);
                 truncated.push_str("\n[truncated]");
             }
-            messages.push(Message::tool(tc_id, truncated));
+            session.messages.push(Message::tool(tc_id, truncated));
         }
+        // Mid-turn save: persist after tool results.
+        session.save();
 
         if aborted {
             anyhow::bail!("Aborted");

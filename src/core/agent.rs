@@ -91,11 +91,9 @@ async fn agent_loop(
 
                 let turn_start = std::time::Instant::now();
                 let result = turn::run_chat_turn(
-                    &mut session.messages,
+                    &mut session,
                     &config,
                     &registry,
-                    &session.id,
-                    &mut session.usage,
                     &event_tx,
                     cancel,
                 )
