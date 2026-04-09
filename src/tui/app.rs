@@ -66,10 +66,17 @@ struct Regions {
     input: Region,
 }
 
+const MIN_INPUT_HEIGHT: u16 = 5;
+const INPUT_CHROME: u16 = 3; // top bar + mode line + bottom border
+
 fn compute_regions(w: u16, h: u16) -> Regions {
+    compute_regions_with_input(w, h, MIN_INPUT_HEIGHT)
+}
+
+/// Compute regions with a specific input height.
+fn compute_regions_with_input(w: u16, h: u16, ih: u16) -> Regions {
     let mx = OUTER_MARGIN;
     let sh = 2u16;
-    let ih = 5u16;
     let oh = h.saturating_sub(sh + ih).max(1);
     let inner_w = w.saturating_sub(mx * 2);
     Regions {

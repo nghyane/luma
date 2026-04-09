@@ -113,6 +113,7 @@ impl super::App {
     }
 
     pub(super) fn render(&mut self) {
+        self.reconcile_input_height();
         match &self.screen {
             super::state::Screen::Welcome { lines } => {
                 self.renderer.set_overlay(None);
@@ -135,6 +136,43 @@ impl super::App {
         self.renderer.set_lines("input", &self.build_input_lines());
         self.update_cursor();
         let _ = self.renderer.flush();
+    }
+
+    /// Grow or shrink the input region based on wrapped prompt line count.
+    fn reconcile_input_height(&mut self) {
+        let (term_w, term_h) = (
+            self.regions.output.width + super::OUTER_MARGIN * 2,
+            self.regions.output.height + self.regions.input.height + self.regions.status.height,
+        );
+        let bar_w = crate::tui::text::display_width(&format!("{}  ", icon::PROMPT));
+        let content_w = (self.regions.input.width as usize).saturating_sub(bar_w);
+        let wrapped = self.prompt_wrapped_count(content_w);
+        let max_input = (term_h / 5 * 2).max(super::MIN_INPUT_HEIGHT);
+        let desired = (wrapped as u16 + super::INPUT_CHROME).clamp(super::MIN_INPUT_HEIGHT, max_input);
+        if desired == self.regions.input.height {
+            return;
+        }
+        self.regions = super::compute_regions_with_input(term_w, term_h, desired);
+        self.renderer
+            .update_region("output", self.regions.output.clone());
+        self.renderer
+            .update_region("status", self.regions.status.clone());
+        self.renderer
+            .update_region("input", self.regions.input.clone());
+        self.view.set_size(
+            self.regions.output.content_width() as usize,
+            self.regions.output.content_height() as usize,
+        );
+    }
+
+    /// Count how many visual lines the prompt wraps to at `content_w`.
+    fn prompt_wrapped_count(&self, content_w: usize) -> usize {
+        use crate::tui::text::wrap_line;
+        let raw = self.ui.prompt.lines();
+        raw.iter()
+            .map(|pl| wrap_line(pl, content_w, None).len())
+            .sum::<usize>()
+            .max(1)
     }
 
     fn reconcile_scrollbar_width(&mut self) {
@@ -233,7 +271,15 @@ impl super::App {
         let visible: Vec<&Line> = wrapped.iter().skip(scroll).take(content_slots).collect();
 
         let mut lines = Vec::with_capacity(total_h);
-        lines.push(bar_empty.clone());
+        // Top bar — show scroll indicator when content is scrolled.
+        if scroll > 0 {
+            lines.push(Line::new(smallvec![
+                Span::deco(bar.to_owned(), palette::ACCENT),
+                Span::new(format!(" {scroll} more"), palette::DIM),
+            ]));
+        } else {
+            lines.push(bar_empty.clone());
+        }
         for vl in &visible {
             let mut spans = smallvec![Span::deco(bar_prefix.clone(), palette::ACCENT)];
             spans.extend(vl.spans.iter().cloned());
