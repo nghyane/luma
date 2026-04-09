@@ -286,8 +286,10 @@ impl Provider for CodexProvider {
                 .into_values()
                 .filter(|tc| !tc.id.is_empty() && !tc.function.name.is_empty())
                 .collect();
-            if !saw_completed {
-                bail!("Codex SSE stream ended without response.completed");
+            // Stream ended without response.completed — network cut, server error, etc.
+            // Return partial content so the turn is not silently lost.
+            if !saw_completed && msg.text().is_empty() && tool_calls.is_empty() {
+                bail!("Codex stream ended with no content (missing response.completed)");
             }
             if !tool_calls.is_empty() {
                 msg.tool_calls = Some(tool_calls);

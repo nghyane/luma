@@ -164,8 +164,10 @@ impl Provider for OpenAIProvider {
             )
             .await?;
 
-            if !outcome.saw_done {
-                anyhow::bail!("OpenAI SSE stream ended without [DONE]");
+            // Stream ended without [DONE] — network cut, server error, etc.
+            // Return partial content so the turn is not silently lost.
+            if !outcome.saw_done && text.is_empty() && tool_map.is_empty() {
+                anyhow::bail!("OpenAI stream ended with no content (missing [DONE])");
             }
 
             let tool_calls: Vec<ToolCall> = tool_map
