@@ -85,15 +85,15 @@ fn build_provider(
 
 /// Whether an error is a transient stream failure worth retrying.
 fn is_stream_retryable(err: &anyhow::Error) -> bool {
-    let msg = err.to_string();
-    msg.contains("stream timeout")
-        || msg.contains("missing message_stop")
-        || msg.contains("missing [DONE]")
-        || msg.contains("missing response.completed")
-        || msg.contains("connection reset")
-        || msg.contains("connection closed")
-        || msg.contains("broken pipe")
-        || msg.contains("unexpected EOF")
+    // Typed: providers emit StreamInterrupted for recoverable failures.
+    if err.downcast_ref::<crate::provider::sse::StreamInterrupted>().is_some() {
+        return true;
+    }
+    // Reqwest transport errors (connection reset, broken pipe, etc.)
+    if let Some(re) = err.downcast_ref::<reqwest::Error>() {
+        return re.is_connect() || re.is_timeout() || re.is_request();
+    }
+    false
 }
 
 /// Stream with automatic retry on transient network failures.
@@ -424,5 +424,24 @@ mod tests {
             "took {}ms, expected parallel",
             elapsed.as_millis()
         );
+    }
+
+    #[test]
+    fn stream_interrupted_is_retryable() {
+        let err: anyhow::Error =
+            crate::provider::sse::StreamInterrupted("timeout".into()).into();
+        assert!(is_stream_retryable(&err));
+    }
+
+    #[test]
+    fn auth_error_is_not_retryable() {
+        let err = anyhow::anyhow!("401 Unauthorized");
+        assert!(!is_stream_retryable(&err));
+    }
+
+    #[test]
+    fn abort_is_not_retryable() {
+        let err = anyhow::anyhow!("Aborted");
+        assert!(!is_stream_retryable(&err));
     }
 }

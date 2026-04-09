@@ -167,7 +167,9 @@ impl Provider for OpenAIProvider {
             // Stream ended without [DONE] — network cut, server error, etc.
             // Return partial content so the turn is not silently lost.
             if !outcome.saw_done && text.is_empty() && tool_map.is_empty() {
-                anyhow::bail!("OpenAI stream ended with no content (missing [DONE])");
+                return Err(crate::provider::sse::StreamInterrupted(
+                    "OpenAI stream ended with no content".into(),
+                ).into());
             }
 
             let tool_calls: Vec<ToolCall> = tool_map

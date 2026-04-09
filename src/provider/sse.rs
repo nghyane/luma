@@ -4,6 +4,15 @@ use anyhow::{Result, bail};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// Transient stream failure — safe to retry.
+///
+/// Emitted when the SSE connection drops mid-stream (timeout, network cut,
+/// incomplete response). Typed so retry logic can downcast instead of
+/// matching error message strings.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct StreamInterrupted(pub String);
+
 /// A parsed SSE event with type and JSON data.
 pub struct SseEvent {
     #[allow(dead_code)]
@@ -53,7 +62,7 @@ pub async fn post_sse(
         let chunk = tokio::select! {
             c = response.chunk() => c?,
             _ = cancel.cancelled() => { bail!("Aborted"); }
-            _ = tokio::time::sleep(chunk_timeout) => { bail!("SSE stream timeout — no data for 120s"); }
+            _ = tokio::time::sleep(chunk_timeout) => { return Err(StreamInterrupted("SSE stream timeout — no data for 120s".into()).into()); }
         };
         let Some(chunk) = chunk else {
             break;

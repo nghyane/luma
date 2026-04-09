@@ -320,7 +320,9 @@ impl Provider for ClaudeProvider {
             // Stream ended without message_stop — network cut, server error, etc.
             // Return partial content so the turn is not silently lost.
             if !saw_message_stop && text.is_empty() && tool_calls.is_empty() {
-                anyhow::bail!("Claude stream ended with no content (missing message_stop)");
+                return Err(crate::provider::sse::StreamInterrupted(
+                    "Claude stream ended with no content".into(),
+                ).into());
             }
 
             let mut msg = Message::assistant(text);

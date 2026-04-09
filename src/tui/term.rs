@@ -11,6 +11,7 @@ pub fn copy_to_clipboard(out: &mut impl Write, text: &str) -> io::Result<()> {
     write!(out, "\x1b]52;c;{b64}\x1b\\")
 }
 
+/// Copy text to system clipboard via `clip.exe`.
 #[cfg(windows)]
 pub fn copy_to_clipboard(_out: &mut impl Write, text: &str) -> io::Result<()> {
     use std::process::{Command, Stdio};

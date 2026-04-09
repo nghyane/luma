@@ -137,7 +137,11 @@ impl Provider for CodexProvider {
                 let chunk = tokio::select! {
                     c = response.chunk() => c?,
                     _ = cancel.cancelled() => { bail!("Aborted"); }
-                    _ = tokio::time::sleep(chunk_timeout) => { bail!("SSE stream timeout — no data for 120s"); }
+                    _ = tokio::time::sleep(chunk_timeout) => {
+                        return Err(crate::provider::sse::StreamInterrupted(
+                            "SSE stream timeout — no data for 120s".into(),
+                        ).into());
+                    }
                 };
                 let Some(chunk) = chunk else { break };
                 buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -289,7 +293,9 @@ impl Provider for CodexProvider {
             // Stream ended without response.completed — network cut, server error, etc.
             // Return partial content so the turn is not silently lost.
             if !saw_completed && msg.text().is_empty() && tool_calls.is_empty() {
-                bail!("Codex stream ended with no content (missing response.completed)");
+                return Err(crate::provider::sse::StreamInterrupted(
+                    "Codex stream ended with no content".into(),
+                ).into());
             }
             if !tool_calls.is_empty() {
                 msg.tool_calls = Some(tool_calls);
