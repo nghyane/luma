@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-beta.6] - 2026-04-09
+
+### Fixed
+- Table detection false-positive on tree/diagram lines — `is_table_line()` matched nested ASCII trees like `|   |-- lib.rs` (2 pipes, starts with `|`); tightened to require start AND end with `|` plus at least 3 pipes (two columns minimum)
+- Wide tables overflow terminal without wrapping — `flush_table()` pushed rendered lines directly, bypassing `wrap_line()`; now wraps table rows at terminal width like all other content
+
 ## [0.4.0-beta.5] - 2026-04-09
 
 ### Fixed
