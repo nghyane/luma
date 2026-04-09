@@ -234,10 +234,18 @@ impl App {
             crossterm::event::EnableBracketedPaste,
             crossterm::cursor::Hide,
         )?;
+        // Disable alternate scroll mode: prevents the terminal from converting
+        // mouse wheel events to cursor Up/Down key events in alternate screen.
+        // Without this, Windows Terminal sends Up/Down keys instead of
+        // ScrollUp/ScrollDown mouse events, breaking scroll.
+        let _ = write!(out, "\x1b[?1007l");
+        out.flush()?;
         Ok(())
     }
 
     fn exit_terminal(out: &mut impl Write) {
+        // Re-enable alternate scroll mode before leaving alternate screen.
+        let _ = write!(out, "\x1b[?1007h");
         let _ = crossterm::execute!(
             out,
             crossterm::event::DisableBracketedPaste,

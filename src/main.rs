@@ -35,6 +35,10 @@ async fn main() {
     std::panic::set_hook(Box::new(move |info| {
         // Restore terminal first — must happen before printing.
         let _ = crossterm::terminal::disable_raw_mode();
+        {
+            use std::io::Write;
+            let _ = write!(std::io::stderr(), "\x1b[?1007h");
+        }
         let _ = crossterm::execute!(
             std::io::stderr(),
             crossterm::event::DisableBracketedPaste,
