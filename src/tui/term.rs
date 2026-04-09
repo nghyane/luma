@@ -1,10 +1,27 @@
-/// Low-level terminal: clipboard via OSC 52, buffered stdout.
+/// Low-level terminal: clipboard, buffered stdout.
 use std::io::{self, BufWriter, Stdout, Write};
 
-/// Copy text to system clipboard via OSC 52.
+/// Copy text to system clipboard.
+///
+/// On Unix, uses OSC 52 escape sequence (widely supported).
+/// On Windows, pipes to `clip.exe` since OSC 52 is not supported by conhost.
+#[cfg(not(windows))]
 pub fn copy_to_clipboard(out: &mut impl Write, text: &str) -> io::Result<()> {
     let b64 = base64_encode(text.as_bytes());
     write!(out, "\x1b]52;c;{b64}\x1b\\")
+}
+
+#[cfg(windows)]
+pub fn copy_to_clipboard(_out: &mut impl Write, text: &str) -> io::Result<()> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("clip")
+        .stdin(Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes())?;
+    }
+    child.wait()?;
+    Ok(())
 }
 
 /// Create a buffered stdout writer.

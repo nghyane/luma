@@ -115,15 +115,18 @@ fn parse_inline_inner(text: &str, streaming: bool) -> SmallVec<[Span; 4]> {
             continue;
         }
 
-        // [label](url) → OSC8 hyperlink
+        // [label](url) → OSC8 hyperlink (Unix) or plain label (Windows)
         if bytes[pos] == b'[' {
             if let Some(close) = text[pos..].find("](") {
                 let label = &text[pos + 1..pos + close];
                 let url_start = pos + close + 2;
                 if let Some(url_end) = text[url_start..].find(')') {
                     let url = &text[url_start..url_start + url_end];
-                    let osc = format!("\x1b]8;;{url}\x1b\\{label}\x1b]8;;\x1b\\");
-                    spans.push(Span::new(osc, palette::ACCENT));
+                    #[cfg(not(windows))]
+                    let display = format!("\x1b]8;;{url}\x1b\\{label}\x1b]8;;\x1b\\");
+                    #[cfg(windows)]
+                    let display = format!("{label} ({url})");
+                    spans.push(Span::new(display, palette::ACCENT));
                     pos = url_start + url_end + 1;
                     continue;
                 }
