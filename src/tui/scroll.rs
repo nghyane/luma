@@ -8,6 +8,9 @@ pub struct ScrollView {
     /// True after scroll_down reached bottom. Used to detect trackpad
     /// bounce: a small scroll_up right after reaching bottom via down.
     just_hit_bottom: bool,
+    /// The max_scroll value from the last scroll_down that hit bottom.
+    /// Used for bounce detection so scroll_up doesn't need a fresh max.
+    last_bottom_max: usize,
 }
 
 impl ScrollView {
@@ -17,15 +20,20 @@ impl ScrollView {
             offset: 0,
             is_user_scrolled: false,
             just_hit_bottom: false,
+            last_bottom_max: 0,
         }
     }
 
     /// Scroll up by `n` lines. If we just arrived at bottom via scroll_down
     /// and this scroll is small (≤ threshold), treat as trackpad bounce.
-    pub fn up(&mut self, n: usize, max_scroll: usize, threshold: usize) {
+    pub fn up(&mut self, n: usize, threshold: usize) {
         self.offset = self.offset.saturating_sub(n);
-        if self.just_hit_bottom && n <= threshold && self.offset + threshold >= max_scroll {
-            // Trackpad bounce — stay in auto-scroll mode
+        if self.just_hit_bottom
+            && self.last_bottom_max > 0
+            && n <= threshold
+            && self.offset + threshold >= self.last_bottom_max
+        {
+            // Trackpad bounce — stay in auto-scroll mode.
             self.just_hit_bottom = false;
         } else {
             self.is_user_scrolled = true;
@@ -39,6 +47,7 @@ impl ScrollView {
         if self.offset >= max_scroll {
             self.is_user_scrolled = false;
             self.just_hit_bottom = true;
+            self.last_bottom_max = max_scroll;
         }
     }
 
@@ -76,6 +85,7 @@ impl ScrollView {
         self.offset = 0;
         self.is_user_scrolled = false;
         self.just_hit_bottom = false;
+        self.last_bottom_max = 0;
     }
 }
 
@@ -94,8 +104,7 @@ mod tests {
     fn up_marks_user_scrolled() {
         let mut s = ScrollView::new();
         s.offset = 50;
-        // Not just_hit_bottom → always marks user_scrolled
-        s.up(3, 100, 3);
+        s.up(3, 3);
         assert_eq!(s.offset, 47);
         assert!(s.is_user_scrolled);
     }
@@ -110,7 +119,7 @@ mod tests {
         assert!(!s.is_user_scrolled);
         assert!(!s.just_hit_bottom); // auto_scroll doesn't set this
 
-        s.up(3, 80, 3);
+        s.up(3, 3);
         assert_eq!(s.offset, 77);
         assert!(
             s.is_user_scrolled,
@@ -122,7 +131,7 @@ mod tests {
     fn up_clamps_to_zero() {
         let mut s = ScrollView::new();
         s.offset = 2;
-        s.up(10, 100, 3);
+        s.up(10, 3);
         assert_eq!(s.offset, 0);
     }
 
@@ -141,20 +150,21 @@ mod tests {
         let mut s = ScrollView::new();
         s.is_user_scrolled = true;
         s.offset = 70;
-        // Scroll down to bottom
+        // Scroll down to bottom (max=80)
         s.down(100, 80);
         assert_eq!(s.offset, 80);
         assert!(!s.is_user_scrolled);
         assert!(s.just_hit_bottom);
+        assert_eq!(s.last_bottom_max, 80);
 
         // Trackpad bounce: small scroll up
-        s.up(3, 80, 3);
+        s.up(3, 3);
         assert_eq!(s.offset, 77);
         assert!(!s.is_user_scrolled, "bounce should not break auto-scroll");
         assert!(!s.just_hit_bottom, "bounce flag consumed");
 
         // Second scroll up: no longer bounce
-        s.up(3, 80, 3);
+        s.up(3, 3);
         assert_eq!(s.offset, 74);
         assert!(s.is_user_scrolled, "second scroll up is intentional");
     }
@@ -217,8 +227,7 @@ mod tests {
         assert!(!s.is_user_scrolled);
 
         // User scrolls up 3 lines (between frames)
-        let max = 50usize.saturating_sub(height); // 30 — stale cached_total
-        s.up(3, max, 3);
+        s.up(3, 3);
         assert_eq!(s.offset, 27);
         assert!(s.is_user_scrolled, "scroll up must lock");
 
@@ -241,7 +250,7 @@ mod tests {
         assert!(s.is_user_scrolled, "frame 4: still locked");
     }
 
-    /// Simulate: user scrolls up with stale max, then content shrinks below offset.
+    /// Simulate: user scrolls up, then content shrinks below offset.
     #[test]
     fn clamp_after_content_shrink_resets_lock() {
         let height = 20;
@@ -252,7 +261,7 @@ mod tests {
         assert_eq!(s.offset, 80);
 
         // User scrolls up
-        s.up(30, 80, 3);
+        s.up(30, 3);
         assert_eq!(s.offset, 50);
         assert!(s.is_user_scrolled);
 
@@ -261,5 +270,37 @@ mod tests {
         // max = 5, offset clamped to 5, 5 >= 5 → is_user_scrolled = false
         assert_eq!(s.offset, 5);
         assert!(!s.is_user_scrolled, "at max after shrink → unlock");
+    }
+
+    /// Regression: scroll up during streaming must lock even when layout
+    /// hasn't been refreshed yet (last_bottom_max = 0 from auto_scroll).
+    #[test]
+    fn scroll_up_during_streaming_always_locks() {
+        let mut s = ScrollView::new();
+        // auto_scroll to bottom (doesn't set just_hit_bottom)
+        s.auto_scroll(50, 20);
+        assert_eq!(s.offset, 30);
+        assert!(!s.just_hit_bottom);
+
+        s.up(3, 3);
+        assert!(
+            s.is_user_scrolled,
+            "scroll up must lock during streaming"
+        );
+    }
+
+    /// Regression: bounce detection must not fire when last_bottom_max is 0
+    /// (e.g. never scrolled down manually, only auto-scrolled).
+    #[test]
+    fn bounce_requires_valid_last_bottom_max() {
+        let mut s = ScrollView::new();
+        s.just_hit_bottom = true;
+        s.last_bottom_max = 0; // never set by scroll_down
+        s.offset = 0;
+        s.up(3, 3);
+        assert!(
+            s.is_user_scrolled,
+            "must lock when last_bottom_max is 0"
+        );
     }
 }

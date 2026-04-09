@@ -8,7 +8,6 @@ use crate::tui::text::Line;
 pub struct ViewState {
     pub layout: Layout,
     pub scroll: ScrollView,
-    cached_total: usize,
 }
 
 impl ViewState {
@@ -16,17 +15,16 @@ impl ViewState {
         Self {
             layout: Layout::new(width, height),
             scroll: ScrollView::new(),
-            cached_total: 0,
         }
     }
 
     /// Refresh layout + auto-scroll. Call once per frame before reading.
     pub fn prepare_frame(&mut self, blocks: &[Block]) {
         self.layout.refresh(blocks, self.scroll.offset);
-        self.cached_total = self.layout.total_lines();
-        self.scroll
-            .auto_scroll(self.cached_total, self.layout.height());
-        self.scroll.clamp(self.cached_total, self.layout.height());
+        let total = self.layout.total_lines();
+        let height = self.layout.height();
+        self.scroll.auto_scroll(total, height);
+        self.scroll.clamp(total, height);
     }
 
     /// Collect visible lines into a Vec (for overlay composite).
@@ -47,23 +45,26 @@ impl ViewState {
         self.layout.set_size(width, height);
     }
 
+    /// Scroll up by `n` lines. Always marks as user-scrolled.
     pub fn scroll_up(&mut self, n: usize) {
-        let max = self.cached_total.saturating_sub(self.layout.height());
-        self.scroll.up(n, max, 3);
+        self.scroll.up(n, 3);
     }
 
+    /// Scroll down by `n` lines. Clears user-scrolled if at bottom.
     pub fn scroll_down(&mut self, n: usize) {
-        let max = self.cached_total.saturating_sub(self.layout.height());
+        let max = self.layout.total_lines().saturating_sub(self.layout.height());
         self.scroll.down(n, max);
     }
 
+    /// Jump to a specific offset.
     pub fn scroll_to(&mut self, offset: usize) {
-        let max = self.cached_total.saturating_sub(self.layout.height());
+        let max = self.layout.total_lines().saturating_sub(self.layout.height());
         self.scroll.set_offset(offset, max);
     }
 
+    /// (total_lines, view_height, offset).
     pub fn scroll_info(&self) -> (usize, usize, usize) {
-        (self.cached_total, self.layout.height(), self.scroll.offset)
+        (self.layout.total_lines(), self.layout.height(), self.scroll.offset)
     }
 
     pub fn hit_test_block(&self, screen_row: usize, region_row: usize) -> Option<usize> {
@@ -74,6 +75,5 @@ impl ViewState {
     pub fn clear(&mut self) {
         self.layout.clear();
         self.scroll.reset();
-        self.cached_total = 0;
     }
 }
