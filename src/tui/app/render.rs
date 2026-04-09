@@ -25,11 +25,11 @@ impl super::App {
         let col = ev.column + 1;
 
         match ev.kind {
-            MouseEventKind::ScrollUp if in_output(row) || in_input(row) => {
+            MouseEventKind::ScrollUp => {
                 self.view.scroll_up(SCROLL_STEP);
                 Action::Render
             }
-            MouseEventKind::ScrollDown if in_output(row) || in_input(row) => {
+            MouseEventKind::ScrollDown => {
                 self.view.scroll_down(SCROLL_STEP);
                 Action::Render
             }

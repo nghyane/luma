@@ -1,6 +1,6 @@
 /// Event dispatch — routes events to document (model) or view.
 use super::state::{PickerMode, RunState};
-use super::{ABORT_HINT_TICKS, Action};
+use super::{Action, ABORT_HINT_TICKS};
 use crate::config::models;
 use crate::event::Event;
 use crate::tui::picker::PickerAction;
