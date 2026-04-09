@@ -109,6 +109,11 @@ impl super::App {
         self.config.mode = new_mode;
         self.config.model = models::resolve_default(self.config.mode);
         crate::config::prefs::save_mode(self.config.mode);
+        // Cancel in-flight turn before shutting down — prevents orphan streaming.
+        if let Some(c) = self.agent.cancel.take() {
+            c.cancel();
+        }
+        self.agent.state = super::state::RunState::Idle;
         if let Some(tx) = self.agent.tx.take() {
             let _ = tx.try_send(AgentCommand::Shutdown);
         }
