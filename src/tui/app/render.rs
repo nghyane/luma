@@ -248,22 +248,17 @@ impl super::App {
         let raw_prompt = self.ui.prompt.lines();
         let mut wrapped: Vec<Line> = Vec::new();
         for pl in &raw_prompt {
-            let wlines = wrap_line(pl, content_w, None);
-            wrapped.extend(wlines);
+            wrapped.extend(wrap_line(pl, content_w, None));
         }
 
         // Available rows for prompt content (between top bar and mode + bottom border).
         let content_slots = total_h.saturating_sub(3);
 
-        // Determine which wrapped line the cursor sits on so we can scroll.
+        // Find which wrapped line the cursor sits on by walking line widths.
         let cursor_col = self.ui.prompt.cursor_column();
-        let cursor_wrap_row = if content_w > 0 {
-            cursor_col / content_w
-        } else {
-            0
-        };
+        let (cursor_wrap_row, _) = cursor_position_in_wrapped(&wrapped, cursor_col);
+
         let scroll = if wrapped.len() > content_slots {
-            // Keep cursor visible: scroll so cursor row is within the window.
             cursor_wrap_row.saturating_sub(content_slots.saturating_sub(1))
         } else {
             0
@@ -306,22 +301,26 @@ impl super::App {
     }
 
     fn update_cursor(&mut self) {
+        use crate::tui::text::wrap_line;
+
         let ir = &self.regions.input;
         let bar_w = 3u16; // "┃  "
         let content_w = ir.width.saturating_sub(bar_w) as usize;
         let cursor_col_abs = self.ui.prompt.cursor_column();
 
-        // Compute wrapped row and column.
-        let (wrap_row, wrap_col) = if content_w > 0 {
-            (cursor_col_abs / content_w, cursor_col_abs % content_w)
-        } else {
-            (0, cursor_col_abs)
-        };
+        // Wrap lines identically to build_input_lines.
+        let raw_prompt = self.ui.prompt.lines();
+        let mut wrapped: Vec<Line> = Vec::new();
+        for pl in &raw_prompt {
+            wrapped.extend(wrap_line(pl, content_w, None));
+        }
+
+        let (wrap_row, wrap_col) = cursor_position_in_wrapped(&wrapped, cursor_col_abs);
 
         // Scroll offset mirrors build_input_lines.
         let total_h = ir.height as usize;
         let content_slots = total_h.saturating_sub(3);
-        let scroll = if content_slots > 0 {
+        let scroll = if wrapped.len() > content_slots {
             wrap_row.saturating_sub(content_slots.saturating_sub(1))
         } else {
             0
@@ -412,4 +411,20 @@ impl super::App {
             cells,
         }));
     }
+}
+
+/// Find (row, col) of cursor within wrapped lines by walking visible widths.
+fn cursor_position_in_wrapped(wrapped: &[Line], cursor_col: usize) -> (usize, usize) {
+    let mut remaining = cursor_col;
+    for (i, line) in wrapped.iter().enumerate() {
+        let w = line.visible_width();
+        if remaining <= w && (i + 1 == wrapped.len() || remaining < w) {
+            return (i, remaining);
+        }
+        remaining = remaining.saturating_sub(w);
+    }
+    // Cursor past all content — place at end of last line.
+    let last = wrapped.len().saturating_sub(1);
+    let last_w = wrapped.last().map(|l| l.visible_width()).unwrap_or(0);
+    (last, last_w)
 }
