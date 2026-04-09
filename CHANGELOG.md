@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Mouse scroll and keyboard input silently dropped during heavy streaming — `try_send` replaced with `blocking_send` in stdin reader so terminal events are never lost
+- `luma update` fails on Windows PowerShell 5.1 — `New-TemporaryFile`, inline `if` assignment, and `Expand-Archive` are PS 5.0+/7.0+ only
+- Install scripts not updating PATH for cmd.exe — added `WM_SETTINGCHANGE` broadcast and cmd-compatible PATH hint
+- Install script (`install.sh`) fails on systems without `curl` — added `wget` fallback
+- Fish shell PATH hint incorrectly using `export PATH=...` instead of `fish_add_path`
+
+### Changed
+- `install.ps1` rewritten to use `curl.exe`/`tar.exe` (built into Windows 10+) instead of `Invoke-WebRequest`/`Expand-Archive`, eliminating PowerShell version compatibility issues
+- `install.sh` rewritten with structured functions (`detect_os`, `detect_arch`, `resolve_version`), colored output, and `unzip`/`python3` fallback for zip extraction
+- Self-update command adds `-ExecutionPolicy Bypass` and forces TLS 1.2 for Windows PowerShell 5.1
 
 ## [0.3.0-beta.7] - 2026-04-09
 
