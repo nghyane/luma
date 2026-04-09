@@ -45,8 +45,17 @@ pub mod icon {
     pub const WARN: &str = "!";
     pub const INFO: &str = "·";
 
-    /// Spinner frames — braille dots cycle (all Narrow east_asian_width, safe on CJK terminals).
-    pub const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    /// Spinner frames — growing star, bounce forward+reverse.
+    /// On non-macOS, ✳ is replaced with * (matches Claude Code behavior for
+    /// terminals that render ✳ incorrectly).
+    #[cfg(target_os = "macos")]
+    pub const SPINNER: &[&str] = &["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
+    #[cfg(not(target_os = "macos"))]
+    pub const SPINNER: &[&str] = &["·", "✢", "*", "✶", "✻", "✽", "✻", "✶", "*", "✢"];
+
+    /// Fixed display width for spinner chars (matches Ink `<Box width={2}>`).
+    /// Prevents alignment jitter from east_asian_width=Ambiguous chars.
+    pub const SPINNER_WIDTH: usize = 2;
 }
 
 /// Horizontal padding inside output/input regions (cells).

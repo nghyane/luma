@@ -41,9 +41,11 @@ pub fn render_tool(tb: &ToolBlock, content_w: usize, spinner_frame: usize) -> Ve
 
 fn render_pending(tb: &ToolBlock, w: usize, spinner_frame: usize) -> Vec<Line> {
     let spinner = icon::SPINNER[spinner_frame % icon::SPINNER.len()];
+    let char_w = crate::tui::text::display_width(spinner);
+    let pad = icon::SPINNER_WIDTH.saturating_sub(char_w);
     let has_content = !tb.output.is_empty() || tb.stream.as_ref().is_some_and(|s| !s.is_empty());
 
-    let mut h = smallvec![Span::new(format!("{spinner} "), palette::ACCENT)];
+    let mut h = smallvec![Span::new(format!("{spinner}{}", " ".repeat(pad)), palette::ACCENT)];
     if has_content || !tb.summary.is_empty() {
         h.push(Span::bold(tb.name.clone(), palette::ACCENT));
         h.push(Span::new(format!(" {}", tb.summary), palette::DIM));

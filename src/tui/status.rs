@@ -144,7 +144,9 @@ impl StatusBar {
         let mut left: SmallVec<[Span; 4]> = smallvec![];
         if self.state == StatusState::Thinking {
             let frame = icon::SPINNER[self.spinner_idx % icon::SPINNER.len()];
-            left.push(Span::new(format!("{frame}  "), palette::DIM));
+            let char_w = crate::tui::text::display_width(frame);
+            let pad = icon::SPINNER_WIDTH.saturating_sub(char_w);
+            left.push(Span::new(format!("{frame}{} ", " ".repeat(pad)), palette::DIM));
             left.push(Span::new("esc ".to_owned(), palette::DIM));
             left.push(Span::new("interrupt".to_owned(), palette::MUTED));
         }
