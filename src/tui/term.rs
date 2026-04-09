@@ -31,6 +31,7 @@ pub fn buffered_stdout() -> BufWriter<Stdout> {
 }
 
 /// Minimal base64 encode (no padding needed for OSC 52).
+#[cfg(not(windows))]
 fn base64_encode(input: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
@@ -56,6 +57,7 @@ fn base64_encode(input: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[cfg(not(windows))]
 mod tests {
     use super::*;
 
