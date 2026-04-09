@@ -47,7 +47,7 @@ impl ViewState {
 
     /// Scroll up by `n` lines. Always marks as user-scrolled.
     pub fn scroll_up(&mut self, n: usize) {
-        self.scroll.up(n, 3);
+        self.scroll.up(n);
     }
 
     /// Scroll down by `n` lines. Clears user-scrolled if at bottom.
