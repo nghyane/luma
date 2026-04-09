@@ -3,9 +3,24 @@ use std::io::{self, BufWriter, Stdout, Write};
 
 /// Copy text to system clipboard.
 ///
-/// On Unix, uses OSC 52 escape sequence (widely supported).
-/// On Windows, pipes to `clip.exe` since OSC 52 is not supported by conhost.
-#[cfg(not(windows))]
+/// On macOS, pipes to `pbcopy` for universal terminal support.
+/// On other Unix, uses OSC 52 escape sequence.
+/// On Windows, pipes to `clip.exe`.
+#[cfg(target_os = "macos")]
+pub fn copy_to_clipboard(_out: &mut impl Write, text: &str) -> io::Result<()> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes())?;
+    }
+    child.wait()?;
+    Ok(())
+}
+
+/// Copy text to system clipboard via OSC 52 escape sequence.
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn copy_to_clipboard(out: &mut impl Write, text: &str) -> io::Result<()> {
     let b64 = base64_encode(text.as_bytes());
     write!(out, "\x1b]52;c;{b64}\x1b\\")
@@ -31,7 +46,7 @@ pub fn buffered_stdout() -> BufWriter<Stdout> {
 }
 
 /// Minimal base64 encode (no padding needed for OSC 52).
-#[cfg(not(windows))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn base64_encode(input: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
@@ -57,7 +72,7 @@ fn base64_encode(input: &[u8]) -> String {
 }
 
 #[cfg(test)]
-#[cfg(not(windows))]
+#[cfg(all(unix, not(target_os = "macos")))]
 mod tests {
     use super::*;
 
