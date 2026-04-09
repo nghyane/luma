@@ -122,8 +122,10 @@ fn self_update() -> anyhow::Result<()> {
     let status = Command::new("powershell")
         .args([
             "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
             "-Command",
-            "irm https://raw.githubusercontent.com/nghyane/luma/master/install.ps1 | iex",
+            "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; irm https://raw.githubusercontent.com/nghyane/luma/master/install.ps1 | iex",
         ])
         .status()?;
     if !status.success() {

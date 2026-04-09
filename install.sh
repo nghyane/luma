@@ -1,100 +1,168 @@
 #!/bin/sh
 # Install or update Luma — lightweight coding agent
 # Usage: curl -fsSL https://raw.githubusercontent.com/nghyane/luma/master/install.sh | sh
+# Compatible with POSIX sh on Linux and macOS.
 set -e
 
 REPO="nghyane/luma"
-INSTALL_DIR="${LUMA_INSTALL_DIR:-$HOME/.local/bin}"
+BIN_DIR="${LUMA_INSTALL_DIR:-$HOME/.local/bin}"
 
-# Detect platform
-OS="$(uname -s)"
-ARCH="$(uname -m)"
+# --- helpers ----------------------------------------------------------------
+
+has() { command -v "$1" >/dev/null 2>&1; }
+
+info()  { printf '  \033[1;34minfo\033[0m  %s\n' "$*"; }
+warn()  { printf '  \033[1;33mwarn\033[0m  %s\n' "$*" >&2; }
+error() { printf '  \033[1;31merror\033[0m %s\n' "$*" >&2; }
+
+# Portable HTTP GET to stdout.
+fetch() {
+  if has curl; then
+    curl -fsSL "$1"
+  elif has wget; then
+    wget -qO- "$1"
+  else
+    error "curl or wget is required"
+    exit 1
+  fi
+}
+
+# Portable HTTP download to file.
+download() {
+  url="$1"; dest="$2"
+  if has curl; then
+    curl --fail --location --progress-bar --output "$dest" "$url"
+  elif has wget; then
+    wget --quiet --show-progress --output-document="$dest" "$url"
+  else
+    error "curl or wget is required"
+    exit 1
+  fi
+}
+
+# --- platform detection -----------------------------------------------------
+
+detect_os() {
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  case "$os" in
+    darwin)           printf "apple-darwin" ;;
+    linux)            printf "unknown-linux-musl" ;;
+    mingw*|msys*|cygwin*) printf "pc-windows-msvc" ;;
+    *) error "Unsupported OS: $os"; exit 1 ;;
+  esac
+}
+
+detect_arch() {
+  arch="$(uname -m | tr '[:upper:]' '[:lower:]')"
+  case "$arch" in
+    x86_64|amd64)   arch="x86_64" ;;
+    arm64|aarch64)   arch="aarch64" ;;
+    *) error "Unsupported arch: $arch"; exit 1 ;;
+  esac
+  # Guard against 32-bit userland on 64-bit kernel
+  if [ "$arch" = "x86_64" ] && [ "$(getconf LONG_BIT 2>/dev/null)" = "32" ]; then
+    error "32-bit x86 is not supported"; exit 1
+  fi
+  printf '%s' "$arch"
+}
+
+# --- resolve version --------------------------------------------------------
+
+resolve_version() {
+  if [ -n "${LUMA_VERSION:-}" ]; then
+    printf '%s' "$LUMA_VERSION"
+    return
+  fi
+  tag=$(fetch "https://api.github.com/repos/$REPO/releases?per_page=1" \
+    | tr ',' '\n' | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+  if [ -z "$tag" ]; then
+    error "Failed to detect latest version"
+    exit 1
+  fi
+  printf '%s' "$tag"
+}
+
+# --- install ----------------------------------------------------------------
+
+OS="$(detect_os)"
+ARCH="$(detect_arch)"
+TARGET="${ARCH}-${OS}"
+TAG="$(resolve_version)"
 
 case "$OS" in
-  Darwin)          os="apple-darwin" ;;
-  Linux)           os="unknown-linux-musl" ;;
-  MINGW*|MSYS*|CYGWIN*) os="pc-windows-msvc"; EXT=".exe"; ARCHIVE="zip" ;;
-  *) echo "Unsupported OS: $OS" >&2; exit 1 ;;
+  pc-windows-msvc) EXT=".exe"; ARCHIVE="zip" ;;
+  *)               EXT="";     ARCHIVE="tar.gz" ;;
 esac
-
-case "$ARCH" in
-  x86_64|amd64) arch="x86_64" ;;
-  arm64|aarch64) arch="aarch64" ;;
-  *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;;
-esac
-
-TARGET="${arch}-${os}"
-EXT="${EXT:-}"
-ARCHIVE="${ARCHIVE:-tar.gz}"
-
-# Find latest release (or use LUMA_VERSION env)
-if [ -n "$LUMA_VERSION" ]; then
-  TAG="$LUMA_VERSION"
-else
-  # /releases/latest skips prereleases — use /releases to find newest
-  TAG=$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=1" \
-    | grep '"tag_name"' | head -1 | cut -d'"' -f4)
-fi
-
-if [ -z "$TAG" ]; then
-  echo "Failed to detect latest version" >&2
-  exit 1
-fi
 
 URL="https://github.com/$REPO/releases/download/$TAG/luma-${TARGET}.${ARCHIVE}"
 
-echo "Installing luma $TAG ($TARGET)"
-echo "  from: $URL"
-echo "  to:   $INSTALL_DIR/luma${EXT}"
+info "Installing luma $TAG ($TARGET)"
+info "  from: $URL"
+info "  to:   $BIN_DIR/luma${EXT}"
 
-# Download and extract
+# Download
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-curl -fsSL "$URL" -o "$TMP/luma.${ARCHIVE}"
+download "$URL" "$TMP/luma.${ARCHIVE}"
+
+# Extract
 if [ "$ARCHIVE" = "zip" ]; then
-  unzip -q "$TMP/luma.zip" -d "$TMP"
+  if has unzip; then
+    unzip -qo "$TMP/luma.zip" -d "$TMP"
+  elif has python3; then
+    python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" \
+      "$TMP/luma.zip" "$TMP"
+  else
+    error "unzip or python3 is required to extract zip archives"
+    exit 1
+  fi
 else
   tar xzf "$TMP/luma.tar.gz" -C "$TMP"
 fi
 
-# Install
-mkdir -p "$INSTALL_DIR"
-mv "$TMP/luma${EXT}" "$INSTALL_DIR/luma${EXT}"
-chmod +x "$INSTALL_DIR/luma${EXT}" 2>/dev/null || true
+# Install binary
+mkdir -p "$BIN_DIR"
+mv "$TMP/luma${EXT}" "$BIN_DIR/luma${EXT}"
+chmod +x "$BIN_DIR/luma${EXT}" 2>/dev/null || true
 
-echo "Installed luma $TAG"
+info "Installed luma $TAG"
 
-# Add to PATH if missing
+# --- PATH setup -------------------------------------------------------------
+
 case ":$PATH:" in
-  *":$INSTALL_DIR:"*) ;;
+  *":$BIN_DIR:"*) ;;
   *)
-    LINE="export PATH=\"$INSTALL_DIR:\$PATH\""
     PROFILE=""
+    IS_FISH=false
     case "${SHELL:-}" in
       */zsh)  PROFILE="$HOME/.zshrc" ;;
       */bash) PROFILE="$HOME/.bashrc" ;;
-      */fish) PROFILE="$HOME/.config/fish/config.fish" ;;
+      */fish) PROFILE="$HOME/.config/fish/config.fish"; IS_FISH=true ;;
     esac
-    # Fallback: check common files
+    # Fallback: try common rc files
     if [ -z "$PROFILE" ]; then
       for f in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
         [ -f "$f" ] && PROFILE="$f" && break
       done
     fi
 
-    if [ -n "$PROFILE" ] && ! grep -qF "$INSTALL_DIR" "$PROFILE" 2>/dev/null; then
+    if [ -n "$PROFILE" ] && ! grep -qF "$BIN_DIR" "$PROFILE" 2>/dev/null; then
       mkdir -p "$(dirname "$PROFILE")"
-      if echo "$PROFILE" | grep -q "fish"; then
-        echo "fish_add_path $INSTALL_DIR" >> "$PROFILE"
+      if $IS_FISH; then
+        echo "fish_add_path $BIN_DIR" >> "$PROFILE"
       else
-        echo "$LINE" >> "$PROFILE"
+        echo "export PATH=\"$BIN_DIR:\$PATH\"" >> "$PROFILE"
       fi
-      echo "Added to $PROFILE — restart shell or run:"
-    else
-      echo ""
-      echo "Run this to use now:"
+      info "Added to $PROFILE"
     fi
-    echo "  $LINE"
+
+    printf '\n'
+    info "Restart your shell or run:"
+    if $IS_FISH; then
+      info "  fish_add_path $BIN_DIR"
+    else
+      info "  export PATH=\"$BIN_DIR:\$PATH\""
+    fi
     ;;
 esac
