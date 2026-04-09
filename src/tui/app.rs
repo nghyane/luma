@@ -291,6 +291,17 @@ impl App {
         }
         self.render();
 
+        // On Windows, the console sends CTRL_C_EVENT to the process even in raw
+        // mode. Without a handler the default action terminates the process.
+        // Spawn a task that absorbs the signal so Ctrl+C is only handled as a
+        // key event delivered through the terminal reader.
+        #[cfg(windows)]
+        tokio::spawn(async {
+            loop {
+                _ = tokio::signal::ctrl_c().await;
+            }
+        });
+
         let tx_input = tx.clone();
         tokio::task::spawn_blocking(move || input::read_stdin_loop(reader, tx_input));
 
