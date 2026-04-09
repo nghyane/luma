@@ -199,15 +199,28 @@ fn accumulate(out: &mut String, tail: &mut String, truncated: &mut bool, chunk: 
         out.push_str(chunk);
         if out.len() > MAX_OUTPUT {
             *truncated = true;
-            *tail = out.split_off(out.len().saturating_sub(TAIL_BYTES));
+            let split = floor_char_boundary(out, out.len().saturating_sub(TAIL_BYTES));
+            *tail = out.split_off(split);
         }
     } else {
         tail.push_str(chunk);
         if tail.len() > TAIL_BYTES * 2 {
-            let start = tail.len() - TAIL_BYTES;
+            let start = floor_char_boundary(tail, tail.len() - TAIL_BYTES);
             *tail = tail[start..].to_owned();
         }
     }
+}
+
+/// Find the largest byte index `<= idx` that is a char boundary.
+fn floor_char_boundary(s: &str, idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    let mut i = idx;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 #[cfg(test)]
@@ -298,5 +311,27 @@ mod tests {
             .unwrap();
 
         assert!(result.contains("[aborted]"));
+    }
+
+    #[test]
+    fn accumulate_multibyte_no_panic() {
+        // '│' is 3 bytes (E2 94 82). Fill output so the truncation point
+        // lands inside a multi-byte char.
+        let mut out = String::new();
+        let mut tail = String::new();
+        let mut truncated = false;
+
+        // Build a string of 3-byte chars that will exceed MAX_OUTPUT.
+        let chunk: String = "│".repeat(MAX_OUTPUT);
+        accumulate(&mut out, &mut tail, &mut truncated, &chunk);
+        assert!(truncated);
+        // Both out and tail must be valid UTF-8 (no panic on split).
+        assert!(out.is_char_boundary(out.len()));
+        assert!(tail.is_char_boundary(tail.len()));
+
+        // Trigger the tail-trimming path.
+        let big_tail: String = "│".repeat(TAIL_BYTES * 3);
+        accumulate(&mut out, &mut tail, &mut truncated, &big_tail);
+        assert!(tail.len() <= TAIL_BYTES * 2 + 3); // +3 for rounding to char boundary
     }
 }
