@@ -2,7 +2,7 @@
 //!
 //! Two entry points:
 //! - `make_edit_diff` — O(n) context-based diff for edit tool (knows old/new strings + position)
-//! - `make_diff` — LCS-based full-file diff for write tool
+//! - `make_diff` — Myers diff for write tool, O((n+m)d) where d = edit distance
 //!
 //! Output format per line: `{lineno:>w} {marker} {content}`
 //! where marker is `+`, `-`, or ` `. Separator lines are `...`.
@@ -134,7 +134,7 @@ pub fn make_edit_diff(
     result
 }
 
-// ── Write tool: LCS-based full-file diff ──
+// ── Write tool: Myers diff ──
 
 /// Generate full-file diff (for write tool — old vs new content).
 pub fn make_diff(old: &str, new: &str) -> Vec<String> {
@@ -150,8 +150,23 @@ pub fn make_diff(old: &str, new: &str) -> Vec<String> {
             .collect();
     }
 
-    let edits = lcs_diff(&old_lines, &new_lines);
+    let edits = myers_diff(&old_lines, &new_lines);
     extract_hunks(&edits, &old_lines, &new_lines, num_w)
+}
+
+/// Count insertions and deletions from diff output lines.
+pub fn diff_stats(diff: &[String]) -> (usize, usize) {
+    let mut adds = 0;
+    let mut dels = 0;
+    for line in diff {
+        let dl = parse_diff_line(line);
+        match dl.kind {
+            DiffKind::Add => adds += 1,
+            DiffKind::Del => dels += 1,
+            _ => {}
+        }
+    }
+    (adds, dels)
 }
 
 fn line_num_width(max: usize) -> usize {
@@ -171,35 +186,103 @@ enum Edit {
     Insert,
 }
 
-/// LCS-based diff on lines.
-fn lcs_diff(old: &[&str], new: &[&str]) -> Vec<Edit> {
+/// Myers diff algorithm — O((n+m)d) time, O(n+m) space per d-step.
+///
+/// Finds a shortest edit script between `old` and `new` line slices.
+/// `d` is the number of edits (inserts + deletes), so identical files
+/// are O(n+m) and small changes in large files are near-linear.
+fn myers_diff(old: &[&str], new: &[&str]) -> Vec<Edit> {
     let (n, m) = (old.len(), new.len());
-    let mut dp = vec![vec![0u32; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            dp[i][j] = if old[i] == new[j] {
-                dp[i + 1][j + 1] + 1
+    if n == 0 {
+        return vec![Edit::Insert; m];
+    }
+    if m == 0 {
+        return vec![Edit::Delete; n];
+    }
+
+    let max_d = n + m;
+    let vsize = 2 * max_d + 1;
+    let mut v = vec![0usize; vsize];
+    // trace[d] = snapshot of v *after* processing d-step.
+    let mut trace: Vec<Vec<usize>> = Vec::new();
+
+    let idx = |k: isize| -> usize { (k + max_d as isize) as usize };
+
+    let mut found_d = 0;
+    'outer: for d in 0..=max_d {
+        // Clone v before mutating so trace[d] captures state entering d.
+        let snap = v.clone();
+        for k in (-(d as isize)..=(d as isize)).step_by(2) {
+            let mut x = if k == -(d as isize)
+                || (k != d as isize && v[idx(k - 1)] < v[idx(k + 1)])
+            {
+                v[idx(k + 1)] // move down (insert)
             } else {
-                dp[i + 1][j].max(dp[i][j + 1])
+                v[idx(k - 1)] + 1 // move right (delete)
             };
+            let mut y = (x as isize - k) as usize;
+
+            // Follow diagonal (matching lines)
+            while x < n && y < m && old[x] == new[y] {
+                x += 1;
+                y += 1;
+            }
+            v[idx(k)] = x;
+
+            if x >= n && y >= m {
+                found_d = d;
+                // Push the snapshot that was taken *before* this d-round.
+                trace.push(snap);
+                break 'outer;
+            }
+        }
+        trace.push(snap);
+    }
+
+    // Backtrack from (n,m) to (0,0) through the trace.
+    let mut edits = Vec::with_capacity(n + m);
+    let (mut x, mut y) = (n, m);
+
+    for d in (1..=found_d).rev() {
+        let k = x as isize - y as isize;
+        let v_prev = &trace[d];
+
+        let prev_k = if k == -(d as isize)
+            || (k != d as isize && v_prev[idx(k - 1)] < v_prev[idx(k + 1)])
+        {
+            k + 1 // came from insert (down)
+        } else {
+            k - 1 // came from delete (right)
+        };
+        let prev_x = v_prev[idx(prev_k)];
+        let prev_y = (prev_x as isize - prev_k) as usize;
+
+        // Diagonal (Keep) moves after the edit
+        while x > prev_x && y > prev_y {
+            x -= 1;
+            y -= 1;
+            edits.push(Edit::Keep);
+        }
+
+        if prev_k < k {
+            // Moved right → delete from old
+            x -= 1;
+            edits.push(Edit::Delete);
+        } else {
+            // Moved down → insert from new
+            y -= 1;
+            edits.push(Edit::Insert);
         }
     }
 
-    let mut edits = Vec::with_capacity(n + m);
-    let (mut i, mut j) = (0, 0);
-    while i < n || j < m {
-        if i < n && j < m && old[i] == new[j] {
-            edits.push(Edit::Keep);
-            i += 1;
-            j += 1;
-        } else if j < m && (i == n || dp[i][j + 1] >= dp[i + 1][j]) {
-            edits.push(Edit::Insert);
-            j += 1;
-        } else {
-            edits.push(Edit::Delete);
-            i += 1;
-        }
+    // Remaining diagonal from (0,0)
+    while x > 0 && y > 0 {
+        x -= 1;
+        y -= 1;
+        edits.push(Edit::Keep);
     }
+
+    edits.reverse();
     edits
 }
 
@@ -397,5 +480,61 @@ mod tests {
     fn parse_separator() {
         let dl = parse_diff_line("...");
         assert_eq!(dl.kind, DiffKind::Separator);
+    }
+
+    // ── Myers diff edge cases ──
+
+    #[test]
+    fn completely_different() {
+        let diff = make_diff("a\nb\nc", "x\ny\nz");
+        let dels: Vec<_> = diff.iter().filter(|l| l.contains(" - ")).collect();
+        let adds: Vec<_> = diff.iter().filter(|l| l.contains(" + ")).collect();
+        assert_eq!(dels.len(), 3, "3 deletes: {diff:?}");
+        assert_eq!(adds.len(), 3, "3 inserts: {diff:?}");
+    }
+
+    #[test]
+    fn insert_at_beginning() {
+        let diff = make_diff("b\nc", "a\nb\nc");
+        assert!(diff.iter().any(|l| l.contains(" + a")), "{diff:?}");
+        assert!(!diff.iter().any(|l| l.contains(" - ")), "no deletes: {diff:?}");
+    }
+
+    #[test]
+    fn delete_at_end() {
+        let diff = make_diff("a\nb\nc", "a\nb");
+        assert!(diff.iter().any(|l| l.contains(" - c")), "{diff:?}");
+        assert!(!diff.iter().any(|l| l.contains(" + ")), "no inserts: {diff:?}");
+    }
+
+    #[test]
+    fn identical_files() {
+        let text = (0..100).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let diff = make_diff(&text, &text);
+        assert!(diff.is_empty(), "identical: {diff:?}");
+    }
+
+    #[test]
+    fn large_file_small_edit_performance() {
+        // 5000 lines, single edit in the middle — should complete fast with Myers.
+        let lines: Vec<String> = (0..5000).map(|i| format!("line {i}")).collect();
+        let old = lines.join("\n");
+        let mut new_lines = lines.clone();
+        new_lines[2500] = "CHANGED LINE".to_owned();
+        let new = new_lines.join("\n");
+
+        let start = std::time::Instant::now();
+        let diff = make_diff(&old, &new);
+        let elapsed = start.elapsed();
+
+        assert!(diff.iter().any(|l| l.contains(" - line 2500")), "{diff:?}");
+        assert!(diff.iter().any(|l| l.contains(" + CHANGED LINE")), "{diff:?}");
+        // With Myers O(nd) where d=2, this should be well under 100ms.
+        // Old LCS O(n*m) would take seconds and ~100MB memory.
+        assert!(
+            elapsed.as_millis() < 500,
+            "took {}ms — too slow for Myers",
+            elapsed.as_millis()
+        );
     }
 }

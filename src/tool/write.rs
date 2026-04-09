@@ -73,10 +73,12 @@ impl Tool for WriteTool {
             }
 
             let total_lines = content.lines().count();
+            let (adds, dels) = crate::tool::diff::diff_stats(&diff);
+            let stat = format!("+{adds} -{dels}");
             if is_create {
-                Ok(format!("Created {} ({total_lines} lines)", path.display()))
+                Ok(format!("Created {} ({total_lines} lines, {stat})", path.display()))
             } else {
-                Ok(format!("Updated {} ({total_lines} lines)", path.display()))
+                Ok(format!("Updated {} ({total_lines} lines, {stat})", path.display()))
             }
         })
     }

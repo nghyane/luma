@@ -167,13 +167,10 @@ impl Tool for EditTool {
                 let _ = output_tx.send(format!("{line}\n")).await;
             }
 
-            let old_lines = old.lines().count() as isize;
-            let new_lines = new.lines().count() as isize;
-            let delta = new_lines - old_lines;
-            let sign = if delta >= 0 { "+" } else { "" };
+            let (adds, dels) = crate::tool::diff::diff_stats(&diff);
 
             Ok(format!(
-                "Edited {} ({} replacement{}, {sign}{delta} lines)",
+                "Edited {} ({} replacement{}, +{adds} -{dels})",
                 path.display(),
                 count,
                 if count > 1 { "s" } else { "" }

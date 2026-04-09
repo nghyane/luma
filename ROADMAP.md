@@ -39,8 +39,8 @@ Current: ~12K lines Rust, 290 tests, 3 providers, 12 tools. Cross-platform (macO
 
 ## v0.4 — Performance & Polish
 
-- [ ] Diff algorithm: Myers O(n+m) replacing LCS O(n*m)
-- [ ] Diff stats in tool output ("Updated file.rs +5 -3")
+- [x] Diff algorithm: Myers O(nd) replacing LCS O(n*m)
+- [x] Diff stats in tool output ("Updated file.rs +5 -3")
 - [ ] Bare URL highlighting in markdown
 - [ ] Streaming resize stability across providers
 - [ ] Large-session profiling (65K+ tokens) — render throughput, memory, freeze points
