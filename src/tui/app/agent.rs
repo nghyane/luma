@@ -219,10 +219,7 @@ fn is_rate_limit_error(msg: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn read_clipboard_image() -> Option<Vec<u8>> {
-    let tmp = std::env::temp_dir().join(format!("luma_clipboard_{}.png", std::process::id()));
-    let script = format!(
-        r#"set theFile to POSIX file "{}"
+const APPLESCRIPT_CLIPBOARD_IMAGE: &str = r#"set theFile to POSIX file "{PATH}"
 try
     set theImage to the clipboard as «class PNGf»
     set fileRef to open for access theFile with write permission
@@ -234,9 +231,12 @@ on error
         close access theFile
     end try
     error "no image"
-end try"#,
-        tmp.display()
-    );
+end try"#;
+
+#[cfg(target_os = "macos")]
+fn read_clipboard_image() -> Option<Vec<u8>> {
+    let tmp = std::env::temp_dir().join(format!("luma_clipboard_{}.png", std::process::id()));
+    let script = APPLESCRIPT_CLIPBOARD_IMAGE.replace("{PATH}", &tmp.display().to_string());
     let output = std::process::Command::new("osascript")
         .arg("-e")
         .arg(&script)
@@ -254,27 +254,36 @@ end try"#,
 }
 
 #[cfg(target_os = "windows")]
+const PS_CLIPBOARD_IMAGE: &str = r#"
+Add-Type -AssemblyName System.Windows.Forms
+$img = [System.Windows.Forms.Clipboard]::GetImage()
+if ($img -eq $null) { exit 1 }
+$ms = New-Object System.IO.MemoryStream
+$img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+$stdout = [Console]::OpenStandardOutput()
+$stdout.Write($ms.ToArray(), 0, $ms.Length)
+$img.Dispose()
+$ms.Dispose()
+"#;
+
+#[cfg(target_os = "windows")]
 fn read_clipboard_image() -> Option<Vec<u8>> {
-    let tmp = std::env::temp_dir().join(format!("luma_clipboard_{}.png", std::process::id()));
-    let script = format!(
-        r#"$img = Get-Clipboard -Format Image
-if ($img -eq $null) {{ exit 1 }}
-$img.Save('{}', [System.Drawing.Imaging.ImageFormat]::Png)"#,
-        tmp.display()
-    );
     let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            PS_CLIPBOARD_IMAGE,
+        ])
         .output()
         .ok()?;
-    if !output.status.success() {
+    if !output.status.success() || output.stdout.is_empty() {
         return None;
     }
-    let data = std::fs::read(&tmp).ok()?;
-    let _ = std::fs::remove_file(&tmp);
-    if data.is_empty() {
-        return None;
-    }
-    Some(data)
+    Some(output.stdout)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
