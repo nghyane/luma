@@ -202,4 +202,64 @@ mod tests {
         assert!(!s.is_user_scrolled);
         assert!(!s.just_hit_bottom);
     }
+
+    /// Simulate: streaming grows content, user scrolls up, content keeps growing.
+    /// Scroll lock must hold across multiple prepare_frame cycles.
+    #[test]
+    fn streaming_scroll_up_stays_locked() {
+        let height = 20;
+        let mut s = ScrollView::new();
+
+        // Frame 1: content = 50 lines, auto-scroll to bottom
+        s.auto_scroll(50, height);
+        s.clamp(50, height);
+        assert_eq!(s.offset, 30, "frame 1: at bottom");
+        assert!(!s.is_user_scrolled);
+
+        // User scrolls up 3 lines (between frames)
+        let max = 50usize.saturating_sub(height); // 30 — stale cached_total
+        s.up(3, max, 3);
+        assert_eq!(s.offset, 27);
+        assert!(s.is_user_scrolled, "scroll up must lock");
+
+        // Frame 2: content grew to 60 lines during streaming
+        s.auto_scroll(60, height);
+        s.clamp(60, height);
+        assert_eq!(s.offset, 27, "frame 2: offset unchanged");
+        assert!(s.is_user_scrolled, "frame 2: still locked");
+
+        // Frame 3: content grew to 80 lines
+        s.auto_scroll(80, height);
+        s.clamp(80, height);
+        assert_eq!(s.offset, 27, "frame 3: offset unchanged");
+        assert!(s.is_user_scrolled, "frame 3: still locked");
+
+        // Frame 4: content grew to 200 lines
+        s.auto_scroll(200, height);
+        s.clamp(200, height);
+        assert_eq!(s.offset, 27, "frame 4: offset unchanged");
+        assert!(s.is_user_scrolled, "frame 4: still locked");
+    }
+
+    /// Simulate: user scrolls up with stale max, then content shrinks below offset.
+    #[test]
+    fn clamp_after_content_shrink_resets_lock() {
+        let height = 20;
+        let mut s = ScrollView::new();
+
+        // At bottom with 100 lines
+        s.auto_scroll(100, height);
+        assert_eq!(s.offset, 80);
+
+        // User scrolls up
+        s.up(30, 80, 3);
+        assert_eq!(s.offset, 50);
+        assert!(s.is_user_scrolled);
+
+        // Content shrinks to 25 lines (e.g. /new command)
+        s.clamp(25, height);
+        // max = 5, offset clamped to 5, 5 >= 5 → is_user_scrolled = false
+        assert_eq!(s.offset, 5);
+        assert!(!s.is_user_scrolled, "at max after shrink → unlock");
+    }
 }

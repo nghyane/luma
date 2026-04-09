@@ -13,12 +13,11 @@ pub fn read_stdin_loop(tx: mpsc::Sender<Event>) {
             continue;
         }
 
-        match tx.try_send(Event::Term(raw)) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                // Channel full — UI is busy. Drop this event.
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => return,
+        // blocking_send: input thread is dedicated, so blocking until the
+        // event loop drains is fine. Prevents mouse/key events from being
+        // silently dropped when the channel is full during heavy streaming.
+        if tx.blocking_send(Event::Term(raw)).is_err() {
+            return;
         }
     }
 }
