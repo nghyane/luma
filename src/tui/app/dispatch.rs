@@ -243,6 +243,25 @@ impl super::App {
             return Action::Render;
         }
 
+        // During streaming, arrow keys scroll output instead of navigating prompt.
+        if matches!(
+            self.agent.state,
+            RunState::Streaming | RunState::PendingAbort
+        ) && key.modifiers.is_empty()
+        {
+            match key.code {
+                KeyCode::Up | KeyCode::PageUp => {
+                    self.view.scroll_up(super::SCROLL_STEP);
+                    return Action::Render;
+                }
+                KeyCode::Down | KeyCode::PageDown => {
+                    self.view.scroll_down(super::SCROLL_STEP);
+                    return Action::Render;
+                }
+                _ => {}
+            }
+        }
+
         // Ctrl+V: try clipboard image first (async), text fallback via bracketed paste
         if key.code == KeyCode::Char('v')
             && key.modifiers.contains(KeyModifiers::CONTROL)
