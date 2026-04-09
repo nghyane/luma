@@ -33,20 +33,7 @@ async fn main() {
     // Restore terminal on panic so the shell isn't left in raw mode.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        // Restore terminal first — must happen before printing.
-        let _ = crossterm::terminal::disable_raw_mode();
-        {
-            use std::io::Write;
-            let _ = write!(std::io::stderr(), "\x1b[?1007h");
-        }
-        let _ = crossterm::execute!(
-            std::io::stderr(),
-            crossterm::event::DisableBracketedPaste,
-            crossterm::event::DisableMouseCapture,
-            crossterm::cursor::Show,
-            crossterm::terminal::LeaveAlternateScreen,
-        );
-
+        // Terminal restore is handled by termina's panic hook (set in enter_terminal).
         // Write crash log for diagnostics.
         let crash_path = std::env::temp_dir().join("luma-crash.log");
         if let Ok(mut f) = std::fs::OpenOptions::new()

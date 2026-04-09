@@ -5,54 +5,35 @@ use crate::config::models;
 use crate::event::Event;
 use crate::tui::picker::PickerAction;
 use crate::tui::prompt::PromptAction;
-use crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyModifiers};
+use termina::event::{KeyCode, KeyEvent, Modifiers};
+use termina::Event as TermEvent;
 
 impl super::App {
     pub(super) fn handle(&mut self, event: Event) -> Action {
-        if self.agent.state == RunState::Aborting {
-            return match event {
-                Event::Term(CtEvent::Key(k)) => self.on_key(k),
-                Event::Term(CtEvent::Mouse(m)) => self.on_mouse(m),
-                Event::Term(CtEvent::Paste(text)) => self.on_paste(text),
-                Event::Term(CtEvent::Resize(w, h)) => {
-                    self.handle_resize(w, h);
-                    Action::Render
-                }
-                Event::ClipboardImage(result) => {
-                    self.on_clipboard_image(result);
-                    Action::Render
-                }
-                Event::Tick => {
-                    self.ui.status.tick();
-                    Action::Render
-                }
-                Event::AgentDone => {
-                    self.on_agent_done();
-                    Action::Render
-                }
-                Event::AgentError(msg) => {
-                    self.on_agent_error(&msg);
-                    Action::Render
-                }
-                _ => Action::Continue,
-            };
-        }
+        let aborting = self.agent.state == RunState::Aborting;
 
         match event {
-            Event::Term(CtEvent::Key(k)) => self.on_key(k),
-            Event::Term(CtEvent::Mouse(m)) => self.on_mouse(m),
-            Event::Term(CtEvent::Paste(text)) => self.on_paste(text),
-            Event::Term(CtEvent::Resize(w, h)) => {
-                self.handle_resize(w, h);
+            // --- Terminal events — always handled ---
+            Event::Term(TermEvent::Key(k)) => self.on_key(k),
+            Event::Term(TermEvent::Mouse(m)) => self.on_mouse(m),
+            Event::Term(TermEvent::Paste(text)) => self.on_paste(text),
+            Event::Term(TermEvent::WindowResized(size)) => {
+                self.handle_resize(size.cols, size.rows);
                 Action::Render
             }
+            Event::Term(TermEvent::FocusIn | TermEvent::FocusOut) => Action::Continue,
+            // Csi/Osc/Dcs filtered at input layer, but handle exhaustively.
             Event::Term(_) => Action::Continue,
+
             Event::ClipboardImage(result) => {
                 self.on_clipboard_image(result);
                 Action::Render
             }
             Event::Tick => {
                 self.ui.status.tick();
+                if aborting {
+                    return Action::Render;
+                }
                 if !self.screen.is_chat() {
                     return Action::Continue;
                 }
@@ -64,16 +45,29 @@ impl super::App {
                     }
                     return Action::Render;
                 }
-                let active = matches!(
+                if matches!(
                     self.agent.state,
                     RunState::Streaming | RunState::PendingAbort
-                );
-                if active {
+                ) {
                     Action::Render
                 } else {
                     Action::Continue
                 }
             }
+
+            // --- Agent / streaming events — skipped while aborting ---
+            Event::AgentDone => {
+                crate::dbg_log!("agent done");
+                self.on_agent_done();
+                Action::Render
+            }
+            Event::AgentError(msg) => {
+                crate::dbg_log!("agent error: {msg}");
+                self.on_agent_error(&msg);
+                Action::Render
+            }
+            _ if aborting => Action::Continue,
+
             Event::Token(t) => {
                 crate::dbg_log!("token: {}B", t.len());
                 self.doc.append_token(&t);
@@ -151,15 +145,12 @@ impl super::App {
                 Action::Render
             }
             Event::Usage(usage) => {
-                // Only update cache display when values are present (message_start).
-                // message_delta sends None to avoid overwriting.
                 if usage.cache_read.is_some() || usage.cache_write.is_some() {
                     self.ui.status.set_cache(
                         usage.cache_read.unwrap_or(0),
                         usage.cache_write.unwrap_or(0),
                     );
                 }
-                // Use reported cache values, or fall back to last known from status bar.
                 let (cr, cw) = self.ui.status.cache_values();
                 let cache_read = usage.cache_read.unwrap_or(cr);
                 let cache_write = usage.cache_write.unwrap_or(cw);
@@ -174,25 +165,15 @@ impl super::App {
                 self.ui.status.set_context(total, pct);
                 Action::Render
             }
-            Event::AgentDone => {
-                crate::dbg_log!("agent done");
-                self.on_agent_done();
-                Action::Render
-            }
-            Event::AgentError(msg) => {
-                crate::dbg_log!("agent error: {msg}");
-                self.on_agent_error(&msg);
-                Action::Render
-            }
         }
     }
 
     pub(super) fn on_key(&mut self, key: KeyEvent) -> Action {
         crate::dbg_log!("key {:?} state={:?}", key, self.agent.state);
 
-        let is_esc = key.code == KeyCode::Esc;
+        let is_esc = key.code == KeyCode::Escape;
         let is_ctrl_c =
-            key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+            key.code == KeyCode::Char('c') && key.modifiers.contains(Modifiers::CONTROL);
 
         // Esc: interrupt streaming only
         if is_esc {
@@ -264,7 +245,7 @@ impl super::App {
 
         // Ctrl+V: try clipboard image first (async), text fallback via bracketed paste
         if key.code == KeyCode::Char('v')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.modifiers.contains(Modifiers::CONTROL)
             && !self.ui.picker.is_active
         {
             self.paste_clipboard_image();

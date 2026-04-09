@@ -13,8 +13,8 @@ pub struct SearchHit {
 /// Every event the app loop handles.
 #[derive(Debug, Clone)]
 pub enum Event {
-    /// Terminal event from crossterm (key, mouse, resize, paste, focus).
-    Term(crossterm::event::Event),
+    /// Terminal event (key, mouse, resize, paste, focus).
+    Term(termina::Event),
 
     Token(String),
     Thinking(String),

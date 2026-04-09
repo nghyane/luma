@@ -16,13 +16,12 @@ use crate::tui::prompt::PromptState;
 use crate::tui::renderer::{Region, Renderer};
 use crate::tui::selection::Selection;
 use crate::tui::status::StatusBar;
-use crate::tui::term;
 use crate::tui::text::{Line, Padding};
 use crate::tui::theme::{CONTENT_PAD, OUTER_MARGIN, palette};
 use crate::tui::view::ViewState;
-use crossterm::terminal;
 use std::io::Write;
 use std::time::Duration;
+use termina::Terminal as _;
 use tokio::sync::mpsc;
 
 const TICK_INTERVAL: Duration = Duration::from_millis(80);
@@ -127,11 +126,17 @@ pub struct App {
     agent: AgentHandle,
     config: AppConfig,
     tx: Option<mpsc::Sender<Event>>,
+    term: Option<termina::PlatformTerminal>,
 }
 
 impl App {
     pub fn new(env_context: String) -> Self {
-        let (w, h) = terminal::size().unwrap_or((80, 24));
+        let term = termina::PlatformTerminal::new().ok();
+        let (w, h) = term
+            .as_ref()
+            .and_then(|t| t.get_dimensions().ok())
+            .map(|s| (s.cols, s.rows))
+            .unwrap_or((80, 24));
         let regions = compute_regions(w, h);
         let mut renderer = Renderer::new(w, h);
         renderer.define("output", regions.output.clone());
@@ -184,6 +189,7 @@ impl App {
             agent: AgentHandle::new(),
             config,
             tx: None,
+            term,
         };
         app.update_status();
         if thinking != ThinkingLevel::Off {
@@ -225,44 +231,59 @@ impl App {
         }
     }
 
-    fn enter_terminal(out: &mut impl Write) -> anyhow::Result<()> {
-        terminal::enable_raw_mode()?;
-        crossterm::execute!(
-            out,
-            terminal::EnterAlternateScreen,
-            crossterm::event::EnableMouseCapture,
-            crossterm::event::EnableBracketedPaste,
-            crossterm::cursor::Hide,
-        )?;
-        // Disable alternate scroll mode: prevents the terminal from converting
-        // mouse wheel events to cursor Up/Down key events in alternate screen.
-        // Without this, Windows Terminal sends Up/Down keys instead of
-        // ScrollUp/ScrollDown mouse events, breaking scroll.
-        let _ = write!(out, "\x1b[?1007l");
-        out.flush()?;
+    /// VT sequences to enable TUI features (alternate screen, mouse, paste, etc).
+    const VT_ENABLE: &str = concat!(
+        "\x1b[?1049h", // enter alternate screen
+        "\x1b[?1000h", // enable mouse
+        "\x1b[?1002h", // enable mouse tracking (button events)
+        "\x1b[?1003h", // enable all mouse motion
+        "\x1b[?1006h", // SGR mouse mode
+        "\x1b[?2004h", // enable bracketed paste
+        "\x1b[?25l",   // hide cursor
+        "\x1b[?1007l", // disable alternate scroll mode
+    );
+
+    /// VT sequences to restore terminal (reverse of VT_ENABLE).
+    const VT_RESTORE: &str = concat!(
+        "\x1b[?1007h", // re-enable alternate scroll mode
+        "\x1b[?2004l", // disable bracketed paste
+        "\x1b[?1006l", // disable SGR mouse mode
+        "\x1b[?1003l", // disable all mouse motion
+        "\x1b[?1002l", // disable mouse tracking
+        "\x1b[?1000l", // disable mouse
+        "\x1b[?25h",   // show cursor
+        "\x1b[?1049l", // leave alternate screen
+    );
+
+    fn enter_terminal(term: &mut termina::PlatformTerminal) -> anyhow::Result<()> {
+        term.set_panic_hook(|handle| {
+            use std::io::Write;
+            let _ = write!(handle, "{}", Self::VT_RESTORE);
+            let _ = handle.flush();
+        });
+        term.enter_raw_mode()?;
+        write!(term, "{}", Self::VT_ENABLE)?;
+        term.flush()?;
         Ok(())
     }
 
-    fn exit_terminal(out: &mut impl Write) {
-        // Re-enable alternate scroll mode before leaving alternate screen.
-        let _ = write!(out, "\x1b[?1007h");
-        let _ = crossterm::execute!(
-            out,
-            crossterm::event::DisableBracketedPaste,
-            crossterm::event::DisableMouseCapture,
-            crossterm::cursor::Show,
-            terminal::LeaveAlternateScreen,
-        );
-        let _ = terminal::disable_raw_mode();
+    /// Restore terminal state: write VT sequences and exit raw mode.
+    fn exit_terminal(term: &mut termina::PlatformTerminal) {
+        let _ = write!(term, "{}", Self::VT_RESTORE);
+        let _ = term.flush();
+        let _ = term.enter_cooked_mode();
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
         let (tx, mut rx) = mpsc::channel::<Event>(1024);
         self.tx = Some(tx.clone());
 
-        let mut out = term::buffered_stdout();
-        Self::enter_terminal(&mut out)?;
-        out.flush()?;
+        let mut term = self
+            .term
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("failed to open terminal"))?;
+        let reader = term.event_reader();
+        Self::enter_terminal(&mut term)?;
         self.renderer.clear_screen();
 
         if self.config.model.is_none() {
@@ -271,7 +292,7 @@ impl App {
         self.render();
 
         let tx_input = tx.clone();
-        tokio::task::spawn_blocking(move || input::read_stdin_loop(tx_input));
+        tokio::task::spawn_blocking(move || input::read_stdin_loop(reader, tx_input));
 
         let tx_tick = tx.clone();
         tokio::spawn(async move {
@@ -295,8 +316,8 @@ impl App {
                     Ok(event) => {
                         if self.process_event(event) {
                             self.render();
-                            let mut out = term::buffered_stdout();
-                            Self::exit_terminal(&mut out);
+                            Self::exit_terminal(&mut term);
+                            drop(term);
                             std::process::exit(0);
                         }
                         drained += 1;
@@ -307,8 +328,8 @@ impl App {
             self.render();
         }
 
-        let mut out = term::buffered_stdout();
-        Self::exit_terminal(&mut out);
+        Self::exit_terminal(&mut term);
+        drop(term);
         std::process::exit(0);
     }
 }

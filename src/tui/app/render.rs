@@ -5,7 +5,7 @@ use crate::tui::renderer::{CursorState, Overlay};
 use crate::tui::selection;
 use crate::tui::text::{Line, Span};
 use crate::tui::theme::{icon, palette};
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use termina::event::{MouseButton, MouseEvent, MouseEventKind};
 use smallvec::smallvec;
 
 impl super::App {

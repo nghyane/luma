@@ -209,18 +209,18 @@ impl PromptState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use termina::event::{KeyCode, KeyEvent, Modifiers};
 
     fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
+        KeyEvent::new(code, Modifiers::NONE)
     }
 
     fn ctrl(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+        KeyEvent::new(KeyCode::Char(c), Modifiers::CONTROL)
     }
 
     fn alt(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::ALT)
+        KeyEvent::new(code, Modifiers::ALT)
     }
 
     fn type_str(p: &mut PromptState, s: &str) {

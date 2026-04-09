@@ -1,7 +1,7 @@
 /// Interactive model picker overlay.
 use crate::tui::text::{Line, Span};
 use crate::tui::theme::{icon, palette};
-use crossterm::event::{KeyCode, KeyEvent};
+use termina::event::{KeyCode, KeyEvent};
 use smallvec::smallvec;
 
 /// Picker result after handling a key.
@@ -58,14 +58,14 @@ impl Picker {
                 self.is_active = false;
                 PickerAction::Select(model)
             }
-            KeyCode::Esc => {
+            KeyCode::Escape => {
                 self.is_active = false;
                 PickerAction::Cancel
             }
             KeyCode::Char('c')
                 if key
                     .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    .contains(termina::event::Modifiers::CONTROL) =>
             {
                 self.is_active = false;
                 PickerAction::Cancel
@@ -125,14 +125,14 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::KeyModifiers;
+    use termina::event::Modifiers;
 
     fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
+        KeyEvent::new(code, Modifiers::NONE)
     }
 
     fn ctrl(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+        KeyEvent::new(KeyCode::Char(c), Modifiers::CONTROL)
     }
 
     #[test]
@@ -162,7 +162,7 @@ mod tests {
         let mut p = Picker::new();
         p.open(vec!["a".into()], "a");
         assert!(matches!(
-            p.handle_key(&key(KeyCode::Esc)),
+            p.handle_key(&key(KeyCode::Escape)),
             PickerAction::Cancel
         ));
         assert!(!p.is_active);

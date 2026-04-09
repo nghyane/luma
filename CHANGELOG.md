@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-beta.4] - 2026-04-09
+
+### Changed
+- Replace crossterm with termina — fixes bracketed paste on Windows at the library level; VT input mode (`ENABLE_VIRTUAL_TERMINAL_INPUT`) means Windows Terminal now sends proper `\x1b[200~...\x1b[201~` paste sequences instead of individual key events
+- Terminal instance created once in `App::new()` and reused in `run()` (was created twice)
+- Panic hook delegates terminal restore to termina's `set_panic_hook` which opens a fresh PTY and restores original termios/console modes
+- VT enable/restore sequences deduplicated into `VT_ENABLE`/`VT_RESTORE` constants
+- Event dispatch consolidated — aborting vs normal branches merged into single match with `_ if aborting` guard
+- Input reader filters Csi/Osc/Dcs escape sequence responses at source instead of forwarding to dispatch
+
+### Fixed
+- Paste on Windows triggers as line-by-line Enter — crossterm's Windows backend uses `ReadConsoleInputW` which decomposes bracketed paste into individual key events; termina enables `ENABLE_VIRTUAL_TERMINAL_INPUT` + `ReadConsoleInputA` so paste arrives as a single `Event::Paste`
+- Panic leaves terminal in raw mode — `exit_terminal` now calls `enter_cooked_mode()` explicitly; `drop(term)` before `process::exit` ensures destructors run
+- Terminal raw mode not restored on panic — crossterm had no way to call `disable_raw_mode()` from panic hook without the terminal instance; termina's `set_panic_hook` captures original termios and restores it via fresh PTY handle
+
 ## [0.4.0-beta.3] - 2026-04-09
 
 ### Fixed

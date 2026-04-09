@@ -1,6 +1,6 @@
 /// Key handling — keystrokes, paste text, history, dropdown.
 use super::PromptAction;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 const PASTE_INLINE_THRESHOLD: usize = 5;
 const PASTE_MAX_BYTES: usize = 1_048_576; // 1 MB
@@ -51,7 +51,7 @@ impl super::PromptState {
                 self.accept_dropdown();
                 Some(PromptAction::Redraw)
             }
-            KeyCode::Esc => {
+            KeyCode::Escape => {
                 self.buf.clear();
                 self.comp.dropdown_idx = 0;
                 Some(PromptAction::Redraw)
@@ -61,8 +61,8 @@ impl super::PromptState {
     }
 
     fn handle_normal_key(&mut self, key: &KeyEvent) -> PromptAction {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let ctrl = key.modifiers.contains(Modifiers::CONTROL);
+        let alt = key.modifiers.contains(Modifiers::ALT);
 
         match key.code {
             KeyCode::Enter if alt => {
@@ -89,7 +89,7 @@ impl super::PromptState {
                 self.buf.kill_before();
                 PromptAction::Redraw
             }
-            KeyCode::Esc => {
+            KeyCode::Escape => {
                 if self.buf.is_command() || self.buf.line_count() > 1 {
                     self.buf.clear();
                     PromptAction::Redraw
