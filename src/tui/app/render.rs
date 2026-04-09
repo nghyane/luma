@@ -197,19 +197,50 @@ impl super::App {
     }
 
     fn build_input_lines(&self) -> Vec<Line> {
+        use crate::tui::text::wrap_line;
+
         let bar = icon::PROMPT;
         let bar_empty = Line::new(smallvec![Span::deco(bar.to_owned(), palette::ACCENT)]);
         let total_h = self.regions.input.height as usize;
-        let mut lines = Vec::with_capacity(total_h);
+        let bar_prefix = format!("{bar}  ");
+        let bar_w = crate::tui::text::display_width(&bar_prefix);
+        let content_w = (self.regions.input.width as usize).saturating_sub(bar_w);
 
+        // Wrap prompt lines to fit the available width.
+        let raw_prompt = self.ui.prompt.lines();
+        let mut wrapped: Vec<Line> = Vec::new();
+        for pl in &raw_prompt {
+            let wlines = wrap_line(pl, content_w, None);
+            wrapped.extend(wlines);
+        }
+
+        // Available rows for prompt content (between top bar and mode + bottom border).
+        let content_slots = total_h.saturating_sub(3);
+
+        // Determine which wrapped line the cursor sits on so we can scroll.
+        let cursor_col = self.ui.prompt.cursor_column();
+        let cursor_wrap_row = if content_w > 0 {
+            cursor_col / content_w
+        } else {
+            0
+        };
+        let scroll = if wrapped.len() > content_slots {
+            // Keep cursor visible: scroll so cursor row is within the window.
+            cursor_wrap_row.saturating_sub(content_slots.saturating_sub(1))
+        } else {
+            0
+        };
+        let visible: Vec<&Line> = wrapped.iter().skip(scroll).take(content_slots).collect();
+
+        let mut lines = Vec::with_capacity(total_h);
         lines.push(bar_empty.clone());
-        for pl in &self.ui.prompt.lines() {
-            let mut spans = smallvec![Span::deco(format!("{bar}  "), palette::ACCENT)];
-            spans.extend(pl.spans.iter().cloned());
+        for vl in &visible {
+            let mut spans = smallvec![Span::deco(bar_prefix.clone(), palette::ACCENT)];
+            spans.extend(vl.spans.iter().cloned());
             lines.push(Line::new(spans));
         }
 
-        let mut mode_spans = smallvec![Span::deco(format!("{bar}  "), palette::ACCENT)];
+        let mut mode_spans = smallvec![Span::deco(bar_prefix.clone(), palette::ACCENT)];
         mode_spans.extend(self.ui.status.mode_line().spans.iter().cloned());
         let mode = Line::new(mode_spans);
 
@@ -230,8 +261,29 @@ impl super::App {
 
     fn update_cursor(&mut self) {
         let ir = &self.regions.input;
-        let cursor_col = ir.col + 3 + self.ui.prompt.cursor_column() as u16;
-        let cursor_row = ir.row + 1;
+        let bar_w = 3u16; // "┃  "
+        let content_w = ir.width.saturating_sub(bar_w) as usize;
+        let cursor_col_abs = self.ui.prompt.cursor_column();
+
+        // Compute wrapped row and column.
+        let (wrap_row, wrap_col) = if content_w > 0 {
+            (cursor_col_abs / content_w, cursor_col_abs % content_w)
+        } else {
+            (0, cursor_col_abs)
+        };
+
+        // Scroll offset mirrors build_input_lines.
+        let total_h = ir.height as usize;
+        let content_slots = total_h.saturating_sub(3);
+        let scroll = if content_slots > 0 {
+            wrap_row.saturating_sub(content_slots.saturating_sub(1))
+        } else {
+            0
+        };
+        let visible_row = wrap_row - scroll;
+
+        let cursor_row = ir.row + 1 + visible_row as u16;
+        let cursor_col = ir.col + bar_w + wrap_col as u16;
         if self.agent.state == RunState::PendingAbort {
             self.renderer.set_cursor(CursorState::Hidden);
         } else {
