@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Paste on Windows triggers as line-by-line Enter — crossterm's Windows backend uses `ReadConsoleInputW` which decomposes bracketed paste into individual key events; termina enables `ENABLE_VIRTUAL_TERMINAL_INPUT` + `ReadConsoleInputA` so paste arrives as a single `Event::Paste`
 - Panic leaves terminal in raw mode — `exit_terminal` now calls `enter_cooked_mode()` explicitly; `drop(term)` before `process::exit` ensures destructors run
 - Terminal raw mode not restored on panic — crossterm had no way to call `disable_raw_mode()` from panic hook without the terminal instance; termina's `set_panic_hook` captures original termios and restores it via fresh PTY handle
+- Ctrl+C kills process on Windows instead of clearing input buffer — console sends `CTRL_C_EVENT` signal independently of VT key event; absorb signal with tokio handler so Ctrl+C is only processed as VT byte through terminal reader
+- Bash tool panics on multi-byte UTF-8 output — `accumulate()` used raw byte indices to split/slice the head+tail rolling window; index landing inside a multi-byte char (e.g. box-drawing `│`) causes `not a char boundary` panic; now snaps to nearest valid boundary
 
 ## [0.4.0-beta.3] - 2026-04-09
 
