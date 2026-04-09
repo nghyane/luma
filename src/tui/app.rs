@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 const TICK_INTERVAL: Duration = Duration::from_millis(80);
 const SCROLL_STEP: usize = 3;
 const ABORT_HINT_TICKS: u8 = 25;
-const DRAIN_BUDGET: usize = 64;
+const DRAIN_BUDGET: usize = 256;
 
 const LOGO: &[&str] = &[
     "                                           ⢰⡇⠀⠀⣸⠃      ⣴⠟⠁⠈⢻⣦",
@@ -242,7 +242,7 @@ impl App {
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
-        let (tx, mut rx) = mpsc::channel::<Event>(256);
+        let (tx, mut rx) = mpsc::channel::<Event>(1024);
         self.tx = Some(tx.clone());
 
         let mut out = term::buffered_stdout();

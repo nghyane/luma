@@ -209,7 +209,7 @@ async fn execute_one(
                 })
                 .await;
 
-            let (output_tx, mut output_rx) = mpsc::channel::<String>(64);
+            let (output_tx, mut output_rx) = mpsc::channel::<String>(256);
             let tx_fwd = tx.clone();
             let tool_name = tc.function.name.clone();
             let fwd_handle = tokio::spawn(async move {
