@@ -266,7 +266,12 @@ impl Renderer {
             }
         }
         if let CursorState::Visible { row, col } = self.cursor {
-            let _ = write!(self.out, "\x1b[{row};{col}H\x1b[?25h");
+            // Position cursor + show + set steady block shape (DECSCUSR 2)
+            // + set cursor color to bright white (OSC 12).
+            let _ = write!(
+                self.out,
+                "\x1b[{row};{col}H\x1b[?25h\x1b[2 q\x1b]12;#cdd6f4\x1b\\"
+            );
             any_diff = true;
         }
         let _ = write!(self.out, "\x1b[?2026l");

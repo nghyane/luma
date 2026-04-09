@@ -245,14 +245,16 @@ impl App {
 
     /// VT sequences to restore terminal (reverse of VT_ENABLE).
     const VT_RESTORE: &str = concat!(
-        "\x1b[?1007h", // re-enable alternate scroll mode
-        "\x1b[?2004l", // disable bracketed paste
-        "\x1b[?1006l", // disable SGR mouse mode
-        "\x1b[?1003l", // disable all mouse motion
-        "\x1b[?1002l", // disable mouse tracking
-        "\x1b[?1000l", // disable mouse
-        "\x1b[?25h",   // show cursor
-        "\x1b[?1049l", // leave alternate screen
+        "\x1b[?1007h",    // re-enable alternate scroll mode
+        "\x1b[?2004l",    // disable bracketed paste
+        "\x1b[?1006l",    // disable SGR mouse mode
+        "\x1b[?1003l",    // disable all mouse motion
+        "\x1b[?1002l",    // disable mouse tracking
+        "\x1b[?1000l",    // disable mouse
+        "\x1b[0 q",       // restore default cursor shape
+        "\x1b]112\x1b\\", // restore default cursor color
+        "\x1b[?25h",      // show cursor
+        "\x1b[?1049l",    // leave alternate screen
     );
 
     fn enter_terminal(term: &mut termina::PlatformTerminal) -> anyhow::Result<()> {
