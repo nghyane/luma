@@ -98,7 +98,7 @@ fn parse_committed(cache: &mut TextCache, committed: &[String], start: usize, wi
         let is_table = is_table_line(text);
 
         if !table_rows.is_empty() && !is_table {
-            flush_table(&mut cache.lines, &table_rows);
+            flush_table(&mut cache.lines, &table_rows, width);
             cache.trailing_table_lines = 0;
             cache.trailing_table_rows = 0;
             table_rows.clear();
@@ -121,20 +121,22 @@ fn parse_committed(cache: &mut TextCache, committed: &[String], start: usize, wi
 
     if !table_rows.is_empty() {
         let before = cache.lines.len();
-        flush_table(&mut cache.lines, &table_rows);
+        flush_table(&mut cache.lines, &table_rows, width);
         cache.trailing_table_lines = cache.lines.len() - before;
         cache.trailing_table_rows = table_rows.len();
     }
 }
 
-fn flush_table(lines: &mut Vec<Line>, rows: &[String]) {
+fn flush_table(lines: &mut Vec<Line>, rows: &[String], width: usize) {
     for rl in render_table(rows) {
-        let is_empty = rl.visible_width() == 0;
-        let prev_empty = lines.last().is_none_or(|p: &Line| p.visible_width() == 0);
-        if is_empty && prev_empty {
-            continue;
+        for wl in crate::tui::text::wrap_line(&rl, width, None) {
+            let is_empty = wl.visible_width() == 0;
+            let prev_empty = lines.last().is_none_or(|p: &Line| p.visible_width() == 0);
+            if is_empty && prev_empty {
+                continue;
+            }
+            lines.push(wl);
         }
-        lines.push(rl);
     }
 }
 

@@ -12,10 +12,15 @@ pub enum Align {
     Right,
 }
 
-/// Check if a raw line is a table row (starts with | and has at least 2 pipes).
+/// Check if a raw line is a table row.
+///
+/// Requires the line to start *and* end with `|` and contain at least 3 pipes
+/// (i.e. two columns). This avoids false positives for tree diagrams like
+/// `|   |-- lib.rs` which start with `|` but don't end with one, and single-cell
+/// lines like `| box |` which have only 2 pipes.
 pub fn is_table_line(raw: &str) -> bool {
-    let trimmed = raw.trim_start();
-    trimmed.starts_with('|') && trimmed.matches('|').count() >= 2
+    let trimmed = raw.trim();
+    trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.matches('|').count() >= 3
 }
 
 /// Check if a raw line is a separator row (|---|---|).
@@ -222,9 +227,19 @@ mod tests {
 
     #[test]
     fn tree_not_detected_as_table() {
+        // Box-drawing tree chars
         assert!(!is_table_line("│   ├── src/"));
         assert!(!is_table_line("├── main.rs"));
+        // ASCII pipe tree (nested has multiple |)
+        assert!(!is_table_line("|-- main.rs"));
+        assert!(!is_table_line("|   |-- lib.rs"));
+        assert!(!is_table_line("|   |   |-- mod.rs"));
+        // Single-pipe text
         assert!(!is_table_line("| just text"));
+        // Single-cell (only 2 pipes)
+        assert!(!is_table_line("| box |"));
+        // Actual tables (>= 3 pipes, starts and ends with |)
         assert!(is_table_line("| col1 | col2 |"));
+        assert!(is_table_line("|a|b|"));
     }
 }
