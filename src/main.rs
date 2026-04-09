@@ -134,7 +134,9 @@ fn self_update() -> anyhow::Result<()> {
 
 fn build_env_context() -> String {
     let cwd = std::env::current_dir().unwrap_or_default();
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "unknown".into());
+    let shell = std::env::var("SHELL")
+        .or_else(|_| std::env::var("COMSPEC"))
+        .unwrap_or_else(|_| "unknown".into());
 
     // Git info
     let is_git = cmd_ok(&cwd, "git", &["rev-parse", "--is-inside-work-tree"]);
@@ -175,11 +177,11 @@ fn build_env_context() -> String {
         ("docker-compose.yml", &[("docker", "--version")]),
         (
             "requirements.txt",
-            &[("python3", "--version"), ("pip3", "--version")],
+            &[("python3", "--version"), ("python", "--version"), ("pip3", "--version"), ("pip", "--version")],
         ),
         (
             "pyproject.toml",
-            &[("python3", "--version"), ("pip3", "--version")],
+            &[("python3", "--version"), ("python", "--version"), ("pip3", "--version"), ("pip", "--version")],
         ),
         ("go.mod", &[("go", "version")]),
         ("Makefile", &[("make", "--version")]),

@@ -139,7 +139,10 @@ fn preview_text_n(text: &str, max: usize) -> String {
 }
 
 fn sessions_dir() -> PathBuf {
-    crate::config::home_dir().join(".config/luma/sessions")
+    crate::config::home_dir()
+        .join(".config")
+        .join("luma")
+        .join("sessions")
 }
 
 /// Directory for storing session assets (images, etc).
