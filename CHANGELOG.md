@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-beta.8] - 2026-04-10
+
+### Fixed
+- Write/Edit tool block stays blank during Anthropic's ~10s pause between the `path` and `content`/`new_string` fields — introduce `Event::ToolSelected` emitted by providers as soon as a tool_use block starts, so the UI shows a "preparing Write..." card immediately and the preview fills in as deltas arrive; tool lifecycle now flows `ToolSelected (provider) → ToolInput* (provider) → ToolStart (orchestrator) → ToolOutput* (orchestrator) → ToolEnd (orchestrator)` with each event owned by exactly one layer
+- Pending tool blocks could stay in "preparing..." forever when a tool_use was discarded mid-turn (provider retry, max_tokens escalation, stream cut) — `Document::close_pending()` scans the full block list and finalises every unfinished tool/skill block; wired into `on_agent_done`, `on_agent_error`, `provider_retry`, and `abort` so every orchestration seam cleans up after itself
+- `abort()` only walked backwards from the tail and broke at the first non-tool/skill block, missing any pending tool buried under later content — now reuses `close_pending` which walks the full document
+
 ## [0.4.0-beta.7] - 2026-04-10
 
 ### Added
