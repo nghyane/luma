@@ -1,15 +1,15 @@
 /// Stdin reader — blocking thread that reads termina events.
 use crate::event::Event;
-use termina::event::KeyEventKind;
+use crate::event_bus::Sender;
 use termina::EventReader;
-use tokio::sync::mpsc;
+use termina::event::KeyEventKind;
 
 /// Read terminal events in a blocking loop, sending parsed Events.
 ///
 /// Filters out events the app never handles: key Release/Repeat, and
 /// escape sequence responses (Csi, Osc, Dcs) that termina exposes but
 /// luma does not use.
-pub fn read_stdin_loop(reader: EventReader, tx: mpsc::Sender<Event>) {
+pub fn read_stdin_loop(reader: EventReader, tx: Sender) {
     loop {
         let Ok(raw) = reader.read(|_| true) else {
             return;

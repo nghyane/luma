@@ -1,7 +1,7 @@
 use crate::event::Event;
+use crate::event_bus::Sender as EventSender;
 use anyhow::{Result, bail};
 use std::future::Future;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const MAX_RETRIES: u8 = 4;
@@ -173,7 +173,7 @@ fn jittered_backoff_secs(attempt: u8) -> u64 {
     jitter.max(1)
 }
 
-async fn send_retry_event(tx: &mpsc::Sender<Event>, provider: &str, delay_secs: u64, attempt: u8) {
+async fn send_retry_event(tx: &EventSender, provider: &str, delay_secs: u64, attempt: u8) {
     let _ = tx
         .send(Event::ProviderRetry {
             provider: provider.to_owned(),
@@ -200,7 +200,7 @@ fn extract_error_message(body: &str) -> String {
 /// Send an HTTP request with retry/backoff for transient provider errors.
 pub async fn send_with_retry<F, Fut>(
     provider: &str,
-    tx: &mpsc::Sender<Event>,
+    tx: &EventSender,
     cancel: &CancellationToken,
     mut send: F,
 ) -> Result<reqwest::Response>

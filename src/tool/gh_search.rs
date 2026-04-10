@@ -51,6 +51,7 @@ impl Tool for GhSearchTool {
                 },
                 "required": ["repo", "query"]
             }),
+            streamable_arg: None,
         }
     }
 

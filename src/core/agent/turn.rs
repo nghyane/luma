@@ -1,10 +1,12 @@
 /// Turn execution — auth, provider, tool loop, summaries, mid-turn save.
 use super::AgentConfig;
-use crate::core::provider::Provider;
+use crate::core::provider::{Provider, StopReason, StreamResponse};
 use crate::core::registry::Registry;
 use crate::core::session::Session;
 use crate::core::types::{Message, ToolCall};
 use crate::event::Event;
+use crate::event_bus::Sender as EventSender;
+use crate::provider::claude::ESCALATED_MAX_TOKENS;
 use anyhow::Result;
 use tokio::sync::mpsc;
 
@@ -19,7 +21,7 @@ pub async fn run_chat_turn(
     session: &mut Session,
     config: &AgentConfig,
     registry: &Registry,
-    tx: &mpsc::Sender<Event>,
+    tx: &EventSender,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     use crate::config::auth::{self, AuthProvider};
@@ -34,20 +36,28 @@ pub async fn run_chat_turn(
 
     match run_turn(session, &*provider, registry, tx, cancel.clone()).await {
         Ok(()) => Ok(()),
-        Err(e) if e.to_string().contains("401") || e.to_string().contains("Unauthorized") => {
+        Err(e) if is_auth_error(&e) => {
             let _ = tx
                 .send(Event::ToolOutput {
                     name: String::new(),
-                    chunk: "Token expired, refreshing...".into(),
+                    chunk: "token rejected, refreshing...".into(),
                 })
                 .await;
-            auth::clear_cached(provider_kind);
-            let auth = auth::resolve(provider_kind).await?;
+            // Force a refresh regardless of local expiration — the server
+            // said this token is bad, so the client clock or local cache
+            // is lying. `force_refresh` bypasses the `is_expired` fast
+            // path and always round-trips to the OAuth endpoint.
+            let auth = auth::force_refresh(provider_kind).await?;
             let provider = build_provider(config, &auth, &session.id);
             run_turn(session, &*provider, registry, tx, cancel).await
         }
         Err(e) => Err(e),
     }
+}
+
+fn is_auth_error(err: &anyhow::Error) -> bool {
+    let msg = err.to_string();
+    msg.contains("401") || msg.contains("Unauthorized") || msg.contains("unauthorized")
 }
 
 fn build_provider(
@@ -86,7 +96,10 @@ fn build_provider(
 /// Whether an error is a transient stream failure worth retrying.
 fn is_stream_retryable(err: &anyhow::Error) -> bool {
     // Typed: providers emit StreamInterrupted for recoverable failures.
-    if err.downcast_ref::<crate::provider::sse::StreamInterrupted>().is_some() {
+    if err
+        .downcast_ref::<crate::provider::sse::StreamInterrupted>()
+        .is_some()
+    {
         return true;
     }
     // Reqwest transport errors (connection reset, broken pipe, etc.)
@@ -96,24 +109,32 @@ fn is_stream_retryable(err: &anyhow::Error) -> bool {
     false
 }
 
+/// Shared context for turn execution — fixed across iterations and retries.
+struct TurnCtx<'a> {
+    provider: &'a dyn Provider,
+    schemas: &'a [crate::core::types::ToolSchema],
+    server_schemas: &'a [serde_json::Value],
+    resolve_image: &'a crate::core::provider::ImageResolver,
+    tx: &'a EventSender,
+    cancel: &'a tokio_util::sync::CancellationToken,
+}
+
 /// Stream with automatic retry on transient network failures.
 ///
 /// On a retryable failure, notifies the UI via ProviderRetry event and
 /// re-sends the request. The caller's messages are immutable here —
 /// only the caller (run_turn) mutates session state.
 async fn stream_with_retry(
+    ctx: &TurnCtx<'_>,
     messages: &[Message],
-    provider: &dyn Provider,
-    schemas: &[crate::core::types::ToolSchema],
-    server_schemas: &[serde_json::Value],
-    resolve_image: &crate::core::provider::ImageResolver,
-    tx: &mpsc::Sender<Event>,
-    cancel: &tokio_util::sync::CancellationToken,
-) -> Result<(Message, crate::core::types::Usage)> {
+    max_tokens_override: Option<u32>,
+) -> Result<StreamResponse> {
+    use crate::core::provider::StreamRequest;
+
     let mut last_err: Option<anyhow::Error> = None;
 
     for attempt in 0..=STREAM_RETRIES {
-        if cancel.is_cancelled() {
+        if ctx.cancel.is_cancelled() {
             anyhow::bail!("Aborted");
         }
 
@@ -121,9 +142,10 @@ async fn stream_with_retry(
             if let Some(ref e) = last_err {
                 crate::dbg_log!("stream retry attempt {attempt}: {e}");
             }
-            let _ = tx
+            let _ = ctx
+                .tx
                 .send(Event::ProviderRetry {
-                    provider: provider.name().to_owned(),
+                    provider: ctx.provider.name().to_owned(),
                     delay_secs: STREAM_RETRY_DELAY_SECS,
                     attempt,
                     max_attempts: STREAM_RETRIES + 1,
@@ -131,21 +153,20 @@ async fn stream_with_retry(
                 .await;
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(STREAM_RETRY_DELAY_SECS)) => {}
-                _ = cancel.cancelled() => anyhow::bail!("Aborted"),
+                _ = ctx.cancel.cancelled() => anyhow::bail!("Aborted"),
             }
         }
 
-        match provider
-            .stream(
-                messages,
-                schemas,
-                server_schemas,
-                resolve_image,
-                tx.clone(),
-                cancel.clone(),
-            )
-            .await
-        {
+        let req = StreamRequest {
+            messages,
+            tools: ctx.schemas,
+            server_tools: ctx.server_schemas,
+            resolve_image: ctx.resolve_image,
+            max_tokens_override,
+            tx: ctx.tx.clone(),
+            cancel: ctx.cancel.clone(),
+        };
+        match ctx.provider.stream(req).await {
             Ok(result) => return Ok(result),
             Err(e) => {
                 if !is_stream_retryable(&e) || attempt == STREAM_RETRIES {
@@ -161,32 +182,60 @@ async fn stream_with_retry(
 }
 
 /// Run one turn: provider call → tool execution loop.
+///
+/// Per-request escalation on `max_tokens`: if a stream finishes with
+/// `stop_reason = MaxTokens` using the provider default, the same request is
+/// retried once with [`ESCALATED_MAX_TOKENS`]. Mirrors claude-code's
+/// `max_output_tokens_escalate` path.
 async fn run_turn(
     session: &mut Session,
     provider: &dyn Provider,
     registry: &Registry,
-    tx: &mpsc::Sender<Event>,
+    tx: &EventSender,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let schemas = registry.schemas();
     let server_schemas = provider.server_tool_schemas(registry.server_capabilities());
     let resolve_image = crate::core::session::image_resolver(&session.id);
+    let ctx = TurnCtx {
+        provider,
+        schemas: &schemas,
+        server_schemas: &server_schemas,
+        resolve_image: &*resolve_image,
+        tx,
+        cancel: &cancel,
+    };
 
     for _ in 0..MAX_ITERATIONS {
         if cancel.is_cancelled() {
             anyhow::bail!("Aborted");
         }
 
-        let (response, usage) = stream_with_retry(
-            &session.messages,
-            provider,
-            &schemas,
-            &server_schemas,
-            &*resolve_image,
-            tx,
-            &cancel,
-        )
-        .await?;
+        // First attempt: provider default max_tokens.
+        let mut result = stream_with_retry(&ctx, &session.messages, None).await?;
+
+        // Escalate once if the first call hit max_tokens before finishing,
+        // but only if the provider actually honors an override. For providers
+        // that ignore `max_tokens_override` (e.g. Codex), retrying with the
+        // same cap would waste a request; surface the failure directly.
+        if result.stop_reason == StopReason::MaxTokens && provider.supports_max_tokens_override() {
+            crate::dbg_log!("max_tokens hit — escalating to {ESCALATED_MAX_TOKENS} and retrying");
+            let _ = tx
+                .send(Event::ProviderRetry {
+                    provider: provider.name().to_owned(),
+                    delay_secs: 0,
+                    attempt: 1,
+                    max_attempts: 2,
+                })
+                .await;
+            result = stream_with_retry(&ctx, &session.messages, Some(ESCALATED_MAX_TOKENS)).await?;
+        }
+
+        let StreamResponse {
+            message: response,
+            usage,
+            stop_reason,
+        } = result;
 
         session.usage.input_tokens += usage.input_tokens;
         session.usage.output_tokens += usage.output_tokens;
@@ -199,6 +248,22 @@ async fn run_turn(
 
         if cancel.is_cancelled() {
             anyhow::bail!("Aborted");
+        }
+
+        // Still MaxTokens after (potentially) escalating → turn is cut off.
+        // Message differs depending on whether escalation actually ran.
+        if stop_reason == StopReason::MaxTokens {
+            if provider.supports_max_tokens_override() {
+                anyhow::bail!(
+                    "output token limit hit even at {ESCALATED_MAX_TOKENS} tokens. \
+                     Try /compact or switch model."
+                );
+            } else {
+                anyhow::bail!(
+                    "{} hit its output token limit. Try /compact or switch model.",
+                    provider.name()
+                );
+            }
         }
 
         let tool_calls = match &response.tool_calls {
@@ -248,7 +313,7 @@ fn skill_name_from_read(tool_name: &str, args: &serde_json::Value) -> Option<Str
 async fn execute_one(
     tc: &ToolCall,
     registry: &Registry,
-    tx: &mpsc::Sender<Event>,
+    tx: &EventSender,
     cancel: tokio_util::sync::CancellationToken,
 ) -> (String, String) {
     let args: serde_json::Value = serde_json::from_str(&tc.function.arguments)
@@ -327,7 +392,7 @@ async fn execute_one(
 pub async fn execute_tools(
     tool_calls: &[ToolCall],
     registry: &Registry,
-    tx: &mpsc::Sender<Event>,
+    tx: &EventSender,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Vec<(String, String)> {
     if tool_calls.len() == 1 {
@@ -364,6 +429,7 @@ mod tests {
                 name: "slow".into(),
                 description: "test".into(),
                 parameters: serde_json::json!({}),
+                streamable_arg: None,
             }
         }
         fn execute(
@@ -390,7 +456,7 @@ mod tests {
         let mut registry = Registry::new();
         registry.register(Box::new(SlowTool { counter: &COUNTER }));
 
-        let (tx, _rx) = mpsc::channel(64);
+        let (tx, _rx) = crate::event_bus::channel();
         let cancel = CancellationToken::new();
 
         let calls = vec![
@@ -428,8 +494,7 @@ mod tests {
 
     #[test]
     fn stream_interrupted_is_retryable() {
-        let err: anyhow::Error =
-            crate::provider::sse::StreamInterrupted("timeout".into()).into();
+        let err: anyhow::Error = crate::provider::sse::StreamInterrupted("timeout".into()).into();
         assert!(is_stream_retryable(&err));
     }
 

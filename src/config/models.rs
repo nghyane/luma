@@ -2,7 +2,6 @@
 use crate::config::auth::{self, AuthProvider};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -45,7 +44,6 @@ impl AgentMode {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Snapshot {
     models: Vec<ModelEntry>,
-    context_windows: HashMap<String, u64>,
 }
 
 fn snapshot_path() -> PathBuf {
@@ -72,11 +70,10 @@ pub fn all_models() -> Vec<ModelEntry> {
     load_snapshot().map(|s| s.models).unwrap_or_default()
 }
 
-/// Context window for a model.
-pub fn context_window(model_id: &str) -> u64 {
-    load_snapshot()
-        .and_then(|s| s.context_windows.get(model_id).copied())
-        .unwrap_or(200_000)
+/// Context window for a model. Currently a constant default until per-model
+/// data is populated from provider APIs.
+pub fn context_window(_model_id: &str) -> u64 {
+    200_000
 }
 
 /// Resolve default model for a mode.
@@ -124,10 +121,7 @@ pub async fn sync() -> Result<usize> {
         models.extend(m);
     }
 
-    let snapshot = Snapshot {
-        models,
-        context_windows: HashMap::new(),
-    };
+    let snapshot = Snapshot { models };
 
     let path = snapshot_path();
     if let Some(parent) = path.parent() {

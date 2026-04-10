@@ -35,7 +35,7 @@ impl Completion {
 
     /// Fuzzy match files against query.
     pub fn file_matches(&self, query: &str) -> Vec<String> {
-        if self.file_cache.is_empty() && !self.file_cache_valid {
+        if !self.file_cache_valid {
             return Vec::new();
         }
         let q = query.to_lowercase();

@@ -51,6 +51,7 @@ impl Tool for GhLsTool {
                 },
                 "required": ["repo"]
             }),
+            streamable_arg: None,
         }
     }
 

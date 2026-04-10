@@ -1,12 +1,12 @@
 /// Event dispatch — routes events to document (model) or view.
 use super::state::{PickerMode, RunState};
-use super::{Action, ABORT_HINT_TICKS};
+use super::{ABORT_HINT_TICKS, Action};
 use crate::config::models;
 use crate::event::Event;
 use crate::tui::picker::PickerAction;
 use crate::tui::prompt::PromptAction;
-use termina::event::{KeyCode, KeyEvent, Modifiers};
 use termina::Event as TermEvent;
+use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 impl super::App {
     pub(super) fn handle(&mut self, event: Event) -> Action {
@@ -255,7 +255,7 @@ impl super::App {
         match self.ui.prompt.handle_key(&key) {
             PromptAction::None => Action::Continue,
             PromptAction::Redraw => Action::Render,
-            PromptAction::Submit(content) => self.on_submit(content),
+            PromptAction::Submit(content, images) => self.on_submit(content, images),
             PromptAction::ToggleThinking => {
                 self.cycle_thinking();
                 Action::Render

@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-beta.7] - 2026-04-10
+
+### Added
+- Coalescing event bus (`src/event_bus.rs`) replacing bounded `mpsc` between provider and TUI — merges consecutive `Token`/`Thinking`/`ToolInput` deltas into queue tail so bursty streams never drop events and never stall the provider loop; soft cap on coalesced bytes + hard cap on unmergeable entries provides backpressure only under sustained UI stalls
+- Streaming JSON string extractor (`src/provider/json_stream.rs`) — extracts a single top-level string field from `partial_json` tool-call deltas as bytes arrive, with correct escape + UTF-8 boundary handling
+- Per-tool `streamable_arg` in `ToolSchema` — tools opt into live preview of one argument (`content` for Write, `new_string` for Edit, `command` for Bash); provider layer no longer hardcodes tool names
+- `StopReason` on provider responses and per-request `max_tokens_override` — turn loop now escalates Claude output cap from 8192 → 64000 once on a `MaxTokens` stop, matching claude-code's `max_output_tokens_escalate` path
+- `force_refresh` path in auth — after a 401 the client always round-trips the OAuth endpoint instead of trusting local expiration, fixing stale-cache auth failures when another CLI rotates the keychain
+- Responsive markdown table rendering — wide tables shrink columns proportionally and wrap cell content to multiple lines per row (like HTML `<td>`) instead of overflowing the terminal
+- `StreamRequest` / `StreamResponse` structs bundling provider call inputs/outputs — smaller `Provider` trait signature, easier to extend without churning every impl
+- `supports_max_tokens_override` provider capability flag — callers skip the escalation retry for providers (Codex) whose backend ignores the override
+
+### Changed
+- Provider layer reworked around `StreamRequest` + coalescing event bus: Claude, OpenAI, and Codex rewritten to stream via the shared bus; SSE parser split into `SseLineBuffer` (pure byte→event) + background reader task with end-to-end backpressure
+- Claude tool-call preview now uses `JsonStringExtractor` + `streamable_arg` instead of ad-hoc per-tool parsing; OpenAI/Codex follow the same path
+- Prompt submission refactored — `PromptBuffer::take_content()` consumes text + image attachments atomically into `(blocks, images)` and clears the buffer, replacing separate `to_content()` / `take_images()` calls that could drift out of sync
+- Auth resolve picks whichever source has the freshest refresh_token (managed cache vs local keychain) and fails loudly with actionable errors when no refresh is possible, instead of silently returning an expired credential
+- Codex access token expiration extracted from the access_token JWT's `exp` claim directly (authoritative) instead of relying on `last_refresh` hints from `auth.json`
+- Auth retry on 401 now shows `token rejected, refreshing…` and always force-refreshes, even if `is_expired` returns false
+- `context_window()` returns a constant 200K default — removed unused `context_windows` map from model snapshot
+- `Provider::thinking()` getter removed; trait is now smaller and `set_thinking` is called once before boxing
+- Turn execution refactored around a `TurnCtx` struct — retries and escalation share one context instead of threading 7 parameters
+
+### Fixed
+- Token preview of long tool arguments stalls after first chunk — previous code re-parsed full accumulated JSON on every delta; `JsonStringExtractor` is incremental and correct at chunk boundaries, including mid-escape `\uXXXX`
+- `take_images()` left empty text segments behind, causing a stale cursor position after submit — `take_content()` clears the buffer in one step
+- Stream-level backpressure broken on fast providers — bounded `mpsc(1024)` could drop events under burst; event bus is lossless by construction
+- File completion cache incorrectly gated on both "empty AND invalid" — completions now hide as soon as the cache is invalidated
+- Auth cached-clear path could resurrect a stale credential on next resolve because local source was re-read without a refresh attempt; cache clear is no longer exposed — `force_refresh` is the only path
+- Clipboard image send used `try_send` and could silently drop on a full channel — now uses `blocking_send` on the event bus so paste never goes missing
+
+### Performance
+- `ScreenBuffer::row_hash` switched from `DefaultHasher` (SipHash) to FxHash-style multiply-add packing all cell fields into 2 u64 folds per cell — 6.9x speedup (63 µs → 9 µs per row) on large sessions; per-frame diff is no longer the bottleneck in 65K+ token sessions (see ROADMAP)
+- `flush_table` no longer double-wraps table rows — `render_table` now wraps to `max_width` directly, removing a redundant pass through `wrap_line`
+
+### Internal
+- `tokio-util` gains the `rt` feature for `AbortOnDropHandle` on the SSE reader task
+- Layout bench harness under `#[cfg(test)] mod layout_bench` for ad-hoc profiling on large documents
+
 ## [0.4.0-beta.6] - 2026-04-09
 
 ### Fixed

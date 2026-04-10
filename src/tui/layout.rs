@@ -239,17 +239,17 @@ mod tests {
 
     #[test]
     fn refresh_and_total() {
-        let mut blocks = text_blocks(&[&["a", "b", "c"], &["d", "e"]]);
+        let blocks = text_blocks(&[&["a", "b", "c"], &["d", "e"]]);
         let mut layout = Layout::new(80, 100);
-        layout.refresh(&mut blocks, 0);
+        layout.refresh(&blocks, 0);
         assert_eq!(layout.total_lines(), 5);
     }
 
     #[test]
     fn hit_test_finds_block() {
-        let mut blocks = text_blocks(&[&["a", "b", "c"], &["d", "e"]]);
+        let blocks = text_blocks(&[&["a", "b", "c"], &["d", "e"]]);
         let mut layout = Layout::new(80, 100);
-        layout.refresh(&mut blocks, 0);
+        layout.refresh(&blocks, 0);
         assert_eq!(layout.hit_test(0), Some(0));
         assert_eq!(layout.hit_test(3), Some(1));
         assert_eq!(layout.hit_test(5), None);
@@ -257,9 +257,9 @@ mod tests {
 
     #[test]
     fn window_iter_correct() {
-        let mut blocks = text_blocks(&[&["a", "b"], &["c"]]);
+        let blocks = text_blocks(&[&["a", "b"], &["c"]]);
         let mut layout = Layout::new(80, 100);
-        layout.refresh(&mut blocks, 0);
+        layout.refresh(&blocks, 0);
         let texts: Vec<String> = layout
             .window_iter(0, 3)
             .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
@@ -269,9 +269,9 @@ mod tests {
 
     #[test]
     fn clear_resets() {
-        let mut blocks = text_blocks(&[&["a"]]);
+        let blocks = text_blocks(&[&["a"]]);
         let mut layout = Layout::new(80, 100);
-        layout.refresh(&mut blocks, 0);
+        layout.refresh(&blocks, 0);
         layout.clear();
         assert_eq!(layout.total_lines(), 0);
     }

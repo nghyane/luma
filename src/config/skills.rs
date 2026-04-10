@@ -20,11 +20,10 @@ pub fn discover() -> Vec<Skill> {
     scan_dir(Path::new(".claude/skills"), &mut skills, &mut seen);
 
     // User-level
-    if let Some(home) = dirs() {
-        scan_dir(&home.join(".agents/skills"), &mut skills, &mut seen);
-        scan_dir(&home.join(".claude/skills"), &mut skills, &mut seen);
-        scan_dir(&home.join(".config/luma/skills"), &mut skills, &mut seen);
-    }
+    let home = super::home_dir();
+    scan_dir(&home.join(".agents/skills"), &mut skills, &mut seen);
+    scan_dir(&home.join(".claude/skills"), &mut skills, &mut seen);
+    scan_dir(&home.join(".config/luma/skills"), &mut skills, &mut seen);
 
     skills
 }
@@ -108,10 +107,6 @@ fn parse_skill_md(path: &Path) -> Option<Skill> {
         description,
         path: path.to_owned(),
     })
-}
-
-fn dirs() -> Option<PathBuf> {
-    Some(super::home_dir())
 }
 
 #[cfg(test)]

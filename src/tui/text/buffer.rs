@@ -163,23 +163,30 @@ impl ScreenBuffer {
         x - col
     }
 
-    /// Compute a hash for a row (for diff).
+    /// Compute a hash for a row (for diff). Uses FxHash-style multiply-add
+    /// instead of SipHash — this is a perf-critical per-frame operation and
+    /// we don't need cryptographic strength, only good distribution.
     pub fn row_hash(&self, row: u16) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
         let start = row as usize * self.width as usize;
         let end = start + self.width as usize;
+        // FxHash constant — good avalanche for non-adversarial input.
+        const K: u64 = 0x517cc1b727220a95;
+        let mut h: u64 = 0xcbf29ce484222325;
         for cell in &self.cells[start..end] {
-            cell.ch.hash(&mut hasher);
-            cell.fg.0.hash(&mut hasher);
-            cell.fg.1.hash(&mut hasher);
-            cell.fg.2.hash(&mut hasher);
-            cell.bg.0.hash(&mut hasher);
-            cell.bg.1.hash(&mut hasher);
-            cell.bg.2.hash(&mut hasher);
-            cell.flags.0.hash(&mut hasher);
+            // Pack cell fields into a single u64 chunk per cell, then fold.
+            // char is 21-bit, Rgb/Rgb/flags fit in 56 bits.
+            let packed = (cell.ch as u64)
+                ^ ((cell.fg.0 as u64) << 24)
+                ^ ((cell.fg.1 as u64) << 32)
+                ^ ((cell.fg.2 as u64) << 40)
+                ^ ((cell.bg.0 as u64) << 48)
+                ^ ((cell.bg.1 as u64) << 56);
+            h = (h ^ packed).wrapping_mul(K);
+            // Second round to absorb bg.2 and flags without collision.
+            let tail = (cell.bg.2 as u64) | ((cell.flags.0 as u64) << 8);
+            h = (h ^ tail).wrapping_mul(K);
         }
-        hasher.finish()
+        h
     }
 
     /// Render a row into an ANSI string for terminal output.

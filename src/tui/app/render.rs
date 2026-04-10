@@ -5,8 +5,8 @@ use crate::tui::renderer::{CursorState, Overlay};
 use crate::tui::selection;
 use crate::tui::text::{Line, Span};
 use crate::tui::theme::{icon, palette};
-use termina::event::{MouseButton, MouseEvent, MouseEventKind};
 use smallvec::smallvec;
+use termina::event::{MouseButton, MouseEvent, MouseEventKind};
 
 impl super::App {
     pub(super) fn on_mouse(&mut self, ev: MouseEvent) -> Action {
@@ -148,7 +148,8 @@ impl super::App {
         let content_w = (self.regions.input.width as usize).saturating_sub(bar_w);
         let wrapped = self.prompt_wrapped_count(content_w);
         let max_input = (term_h / 5 * 2).max(super::MIN_INPUT_HEIGHT);
-        let desired = (wrapped as u16 + super::INPUT_CHROME).clamp(super::MIN_INPUT_HEIGHT, max_input);
+        let desired =
+            (wrapped as u16 + super::INPUT_CHROME).clamp(super::MIN_INPUT_HEIGHT, max_input);
         if desired == self.regions.input.height {
             return;
         }

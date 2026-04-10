@@ -51,6 +51,7 @@ impl Tool for GrepTool {
                 },
                 "required": ["pattern"]
             }),
+            streamable_arg: None,
         }
     }
 

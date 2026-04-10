@@ -52,6 +52,7 @@ impl Tool for GhFileTool {
                 },
                 "required": ["repo", "path"]
             }),
+            streamable_arg: None,
         }
     }
 

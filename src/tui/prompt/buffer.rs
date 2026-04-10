@@ -207,7 +207,8 @@ impl PromptBuffer {
         self.text().lines().last().unwrap_or("").to_owned()
     }
 
-    /// Convert to ContentBlock vec for submit/render.
+    /// Snapshot content blocks (read-only, for render/display).
+    #[cfg(test)]
     pub fn to_content(&self) -> Vec<ContentBlock> {
         let mut blocks = Vec::new();
         for s in &self.segs {
@@ -234,17 +235,39 @@ impl PromptBuffer {
         blocks
     }
 
-    /// Take image data out (for agent). Replaces Image segs with empty text.
-    pub fn take_images(&mut self) -> Vec<(String, Vec<u8>)> {
+    /// Consume buffer content for submission.
+    ///
+    /// Returns content blocks and extracted image data atomically.
+    /// Image segments become `ContentBlock::Image { id: "" }` (agent fills real
+    /// id after saving) and their binary data is returned separately.
+    /// Buffer is cleared after this call.
+    pub fn take_content(&mut self) -> (Vec<ContentBlock>, Vec<(String, Vec<u8>)>) {
+        let mut blocks = Vec::new();
         let mut images = Vec::new();
         for s in &mut self.segs {
-            if let Seg::Image { media_type, data } = s {
-                images.push((media_type.clone(), std::mem::take(data)));
-                *s = Seg::Text(String::new());
+            match s {
+                Seg::Text(t) => {
+                    let trimmed = t.trim();
+                    if !trimmed.is_empty() {
+                        blocks.push(ContentBlock::Text {
+                            text: trimmed.to_owned(),
+                        });
+                    }
+                }
+                Seg::Image { media_type, data } => {
+                    images.push((media_type.clone(), std::mem::take(data)));
+                    blocks.push(ContentBlock::Image {
+                        media_type: media_type.clone(),
+                        id: String::new(),
+                    });
+                }
+                Seg::Paste(text) => {
+                    blocks.push(ContentBlock::Paste { text: text.clone() });
+                }
             }
         }
-        self.merge_all_text();
-        images
+        self.clear();
+        (blocks, images)
     }
 
     /// Display width of visible content before cursor (for cursor positioning).
@@ -331,29 +354,6 @@ impl PromptBuffer {
         }
     }
 
-    fn merge_all_text(&mut self) {
-        let mut i = 0;
-        while i + 1 < self.segs.len() {
-            if matches!(&self.segs[i], Seg::Text(_)) && matches!(&self.segs[i + 1], Seg::Text(_)) {
-                let next = if let Seg::Text(t) = &self.segs[i + 1] {
-                    t.clone()
-                } else {
-                    unreachable!()
-                };
-                if let Seg::Text(t) = &mut self.segs[i] {
-                    t.push_str(&next);
-                }
-                self.segs.remove(i + 1);
-                if self.seg > i + 1 {
-                    self.seg -= 1;
-                }
-            } else {
-                i += 1;
-            }
-        }
-        self.seg = self.seg.min(self.segs.len().saturating_sub(1));
-    }
-
     fn image_index_at(&self, seg_idx: usize) -> usize {
         self.segs[..=seg_idx]
             .iter()
@@ -438,15 +438,18 @@ mod tests {
     }
 
     #[test]
-    fn take_images_extracts() {
+    fn take_content_extracts_images() {
         let mut b = PromptBuffer::new();
         b.insert_str("a");
         b.attach_image("image/png".into(), vec![42]);
         b.insert_str("b");
-        let imgs = b.take_images();
+        let (content, imgs) = b.take_content();
         assert_eq!(imgs.len(), 1);
         assert_eq!(imgs[0].1, vec![42]);
-        assert_eq!(b.text(), "ab");
+        assert_eq!(content.len(), 3);
+        assert!(matches!(&content[1], ContentBlock::Image { .. }));
+        // Buffer cleared after take_content
+        assert!(b.is_empty());
     }
 
     #[test]

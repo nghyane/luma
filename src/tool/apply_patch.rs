@@ -48,6 +48,7 @@ impl Tool for ApplyPatchTool {
                 },
                 "required": ["patch"]
             }),
+            streamable_arg: Some("patch".into()),
         }
     }
 

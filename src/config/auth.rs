@@ -38,54 +38,75 @@ struct ManagedEntry {
     refresh_token: Option<String>,
     account_id: Option<String>,
     is_oauth: bool,
+    /// Unix timestamp (seconds) when the access token expires. `None` only
+    /// when we can't determine it (non-JWT token, missing `exp` claim).
     expires_at: Option<String>,
-}
-
-/// Clear cached credential for a provider, forcing re-resolve from local source.
-pub fn clear_cached(provider: AuthProvider) {
-    let path = managed_path();
-    if let Ok(raw) = fs::read_to_string(&path)
-        && let Ok(mut store) = serde_json::from_str::<ManagedStore>(&raw)
-    {
-        let name = provider_name(provider);
-        store.credentials.retain(|c| c.provider != name);
-        let _ = fs::write(
-            &path,
-            serde_json::to_string_pretty(&store).unwrap_or_default(),
-        );
-    }
 }
 
 /// Resolve auth for a provider. Checks managed cache, then local sources.
 /// Automatically refreshes expired tokens when refresh_token is available.
 pub async fn resolve(provider: AuthProvider) -> Result<Credential> {
-    let managed = load_managed(provider);
-    if let Some(entry) = &managed {
-        if !is_expired(&entry.expires_at) {
-            return Ok(entry.to_credential());
-        }
-        if let Some(refreshed) = try_refresh(entry, provider).await {
-            let cred = refreshed.to_credential();
-            save_managed(&refreshed, provider);
-            return Ok(cred);
-        }
+    resolve_inner(provider, false).await
+}
+
+/// Force a refresh of cached credentials even if the local clock says the
+/// token is still valid. Used after a 401 from the provider, which can
+/// happen when the server has revoked a token, the client clock is skewed,
+/// or the local copy is stale (e.g. from another app rotating the keychain).
+pub async fn force_refresh(provider: AuthProvider) -> Result<Credential> {
+    resolve_inner(provider, true).await
+}
+
+async fn resolve_inner(provider: AuthProvider, force: bool) -> Result<Credential> {
+    // Start from whichever source has the freshest refresh_token.
+    // Managed cache wins if present (we keep it in sync on refresh); fall
+    // back to local source (keychain / ~/.codex/auth.json) which is shared
+    // with the upstream CLI and may have been rotated externally.
+    let entry = load_managed(provider).or_else(|| load_local(provider).ok());
+    let entry = entry.ok_or_else(|| missing_credential_error(provider))?;
+
+    // Fast path: cached token still valid and not forced.
+    if !force && !is_expired(&entry.expires_at) {
+        return Ok(entry.to_credential());
     }
 
-    let local = load_local(provider)?;
-
-    // Local token may already be expired — try refresh before returning
-    if is_expired(&local.expires_at) && local.refresh_token.is_some() {
-        if let Some(refreshed) = try_refresh(&local, provider).await {
-            let cred = refreshed.to_credential();
-            save_managed(&refreshed, provider);
-            return Ok(cred);
+    // Need a refresh. Fail loudly if we have no refresh_token to work with.
+    if entry.refresh_token.is_none() {
+        if force {
+            anyhow::bail!(
+                "{} token rejected (401) and no refresh_token is available. \
+                 Re-login with the upstream CLI.",
+                provider_name(provider)
+            );
         }
-        anyhow::bail!("OAuth token expired and refresh failed. Please re-login with Claude Code.");
+        anyhow::bail!(
+            "{} token expired and no refresh_token is available. \
+             Re-login with the upstream CLI.",
+            provider_name(provider)
+        );
     }
 
-    let cred = local.to_credential();
-    save_managed(&local, provider);
-    Ok(cred)
+    match try_refresh(&entry, provider).await {
+        Some(refreshed) => {
+            save_managed(&refreshed, provider);
+            Ok(refreshed.to_credential())
+        }
+        None => anyhow::bail!(
+            "{} OAuth refresh failed. Re-login with the upstream CLI.",
+            provider_name(provider)
+        ),
+    }
+}
+
+fn missing_credential_error(provider: AuthProvider) -> anyhow::Error {
+    match provider {
+        AuthProvider::Anthropic => {
+            anyhow::anyhow!("No Claude credentials. Log in with Claude Code first.")
+        }
+        AuthProvider::OpenAI => {
+            anyhow::anyhow!("No OpenAI credentials. Log in with the Codex CLI first.")
+        }
+    }
 }
 
 impl ManagedEntry {
@@ -228,11 +249,23 @@ fn load_codex_local() -> Result<ManagedEntry> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("No OpenAI access_token"))?;
 
-    // Extract account ID from id_token JWT
+    // Extract account ID + expiration from the access_token JWT itself.
+    // The access_token is what we actually send; its `exp` claim is the
+    // authoritative expiration. `last_refresh` in auth.json is only a hint.
+    let access_claims = decode_jwt_payload(token);
     let account_id = tokens
         .get("id_token")
         .and_then(|v| v.as_str())
-        .and_then(extract_account_id);
+        .and_then(extract_account_id)
+        .or_else(|| {
+            access_claims
+                .as_ref()
+                .and_then(extract_account_id_from_claims)
+        });
+    let expires_at = access_claims
+        .as_ref()
+        .and_then(|claims| claims.get("exp").and_then(|v| v.as_u64()))
+        .map(|secs| secs.to_string());
 
     Ok(ManagedEntry {
         provider: "openai".into(),
@@ -243,7 +276,7 @@ fn load_codex_local() -> Result<ManagedEntry> {
             .map(|s| s.to_owned()),
         account_id,
         is_oauth: true,
-        expires_at: None,
+        expires_at,
     })
 }
 
@@ -335,11 +368,27 @@ fn provider_name(p: AuthProvider) -> &'static str {
 }
 
 fn extract_account_id(id_token: &str) -> Option<String> {
-    let parts: Vec<&str> = id_token.split('.').collect();
+    let payload = decode_jwt_payload(id_token)?;
+    extract_account_id_from_claims(&payload)
+}
+
+fn extract_account_id_from_claims(payload: &serde_json::Value) -> Option<String> {
+    let auth = payload.get("https://api.openai.com/auth")?;
+    auth.get("chatgpt_account_id")
+        .or_else(|| auth.get("account_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned())
+}
+
+/// Decode the payload of an unverified JWT. Returns the parsed claims JSON
+/// on success. Signature verification is not attempted — we only use the
+/// claims as hints (expiration, account id), and the token itself is
+/// validated by the remote API on every request.
+fn decode_jwt_payload(token: &str) -> Option<serde_json::Value> {
+    let parts: Vec<&str> = token.split('.').collect();
     if parts.len() < 2 {
         return None;
     }
-    // base64url decode the payload
     let padded = match parts[1].len() % 4 {
         2 => format!("{}==", parts[1]),
         3 => format!("{}=", parts[1]),
@@ -347,12 +396,7 @@ fn extract_account_id(id_token: &str) -> Option<String> {
     };
     let decoded = padded.replace('-', "+").replace('_', "/");
     let bytes = base64_decode(&decoded)?;
-    let payload: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let auth = payload.get("https://api.openai.com/auth")?;
-    auth.get("chatgpt_account_id")
-        .or_else(|| auth.get("account_id"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_owned())
+    serde_json::from_slice(&bytes).ok()
 }
 
 fn base64_decode(input: &str) -> Option<Vec<u8>> {
@@ -374,4 +418,83 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Construct an unsigned JWT whose payload is the given JSON. Signature
+    /// segment is a dummy — our decoder ignores it.
+    fn make_jwt(payload: &serde_json::Value) -> String {
+        fn b64url(bytes: &[u8]) -> String {
+            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+            URL_SAFE_NO_PAD.encode(bytes)
+        }
+        let header = b64url(br#"{"alg":"none","typ":"JWT"}"#);
+        let body = b64url(serde_json::to_string(payload).unwrap().as_bytes());
+        let sig = b64url(b"dummy");
+        format!("{header}.{body}.{sig}")
+    }
+
+    #[test]
+    fn decode_jwt_payload_extracts_claims() {
+        let jwt = make_jwt(&serde_json::json!({
+            "sub": "user-123",
+            "exp": 1_700_000_000u64,
+        }));
+        let claims = decode_jwt_payload(&jwt).expect("payload decodes");
+        assert_eq!(claims["sub"], "user-123");
+        assert_eq!(claims["exp"], 1_700_000_000u64);
+    }
+
+    #[test]
+    fn decode_jwt_payload_rejects_non_jwt() {
+        assert!(decode_jwt_payload("not.a.jwt").is_none());
+        assert!(decode_jwt_payload("single-segment").is_none());
+    }
+
+    #[test]
+    fn extract_account_id_from_id_token() {
+        let jwt = make_jwt(&serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acc-abc"
+            }
+        }));
+        assert_eq!(extract_account_id(&jwt), Some("acc-abc".to_owned()));
+    }
+
+    #[test]
+    fn is_expired_none_is_not_expired() {
+        assert!(!is_expired(&None));
+    }
+
+    #[test]
+    fn is_expired_past_timestamp() {
+        assert!(is_expired(&Some("1".to_owned())));
+    }
+
+    #[test]
+    fn is_expired_future_timestamp() {
+        // Year 2099 in seconds.
+        assert!(!is_expired(&Some("4_070_908_800".replace('_', ""))));
+    }
+
+    #[test]
+    fn is_expired_normalizes_milliseconds() {
+        // Past ms timestamp (2001-01-01).
+        assert!(is_expired(&Some("978307200000".to_owned())));
+    }
+
+    #[test]
+    fn is_expired_grace_window() {
+        // An expiry that's 10 seconds in the future should still count as
+        // "expired" because the grace window is 300s.
+        let soon = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 10;
+        assert!(is_expired(&Some(soon.to_string())));
+    }
 }

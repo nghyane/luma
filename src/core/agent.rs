@@ -24,7 +24,7 @@ pub struct AgentConfig {
 pub fn spawn(
     config: AgentConfig,
     registry: Registry,
-    event_tx: mpsc::Sender<Event>,
+    event_tx: crate::event_bus::Sender,
 ) -> mpsc::Sender<AgentCommand> {
     let (cmd_tx, cmd_rx) = mpsc::channel(16);
     let tx = event_tx.clone();
@@ -43,7 +43,7 @@ async fn agent_loop(
     mut config: AgentConfig,
     registry: Registry,
     mut cmd_rx: mpsc::Receiver<AgentCommand>,
-    event_tx: mpsc::Sender<Event>,
+    event_tx: crate::event_bus::Sender,
 ) {
     let mut session = Session::new();
 
@@ -61,7 +61,12 @@ async fn agent_loop(
                 files,
                 cancel,
             } => {
-                let mut blocks = content;
+                // Filter out phantom Image blocks (id="" from prompt) — real
+                // images are saved below and appended with proper ids.
+                let mut blocks: Vec<ContentBlock> = content
+                    .into_iter()
+                    .filter(|b| !matches!(b, ContentBlock::Image { id, .. } if id.is_empty()))
+                    .collect();
                 for f in files {
                     let ext = std::path::Path::new(&f.path)
                         .extension()
@@ -90,14 +95,8 @@ async fn agent_loop(
                 });
 
                 let turn_start = std::time::Instant::now();
-                let result = turn::run_chat_turn(
-                    &mut session,
-                    &config,
-                    &registry,
-                    &event_tx,
-                    cancel,
-                )
-                .await;
+                let result =
+                    turn::run_chat_turn(&mut session, &config, &registry, &event_tx, cancel).await;
 
                 // Fix orphaned tool_use blocks left by aborted/errored turns.
                 fix_orphaned_tool_uses(&mut session.messages);

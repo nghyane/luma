@@ -83,6 +83,7 @@ mod tests {
                 name: "Read".into(),
                 description: "read a file".into(),
                 parameters: serde_json::json!({"type": "object", "properties": {}}),
+                streamable_arg: None,
             }
         }
         fn execute(

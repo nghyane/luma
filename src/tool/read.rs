@@ -51,6 +51,7 @@ impl Tool for ReadTool {
                 },
                 "required": ["path"]
             }),
+            streamable_arg: None,
         }
     }
 

@@ -1,8 +1,8 @@
 /// Interactive model picker overlay.
 use crate::tui::text::{Line, Span};
 use crate::tui::theme::{icon, palette};
-use termina::event::{KeyCode, KeyEvent};
 use smallvec::smallvec;
+use termina::event::{KeyCode, KeyEvent};
 
 /// Picker result after handling a key.
 pub enum PickerAction {
@@ -62,11 +62,7 @@ impl Picker {
                 self.is_active = false;
                 PickerAction::Cancel
             }
-            KeyCode::Char('c')
-                if key
-                    .modifiers
-                    .contains(termina::event::Modifiers::CONTROL) =>
-            {
+            KeyCode::Char('c') if key.modifiers.contains(termina::event::Modifiers::CONTROL) => {
                 self.is_active = false;
                 PickerAction::Cancel
             }

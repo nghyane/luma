@@ -13,7 +13,10 @@ pub use completion::Command;
 pub enum PromptAction {
     None,
     Redraw,
-    Submit(Vec<crate::core::types::ContentBlock>),
+    Submit(
+        Vec<crate::core::types::ContentBlock>,
+        Vec<(String, Vec<u8>)>,
+    ),
     ToggleThinking,
 }
 
@@ -55,11 +58,6 @@ impl PromptState {
     /// Attach an image at cursor position.
     pub fn attach_image(&mut self, media_type: String, data: Vec<u8>) {
         self.buf.attach_image(media_type, data);
-    }
-
-    /// Take images for agent submission.
-    pub fn take_images(&mut self) -> Vec<(String, Vec<u8>)> {
-        self.buf.take_images()
     }
 
     /// Cursor column position for the renderer.
@@ -231,7 +229,7 @@ mod tests {
 
     fn submit_text(p: &mut PromptState) -> Option<String> {
         match p.handle_key(&key(KeyCode::Enter)) {
-            PromptAction::Submit(content) => {
+            PromptAction::Submit(content, _) => {
                 Some(crate::core::types::Message::content_text(&content))
             }
             _ => None,

@@ -7,7 +7,11 @@ use tokio_util::sync::CancellationToken;
 
 impl super::App {
     /// Handle submit from prompt — command or chat.
-    pub(super) fn on_submit(&mut self, content: Vec<crate::core::types::ContentBlock>) -> Action {
+    pub(super) fn on_submit(
+        &mut self,
+        content: Vec<crate::core::types::ContentBlock>,
+        images: Vec<(String, Vec<u8>)>,
+    ) -> Action {
         // Command: first text block starts with /
         if let Some(crate::core::types::ContentBlock::Text { text }) = content.first()
             && let Some(cmd) = text.strip_prefix('/')
@@ -16,18 +20,23 @@ impl super::App {
         }
         if self.agent.state != RunState::Idle {
             self.agent.pending_content = Some(content);
+            self.agent.pending_images = Some(images);
             self.agent.state = RunState::Aborting;
             if let Some(c) = &self.agent.cancel {
                 c.cancel();
             }
             return Action::Render;
         }
-        self.spawn_agent(content);
+        self.spawn_agent(content, images);
         Action::Render
     }
 
     /// Send user content to agent.
-    pub(super) fn spawn_agent(&mut self, content: Vec<crate::core::types::ContentBlock>) {
+    pub(super) fn spawn_agent(
+        &mut self,
+        content: Vec<crate::core::types::ContentBlock>,
+        images: Vec<(String, Vec<u8>)>,
+    ) {
         if self.config.model.is_none() {
             self.doc.error("no model — run 'luma sync'");
             return;
@@ -44,11 +53,7 @@ impl super::App {
         let text = crate::core::types::Message::content_text(&content);
         let files = read_file_refs(&text);
 
-        // Extract image binary data from prompt attachments
-        let images: Vec<crate::event::ImageAttach> = self
-            .ui
-            .prompt
-            .take_images()
+        let images: Vec<crate::event::ImageAttach> = images
             .into_iter()
             .map(|(media_type, data)| crate::event::ImageAttach { media_type, data })
             .collect();
@@ -78,7 +83,7 @@ impl super::App {
                 let (media_type, _) = detect_image_format(&data);
                 (media_type.to_owned(), data)
             });
-            let _ = tx.try_send(crate::event::Event::ClipboardImage(result));
+            let _ = tx.blocking_send(crate::event::Event::ClipboardImage(result));
         });
     }
 
@@ -179,7 +184,8 @@ impl super::App {
         self.ui.status.set_state(StatusState::Ready);
 
         if let Some(content) = self.agent.pending_content.take() {
-            self.spawn_agent(content);
+            let images = self.agent.pending_images.take().unwrap_or_default();
+            self.spawn_agent(content, images);
         }
     }
 

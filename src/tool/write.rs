@@ -33,6 +33,7 @@ impl Tool for WriteTool {
                 },
                 "required": ["path", "content"]
             }),
+            streamable_arg: Some("content".into()),
         }
     }
 
@@ -76,9 +77,15 @@ impl Tool for WriteTool {
             let (adds, dels) = crate::tool::diff::diff_stats(&diff);
             let stat = format!("+{adds} -{dels}");
             if is_create {
-                Ok(format!("Created {} ({total_lines} lines, {stat})", path.display()))
+                Ok(format!(
+                    "Created {} ({total_lines} lines, {stat})",
+                    path.display()
+                ))
             } else {
-                Ok(format!("Updated {} ({total_lines} lines, {stat})", path.display()))
+                Ok(format!(
+                    "Updated {} ({total_lines} lines, {stat})",
+                    path.display()
+                ))
             }
         })
     }

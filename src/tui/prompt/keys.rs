@@ -22,7 +22,11 @@ impl super::PromptState {
             return None;
         }
         let normalized = normalize_newlines(&text);
-        let line_count = count_lines(&normalized);
+        let line_count = if normalized.is_empty() {
+            0
+        } else {
+            normalized.split('\n').count()
+        };
         if line_count < PASTE_INLINE_THRESHOLD {
             let trimmed = normalized.trim_end_matches('\n');
             self.buf.insert_str(trimmed);
@@ -136,23 +140,25 @@ impl super::PromptState {
             let found = self.comp.commands.iter().any(|c| c.name == query);
             self.buf.clear();
             if found {
-                return PromptAction::Submit(vec![ContentBlock::Text {
-                    text: format!("/{query}"),
-                }]);
+                return PromptAction::Submit(
+                    vec![ContentBlock::Text {
+                        text: format!("/{query}"),
+                    }],
+                    vec![],
+                );
             }
             return PromptAction::Redraw;
         }
         if self.buf.is_empty() {
             return PromptAction::Redraw;
         }
-        let content = self.buf.to_content();
         let flat = self.buf.trimmed_text();
+        let (content, images) = self.buf.take_content();
         if !flat.is_empty() {
             self.history.push(flat);
         }
         self.history_idx = None;
-        self.buf.clear();
-        PromptAction::Submit(content)
+        PromptAction::Submit(content, images)
     }
 
     fn history_prev(&mut self) -> PromptAction {
@@ -185,14 +191,6 @@ fn normalize_newlines(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-fn count_lines(s: &str) -> usize {
-    if s.is_empty() {
-        0
-    } else {
-        s.split('\n').count()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,11 +203,5 @@ mod tests {
     #[test]
     fn normalize_cr() {
         assert_eq!(normalize_newlines("a\rb\rc"), "a\nb\nc");
-    }
-
-    #[test]
-    fn count_lines_basic() {
-        assert_eq!(count_lines("a\nb\nc"), 3);
-        assert_eq!(count_lines(""), 0);
     }
 }

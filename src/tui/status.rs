@@ -146,7 +146,10 @@ impl StatusBar {
             let frame = icon::SPINNER[self.spinner_idx % icon::SPINNER.len()];
             let char_w = crate::tui::text::display_width(frame);
             let pad = icon::SPINNER_WIDTH.saturating_sub(char_w);
-            left.push(Span::new(format!("{frame}{} ", " ".repeat(pad)), palette::DIM));
+            left.push(Span::new(
+                format!("{frame}{} ", " ".repeat(pad)),
+                palette::DIM,
+            ));
             left.push(Span::new("esc ".to_owned(), palette::DIM));
             left.push(Span::new("interrupt".to_owned(), palette::MUTED));
         }
@@ -240,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn mode_line_thinking_shows_spinner() {
+    fn mode_line_shows_model_in_thinking_state() {
         let mut sb = StatusBar::new();
         sb.set_mode("deep", palette::MODE_DEEP);
         sb.set_model("o3");

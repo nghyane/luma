@@ -128,15 +128,13 @@ fn parse_committed(cache: &mut TextCache, committed: &[String], start: usize, wi
 }
 
 fn flush_table(lines: &mut Vec<Line>, rows: &[String], width: usize) {
-    for rl in render_table(rows) {
-        for wl in crate::tui::text::wrap_line(&rl, width, None) {
-            let is_empty = wl.visible_width() == 0;
-            let prev_empty = lines.last().is_none_or(|p: &Line| p.visible_width() == 0);
-            if is_empty && prev_empty {
-                continue;
-            }
-            lines.push(wl);
+    for rl in render_table(rows, width) {
+        let is_empty = rl.visible_width() == 0;
+        let prev_empty = lines.last().is_none_or(|p: &Line| p.visible_width() == 0);
+        if is_empty && prev_empty {
+            continue;
         }
+        lines.push(rl);
     }
 }
 

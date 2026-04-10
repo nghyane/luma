@@ -52,19 +52,29 @@ impl ViewState {
 
     /// Scroll down by `n` lines. Clears user-scrolled if at bottom.
     pub fn scroll_down(&mut self, n: usize) {
-        let max = self.layout.total_lines().saturating_sub(self.layout.height());
+        let max = self
+            .layout
+            .total_lines()
+            .saturating_sub(self.layout.height());
         self.scroll.down(n, max);
     }
 
     /// Jump to a specific offset.
     pub fn scroll_to(&mut self, offset: usize) {
-        let max = self.layout.total_lines().saturating_sub(self.layout.height());
+        let max = self
+            .layout
+            .total_lines()
+            .saturating_sub(self.layout.height());
         self.scroll.set_offset(offset, max);
     }
 
     /// (total_lines, view_height, offset).
     pub fn scroll_info(&self) -> (usize, usize, usize) {
-        (self.layout.total_lines(), self.layout.height(), self.scroll.offset)
+        (
+            self.layout.total_lines(),
+            self.layout.height(),
+            self.scroll.offset,
+        )
     }
 
     pub fn hit_test_block(&self, screen_row: usize, region_row: usize) -> Option<usize> {

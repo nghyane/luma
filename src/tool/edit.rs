@@ -69,6 +69,7 @@ impl Tool for EditTool {
                 },
                 "required": ["path", "old_string", "new_string"]
             }),
+            streamable_arg: Some("new_string".into()),
         }
     }
 

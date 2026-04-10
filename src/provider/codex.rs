@@ -1,13 +1,13 @@
 /// Codex provider — OpenAI Responses API at chatgpt.com/backend-api/codex.
-use crate::core::provider::Provider;
+use crate::core::provider::{Provider, StopReason, StreamRequest, StreamResponse};
 use crate::core::types::{
     Message, Role, ThinkingLevel, ToolCall, ToolCallFunction, ToolSchema, Usage,
 };
 use crate::event::Event;
-use anyhow::{Result, bail};
+use crate::event_bus::Sender as EventSender;
+use crate::provider::json_stream::{JsonStringExtractor, streamable_arg_for};
+use anyhow::Result;
 use std::collections::BTreeMap;
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 const CODEX_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 
@@ -37,11 +37,17 @@ impl Provider for CodexProvider {
     fn name(&self) -> &str {
         "codex"
     }
-    fn thinking(&self) -> ThinkingLevel {
-        self.thinking
-    }
     fn set_thinking(&mut self, level: ThinkingLevel) {
         self.thinking = level;
+    }
+
+    /// Codex Responses API at `chatgpt.com/backend-api/codex/responses` does
+    /// not accept a `max_output_tokens` field — codex-rs itself omits it
+    /// (see `codex-rs/codex-api/src/common.rs:ResponsesApiRequest`). An
+    /// escalation retry would re-run the same request and hit the same
+    /// limit, so we opt out of escalation entirely.
+    fn supports_max_tokens_override(&self) -> bool {
+        false
     }
 
     fn server_tool_schemas(&self, capabilities: &[String]) -> Vec<serde_json::Value> {
@@ -59,15 +65,20 @@ impl Provider for CodexProvider {
 
     fn stream<'a>(
         &'a self,
-        messages: &'a [Message],
-        tools: &'a [ToolSchema],
-        server_tools: &'a [serde_json::Value],
-        _resolve_image: &'a crate::core::provider::ImageResolver,
-        tx: mpsc::Sender<Event>,
-        cancel: CancellationToken,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(Message, Usage)>> + Send + 'a>>
+        req: StreamRequest<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<StreamResponse>> + Send + 'a>>
     {
         Box::pin(async move {
+            let StreamRequest {
+                messages,
+                tools,
+                server_tools,
+                resolve_image: _,
+                // Ignored — see `supports_max_tokens_override` impl above.
+                max_tokens_override: _,
+                tx,
+                cancel,
+            } = req;
             let system = extract_system(messages);
             let input = build_input(messages);
             let mut api_tools = to_api_tools(tools);
@@ -108,181 +119,202 @@ impl Provider for CodexProvider {
                 });
             }
 
-            let client = reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(30))
-                .build()?;
-            let response = crate::provider::retry::send_with_retry("codex", &tx, &cancel, || {
-                let mut req = client
-                    .post(CODEX_ENDPOINT)
-                    .header("Content-Type", "application/json")
-                    .header("Authorization", format!("Bearer {}", self.api_key))
-                    .json(&body);
-
-                if let Some(aid) = &self.account_id {
-                    req = req.header("chatgpt-account-id", aid.as_str());
-                }
-                req.send()
-            })
-            .await?;
+            let auth_header = format!("Bearer {}", self.api_key);
+            let mut header_vec: Vec<(&str, &str)> = vec![("Authorization", &auth_header)];
+            if let Some(aid) = &self.account_id {
+                header_vec.push(("chatgpt-account-id", aid.as_str()));
+            }
 
             let mut text = String::new();
             let mut tool_calls: BTreeMap<u64, ToolCall> = BTreeMap::new();
-            let mut buf = String::new();
+            // Per-tool JSON string extractors for streamable args, keyed by
+            // output_index. Constructed lazily when we first see the tool name.
+            let mut arg_extractors: BTreeMap<u64, JsonStringExtractor> = BTreeMap::new();
+            // Track which output indices we've already attempted to set up
+            // extractors for (so we don't re-check on every delta).
+            let mut extractor_probed: std::collections::BTreeSet<u64> =
+                std::collections::BTreeSet::new();
             let mut usage = Usage::default();
-            let mut response = response;
-            let chunk_timeout = std::time::Duration::from_secs(120);
-            let mut saw_completed = false;
+            let mut saw_terminal = false;
+            let mut incomplete_reason = String::new();
+            let mut failure_error: Option<anyhow::Error> = None;
 
-            loop {
-                let chunk = tokio::select! {
-                    c = response.chunk() => c?,
-                    _ = cancel.cancelled() => { bail!("Aborted"); }
-                    _ = tokio::time::sleep(chunk_timeout) => {
-                        return Err(crate::provider::sse::StreamInterrupted(
-                            "SSE stream timeout — no data for 120s".into(),
-                        ).into());
+            let mut stream = crate::provider::sse::post_sse(
+                "codex",
+                CODEX_ENDPOINT,
+                &header_vec,
+                &body,
+                &tx,
+                &cancel,
+            )
+            .await?;
+
+            'outer: while let Some(event_result) = stream.next().await {
+                let sse_event = event_result?;
+                let event = sse_event.data;
+                let event_type = sse_event.event_type.as_str();
+
+                crate::dbg_log!("codex event: {event_type}");
+                match event_type {
+                    "response.output_text.delta" | "response.content_part.delta" => {
+                        if let Some(delta) = event["delta"].as_str() {
+                            text.push_str(delta);
+                            let _ = tx.send(Event::Token(delta.to_owned())).await;
+                        }
                     }
-                };
-                let Some(chunk) = chunk else { break };
-                buf.push_str(&String::from_utf8_lossy(&chunk));
+                    "response.reasoning_summary_text.delta"
+                    | "response.reasoning_summary.delta"
+                    | "response.reasoning_text.delta" => {
+                        if let Some(delta) = event["delta"].as_str() {
+                            let _ = tx.send(Event::Thinking(delta.to_owned())).await;
+                        }
+                    }
+                    // Web search: show spinner on first event only
+                    "response.web_search_call.in_progress" => {
+                        let _ = tx
+                            .send(Event::WebSearchStart {
+                                query: String::new(),
+                            })
+                            .await;
+                    }
+                    "response.web_search_call.searching" => {}
+                    "response.output_item.added" => {
+                        maybe_store_tool_call(
+                            &mut tool_calls,
+                            event["output_index"].as_u64(),
+                            &event["item"],
+                        );
+                    }
+                    "response.function_call_arguments.delta" => {
+                        if let Some(idx) = event["output_index"].as_u64()
+                            && let Some(delta) = event["delta"].as_str()
+                        {
+                            let entry = tool_calls.entry(idx).or_insert_with(|| ToolCall {
+                                id: String::new(),
+                                r#type: "function".into(),
+                                function: ToolCallFunction {
+                                    name: String::new(),
+                                    arguments: String::new(),
+                                },
+                            });
+                            entry.function.arguments.push_str(delta);
 
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].to_owned();
-                    buf = buf[pos + 1..].to_owned();
+                            // Lazily install an extractor for this tool's
+                            // streamable arg the first time we see its name.
+                            if !extractor_probed.contains(&idx) && !entry.function.name.is_empty() {
+                                extractor_probed.insert(idx);
+                                if let Some(field) = streamable_arg_for(tools, &entry.function.name)
+                                {
+                                    arg_extractors.insert(idx, JsonStringExtractor::new(field));
+                                }
+                            }
 
-                    let Some(raw) = line.strip_prefix("data:") else {
-                        continue;
-                    };
-                    let raw = raw.trim();
-                    let Ok(event) = serde_json::from_str::<serde_json::Value>(raw) else {
-                        continue;
-                    };
-
-                    let event_type = event["type"].as_str().unwrap_or("");
-
-                    crate::dbg_log!("codex event: {event_type}");
-                    match event_type {
-                        "response.output_text.delta" | "response.content_part.delta" => {
-                            if let Some(delta) = event["delta"].as_str() {
-                                text.push_str(delta);
-                                if let Err(e) = tx.try_send(Event::Token(delta.to_owned())) {
-                                    crate::dbg_log!("codex token send FAILED: {e}");
+                            // Need the tool name before the mutable borrow on
+                            // arg_extractors, since ToolInput needs to clone it.
+                            let tool_name = entry.function.name.clone();
+                            if let Some(ex) = arg_extractors.get_mut(&idx) {
+                                let chunk = ex.feed(delta);
+                                if !chunk.is_empty() {
+                                    let _ = tx
+                                        .send(Event::ToolInput {
+                                            name: tool_name,
+                                            chunk,
+                                        })
+                                        .await;
                                 }
                             }
                         }
-                        "response.reasoning_summary_text.delta"
-                        | "response.reasoning_summary.delta"
-                        | "response.reasoning_text.delta" => {
-                            if let Some(delta) = event["delta"].as_str() {
-                                let _ = tx.try_send(Event::Thinking(delta.to_owned()));
-                            }
-                        }
-                        // Web search: show spinner on first event only
-                        "response.web_search_call.in_progress" => {
-                            let _ = tx.try_send(Event::WebSearchStart {
-                                query: String::new(),
-                            });
-                        }
-                        "response.web_search_call.searching" => {}
-                        "response.output_item.added" => {
-                            maybe_store_tool_call(
-                                &mut tool_calls,
-                                event["output_index"].as_u64(),
-                                &event["item"],
-                            );
-                        }
-                        "response.function_call_arguments.delta" => {
-                            if let Some(idx) = event["output_index"].as_u64()
-                                && let Some(delta) = event["delta"].as_str()
-                            {
-                                let entry = tool_calls.entry(idx).or_insert_with(|| ToolCall {
-                                    id: String::new(),
-                                    r#type: "function".into(),
-                                    function: ToolCallFunction {
-                                        name: String::new(),
-                                        arguments: String::new(),
-                                    },
-                                });
-                                entry.function.arguments.push_str(delta);
-                            }
-                        }
-                        "response.function_call_arguments.done" | "response.output_item.done" => {
-                            maybe_store_tool_call(
-                                &mut tool_calls,
-                                event["output_index"].as_u64(),
-                                &event["item"],
-                            );
+                    }
+                    "response.function_call_arguments.done" | "response.output_item.done" => {
+                        maybe_store_tool_call(
+                            &mut tool_calls,
+                            event["output_index"].as_u64(),
+                            &event["item"],
+                        );
 
-                            let item_type = event["item"]["type"].as_str().unwrap_or("");
-                            crate::dbg_log!("codex output_item.done type={item_type}");
-                            if item_type == "web_search_call" {
-                                let query = event["item"]["action"]["query"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_owned();
-                                crate::dbg_log!("codex web_search done query={query}");
-                                let _ = tx.try_send(Event::WebSearchDone {
+                        let item_type = event["item"]["type"].as_str().unwrap_or("");
+                        crate::dbg_log!("codex output_item.done type={item_type}");
+                        if item_type == "web_search_call" {
+                            let query = event["item"]["action"]["query"]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_owned();
+                            crate::dbg_log!("codex web_search done query={query}");
+                            let _ = tx
+                                .send(Event::WebSearchDone {
                                     query,
                                     results: vec![],
-                                });
-                            }
+                                })
+                                .await;
                         }
-                        // Web search done OR message done
-                        "response.web_search_call.completed"
-                        | "response.created"
-                        | "response.in_progress"
-                        | "response.content_part.added"
-                        | "response.content_part.done"
-                        | "response.output_text.done"
-                        | "response.reasoning_summary_part.added"
-                        | "response.reasoning_summary_text.done"
-                        | "response.reasoning_summary_part.done"
-                        | "response.reasoning_summary.part.added"
-                        | "response.reasoning_summary.part.done"
-                        | "response.reasoning_text.done" => {}
-                        "response.completed" => {
-                            saw_completed = true;
-                            // Extract tool calls and web search results from output
-                            if let Some(output) = event["response"]["output"].as_array() {
-                                for (idx, item) in output.iter().enumerate() {
-                                    maybe_store_tool_call(&mut tool_calls, Some(idx as u64), item);
-                                    if item["type"].as_str().unwrap_or("") != "function_call"
-                                        && item["type"].as_str().unwrap_or("") != "web_search_call"
-                                    {
-                                        crate::dbg_log!(
-                                            "codex unhandled event: {event_type} {}",
-                                            raw.chars().take(200).collect::<String>()
-                                        );
-                                    }
-                                }
-                            }
-                            // Web search results already emitted via output_item.done above.
-                            // Usage
-                            if let Some(u) = event["response"]["usage"].as_object() {
-                                let cached = u
-                                    .get("input_tokens_details")
-                                    .and_then(|d| d.get("cached_tokens"))
-                                    .and_then(|v| v.as_u64());
-                                let input =
-                                    u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                                // Codex input_tokens includes cached — subtract to match Claude semantics
-                                let non_cached = input.saturating_sub(cached.unwrap_or(0));
-                                let u_data = Usage {
-                                    input_tokens: non_cached,
-                                    output_tokens: u
-                                        .get("output_tokens")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0),
-                                    cache_read: cached,
-                                    cache_write: None,
-                                };
-                                usage = u_data.clone();
-                                let _ = tx.try_send(Event::Usage(u_data));
-                            }
-                        }
-                        _ => {}
                     }
+                    "response.web_search_call.completed"
+                    | "response.created"
+                    | "response.in_progress"
+                    | "response.content_part.added"
+                    | "response.content_part.done"
+                    | "response.output_text.done"
+                    | "response.reasoning_summary_part.added"
+                    | "response.reasoning_summary_text.done"
+                    | "response.reasoning_summary_part.done"
+                    | "response.reasoning_summary.part.added"
+                    | "response.reasoning_summary.part.done"
+                    | "response.reasoning_text.done" => {}
+                    "response.completed" => {
+                        saw_terminal = true;
+                        if let Some(output) = event["response"]["output"].as_array() {
+                            for (idx, item) in output.iter().enumerate() {
+                                maybe_store_tool_call(&mut tool_calls, Some(idx as u64), item);
+                            }
+                        }
+                        record_usage(&event["response"]["usage"], &mut usage, &tx).await;
+                        break 'outer;
+                    }
+                    "response.incomplete" => {
+                        // Mirror codex-rs: incomplete is a terminal state,
+                        // usually fatal. We special-case `max_output_tokens`
+                        // to return StopReason::MaxTokens so turn.rs can
+                        // surface a clear error.
+                        saw_terminal = true;
+                        incomplete_reason = event["response"]["incomplete_details"]["reason"]
+                            .as_str()
+                            .unwrap_or("unknown")
+                            .to_owned();
+                        if let Some(output) = event["response"]["output"].as_array() {
+                            for (idx, item) in output.iter().enumerate() {
+                                maybe_store_tool_call(&mut tool_calls, Some(idx as u64), item);
+                            }
+                        }
+                        record_usage(&event["response"]["usage"], &mut usage, &tx).await;
+                        break 'outer;
+                    }
+                    "response.failed" => {
+                        // Terminal error from server (context_length_exceeded,
+                        // server error, etc.). Mirror codex-rs classification.
+                        saw_terminal = true;
+                        let err_code = event["response"]["error"]["code"].as_str().unwrap_or("");
+                        let err_msg = event["response"]["error"]["message"]
+                            .as_str()
+                            .unwrap_or("unknown error");
+                        failure_error = Some(if err_code == "context_length_exceeded" {
+                            anyhow::anyhow!(
+                                "codex context window exceeded: {err_msg}. \
+                                 Try /compact or switch model."
+                            )
+                        } else {
+                            anyhow::anyhow!("codex response.failed ({err_code}): {err_msg}")
+                        });
+                        break 'outer;
+                    }
+                    _ => {}
                 }
+            }
+
+            // response.failed: surface the classified error. Mirrors codex-rs,
+            // which treats all failed events as fatal (context_length, quota,
+            // server error, etc.).
+            if let Some(err) = failure_error {
+                return Err(err);
             }
 
             let mut msg = Message::assistant(text);
@@ -290,19 +322,64 @@ impl Provider for CodexProvider {
                 .into_values()
                 .filter(|tc| !tc.id.is_empty() && !tc.function.name.is_empty())
                 .collect();
-            // Stream ended without response.completed — network cut, server error, etc.
-            // Return partial content so the turn is not silently lost.
-            if !saw_completed && msg.text().is_empty() && tool_calls.is_empty() {
+
+            // Stream ended without any terminal event (completed / incomplete
+            // / failed). Mirrors codex-rs "stream closed before response.completed".
+            if !saw_terminal {
                 return Err(crate::provider::sse::StreamInterrupted(
-                    "Codex stream ended with no content".into(),
-                ).into());
+                    "Codex stream closed before response.completed".into(),
+                )
+                .into());
             }
+
             if !tool_calls.is_empty() {
                 msg.tool_calls = Some(tool_calls);
             }
-            Ok((msg, usage))
+
+            // response.incomplete with reason other than max_output_tokens is
+            // fatal. max_output_tokens stays non-fatal so turn.rs can escalate
+            // (though for Codex the escalation currently has no body effect —
+            // see note above about ResponsesApiRequest not supporting the field).
+            let stop_reason = if incomplete_reason.is_empty() {
+                StopReason::EndTurn
+            } else if incomplete_reason == "max_output_tokens" {
+                StopReason::MaxTokens
+            } else {
+                anyhow::bail!(
+                    "codex response.incomplete (reason={incomplete_reason}). \
+                     Try again or switch model."
+                );
+            };
+
+            Ok(StreamResponse {
+                message: msg,
+                usage,
+                stop_reason,
+            })
         })
     }
+}
+
+/// Parse `response.usage` JSON into [`Usage`] and emit a Usage event.
+async fn record_usage(usage_val: &serde_json::Value, usage: &mut Usage, tx: &EventSender) {
+    let Some(u) = usage_val.as_object() else {
+        return;
+    };
+    let cached = u
+        .get("input_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|v| v.as_u64());
+    let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    // Codex input_tokens includes cached — subtract to match Claude semantics
+    let non_cached = input.saturating_sub(cached.unwrap_or(0));
+    let u_data = Usage {
+        input_tokens: non_cached,
+        output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        cache_read: cached,
+        cache_write: None,
+    };
+    *usage = u_data.clone();
+    let _ = tx.send(Event::Usage(u_data)).await;
 }
 
 fn maybe_store_tool_call(

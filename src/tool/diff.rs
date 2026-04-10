@@ -213,8 +213,7 @@ fn myers_diff(old: &[&str], new: &[&str]) -> Vec<Edit> {
         // Clone v before mutating so trace[d] captures state entering d.
         let snap = v.clone();
         for k in (-(d as isize)..=(d as isize)).step_by(2) {
-            let mut x = if k == -(d as isize)
-                || (k != d as isize && v[idx(k - 1)] < v[idx(k + 1)])
+            let mut x = if k == -(d as isize) || (k != d as isize && v[idx(k - 1)] < v[idx(k + 1)])
             {
                 v[idx(k + 1)] // move down (insert)
             } else {
@@ -247,13 +246,12 @@ fn myers_diff(old: &[&str], new: &[&str]) -> Vec<Edit> {
         let k = x as isize - y as isize;
         let v_prev = &trace[d];
 
-        let prev_k = if k == -(d as isize)
-            || (k != d as isize && v_prev[idx(k - 1)] < v_prev[idx(k + 1)])
-        {
-            k + 1 // came from insert (down)
-        } else {
-            k - 1 // came from delete (right)
-        };
+        let prev_k =
+            if k == -(d as isize) || (k != d as isize && v_prev[idx(k - 1)] < v_prev[idx(k + 1)]) {
+                k + 1 // came from insert (down)
+            } else {
+                k - 1 // came from delete (right)
+            };
         let prev_x = v_prev[idx(prev_k)];
         let prev_y = (prev_x as isize - prev_k) as usize;
 
@@ -497,19 +495,28 @@ mod tests {
     fn insert_at_beginning() {
         let diff = make_diff("b\nc", "a\nb\nc");
         assert!(diff.iter().any(|l| l.contains(" + a")), "{diff:?}");
-        assert!(!diff.iter().any(|l| l.contains(" - ")), "no deletes: {diff:?}");
+        assert!(
+            !diff.iter().any(|l| l.contains(" - ")),
+            "no deletes: {diff:?}"
+        );
     }
 
     #[test]
     fn delete_at_end() {
         let diff = make_diff("a\nb\nc", "a\nb");
         assert!(diff.iter().any(|l| l.contains(" - c")), "{diff:?}");
-        assert!(!diff.iter().any(|l| l.contains(" + ")), "no inserts: {diff:?}");
+        assert!(
+            !diff.iter().any(|l| l.contains(" + ")),
+            "no inserts: {diff:?}"
+        );
     }
 
     #[test]
     fn identical_files() {
-        let text = (0..100).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let text = (0..100)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let diff = make_diff(&text, &text);
         assert!(diff.is_empty(), "identical: {diff:?}");
     }
@@ -528,7 +535,10 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert!(diff.iter().any(|l| l.contains(" - line 2500")), "{diff:?}");
-        assert!(diff.iter().any(|l| l.contains(" + CHANGED LINE")), "{diff:?}");
+        assert!(
+            diff.iter().any(|l| l.contains(" + CHANGED LINE")),
+            "{diff:?}"
+        );
         // With Myers O(nd) where d=2, this should be well under 100ms.
         // Old LCS O(n*m) would take seconds and ~100MB memory.
         assert!(

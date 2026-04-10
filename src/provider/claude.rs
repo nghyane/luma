@@ -1,15 +1,21 @@
 /// Claude provider — Anthropic Messages API with SSE streaming.
-use crate::core::provider::Provider;
+use crate::core::provider::{Provider, StopReason, StreamRequest, StreamResponse};
 use crate::core::types::{
     ContentBlock, Message, Role, ThinkingLevel, ToolCall, ToolCallFunction, ToolSchema, Usage,
 };
 use crate::event::Event;
-use crate::provider::sse::{SseEvent, post_sse};
+use crate::provider::json_stream::{JsonStringExtractor, streamable_arg_for};
+use crate::provider::sse::post_sse;
 use anyhow::Result;
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 const BASE_URL: &str = "https://api.anthropic.com";
+
+/// Default output token cap, matching claude-code's capped default.
+/// Caller can escalate to [`ESCALATED_MAX_TOKENS`] on first `max_tokens` hit.
+pub const DEFAULT_MAX_TOKENS: u32 = 8192;
+
+/// Escalation cap used after hitting `max_tokens` once. Claude 4.x native limit.
+pub const ESCALATED_MAX_TOKENS: u32 = 64_000;
 
 /// Anthropic Claude provider.
 pub struct ClaudeProvider {
@@ -25,8 +31,8 @@ impl ClaudeProvider {
     /// Create from token. Set `is_oauth` true for OAuth tokens, false for raw API keys.
     pub fn new(model: &str, api_key: &str, is_oauth: bool) -> Self {
         Self {
+            max_tokens: DEFAULT_MAX_TOKENS,
             model: model.to_owned(),
-            max_tokens: 8192,
             base_url: BASE_URL.to_owned(),
             api_key: api_key.to_owned(),
             is_oauth,
@@ -38,9 +44,6 @@ impl ClaudeProvider {
 impl Provider for ClaudeProvider {
     fn name(&self) -> &str {
         "claude"
-    }
-    fn thinking(&self) -> ThinkingLevel {
-        self.thinking
     }
     fn set_thinking(&mut self, level: ThinkingLevel) {
         self.thinking = level;
@@ -54,17 +57,22 @@ impl Provider for ClaudeProvider {
 
     fn stream<'a>(
         &'a self,
-        messages: &'a [Message],
-        tools: &'a [ToolSchema],
-        server_tools: &'a [serde_json::Value],
-        resolve_image: &'a crate::core::provider::ImageResolver,
-        tx: mpsc::Sender<Event>,
-        cancel: CancellationToken,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(Message, Usage)>> + Send + 'a>>
+        req: StreamRequest<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<StreamResponse>> + Send + 'a>>
     {
         Box::pin(async move {
+            let StreamRequest {
+                messages,
+                tools,
+                server_tools,
+                resolve_image,
+                max_tokens_override,
+                tx,
+                cancel,
+            } = req;
+            let effective_max_tokens = max_tokens_override.unwrap_or(self.max_tokens);
             let system_text = extract_system(messages);
-            let api_messages = to_api_messages(messages, resolve_image);
+            let mut api_messages = to_api_messages(messages, resolve_image);
             let mut api_tools = to_api_tools(tools);
 
             // Append server-side tools (e.g. web search)
@@ -72,33 +80,16 @@ impl Provider for ClaudeProvider {
                 api_tools.push(st.clone());
             }
 
-            // Prompt caching: single cache_control breakpoint on last message
-            let mut api_messages = api_messages;
-            if !api_messages.is_empty() {
-                let last = api_messages.len() - 1;
-                if let Some(content) = api_messages[last]["content"].as_array_mut() {
-                    if let Some(last_block) = content.last_mut() {
-                        last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
-                    }
-                } else {
-                    let text_val = api_messages[last]["content"].take();
-                    api_messages[last]["content"] = serde_json::json!([{
-                        "type": "text",
-                        "text": text_val,
-                        "cache_control": {"type": "ephemeral"}
-                    }]);
-                }
-            }
+            apply_cache_breakpoint(&mut api_messages);
 
             let mut body = serde_json::json!({
                 "model": self.model,
-                "max_tokens": self.max_tokens,
+                "max_tokens": effective_max_tokens,
                 "messages": api_messages,
                 "stream": true,
             });
 
-            let budget = self.thinking.budget();
-            if budget > 0 {
+            if let Some(budget) = resolve_thinking_budget(self.thinking, effective_max_tokens) {
                 body["thinking"] = serde_json::json!({"type": "enabled", "budget_tokens": budget});
             }
 
@@ -153,117 +144,121 @@ impl Provider for ClaudeProvider {
             let mut current_id = String::new();
             let mut current_name = String::new();
             let mut current_args = String::new();
-            let mut streaming_content = false;
-            let mut server_tool_json = String::new();
-            let mut in_server_tool = false;
+            // JSON string extractor for the streamable arg of the current tool.
+            // `None` when the current tool has no streamable_arg, or between tool blocks.
+            let mut arg_extractor: Option<JsonStringExtractor> = None;
+            // Extractor for the `query` field of a web_search server tool call.
+            let mut web_search_extractor: Option<JsonStringExtractor> = None;
+            let mut web_search_query_sent = false;
             let mut usage = Usage::default();
             let mut saw_message_stop = false;
+            let mut stop_reason = String::new();
 
-            let tx_ref = &tx;
-            let usage_ref = &mut usage;
-            post_sse(
+            let mut stream = post_sse(
                 "claude",
                 &format!("{}/v1/messages", self.base_url),
                 &headers,
                 &body,
                 &tx,
                 &cancel,
-                |event: SseEvent| {
-                    let data = &event.data;
+            )
+            .await?;
 
-                    if data["type"] == "content_block_start" {
-                        let block = &data["content_block"];
-                        let block_type = block["type"].as_str().unwrap_or("");
-                        match block_type {
-                            "tool_use" => {
-                                current_id = block["id"].as_str().unwrap_or("").to_owned();
-                                current_name = block["name"].as_str().unwrap_or("").to_owned();
-                                current_args.clear();
-                                streaming_content = false;
-                            }
-                            "server_tool_use" if block["name"] == "web_search" => {
-                                in_server_tool = true;
-                                server_tool_json.clear();
-                            }
-                            "web_search_tool_result" => {
-                                let content_len =
-                                    block["content"].as_array().map(|a| a.len()).unwrap_or(0);
-                                crate::dbg_log!(
-                                    "claude web_search_tool_result: {} items in content",
-                                    content_len
-                                );
-                                let mut hits = Vec::new();
-                                if let Some(results) = block["content"].as_array() {
-                                    for r in results {
-                                        let title = r["title"].as_str().unwrap_or("").to_owned();
-                                        let url = r["url"].as_str().unwrap_or("").to_owned();
-                                        if !url.is_empty() {
-                                            hits.push(crate::event::SearchHit {
-                                                title,
-                                                url,
-                                                snippet: String::new(),
-                                            });
-                                        }
-                                    }
-                                }
-                                let _ = tx_ref.try_send(Event::WebSearchDone {
-                                    query: String::new(),
-                                    results: hits,
-                                });
-                            }
-                            _ => {}
+            while let Some(event_result) = stream.next().await {
+                let event = event_result?;
+                let data = &event.data;
+
+                if data["type"] == "content_block_start" {
+                    let block = &data["content_block"];
+                    let block_type = block["type"].as_str().unwrap_or("");
+                    match block_type {
+                        "tool_use" => {
+                            current_id = block["id"].as_str().unwrap_or("").to_owned();
+                            current_name = block["name"].as_str().unwrap_or("").to_owned();
+                            current_args.clear();
+                            arg_extractor = streamable_arg_for(tools, &current_name)
+                                .map(JsonStringExtractor::new);
                         }
-                    }
-
-                    if data["type"] == "content_block_delta" {
-                        let delta = &data["delta"];
-                        if delta["type"] == "thinking_delta" {
-                            if let Some(t) = delta["thinking"].as_str() {
-                                let _ = tx_ref.try_send(Event::Thinking(t.to_owned()));
-                            }
-                        } else if delta["type"] == "text_delta" {
-                            if let Some(t) = delta["text"].as_str() {
-                                text.push_str(t);
-                                let _ = tx_ref.try_send(Event::Token(t.to_owned()));
-                            }
-                        } else if delta["type"] == "input_json_delta"
-                            && let Some(j) = delta["partial_json"].as_str()
-                        {
-                            // Server tool (web search): accumulate JSON, extract query
-                            if in_server_tool {
-                                server_tool_json.push_str(j);
-                                if let Some(start) = server_tool_json.find("\"query\"")
-                                    && let Some(q) =
-                                        extract_json_string_value(&server_tool_json[start..])
-                                {
-                                    let _ = tx_ref.try_send(Event::WebSearchStart { query: q });
-                                    in_server_tool = false;
-                                }
-                            }
-                            current_args.push_str(j);
-                            // Stream content preview for write/edit tools
-                            if is_streamable_tool(&current_name) {
-                                if streaming_content {
-                                    let _ = tx_ref.try_send(Event::ToolInput {
-                                        name: current_name.clone(),
-                                        chunk: unescape_json_chunk(j),
-                                    });
-                                } else if has_content_key(&current_args) {
-                                    streaming_content = true;
-                                    if let Some(initial) = extract_content_value(&current_args)
-                                        && !initial.is_empty()
-                                    {
-                                        let _ = tx_ref.try_send(Event::ToolInput {
-                                            name: current_name.clone(),
-                                            chunk: initial,
+                        "server_tool_use" if block["name"] == "web_search" => {
+                            web_search_extractor = Some(JsonStringExtractor::new("query"));
+                            web_search_query_sent = false;
+                        }
+                        "web_search_tool_result" => {
+                            let content_len =
+                                block["content"].as_array().map(|a| a.len()).unwrap_or(0);
+                            crate::dbg_log!(
+                                "claude web_search_tool_result: {} items in content",
+                                content_len
+                            );
+                            let mut hits = Vec::new();
+                            if let Some(results) = block["content"].as_array() {
+                                for r in results {
+                                    let title = r["title"].as_str().unwrap_or("").to_owned();
+                                    let url = r["url"].as_str().unwrap_or("").to_owned();
+                                    if !url.is_empty() {
+                                        hits.push(crate::event::SearchHit {
+                                            title,
+                                            url,
+                                            snippet: String::new(),
                                         });
                                     }
                                 }
                             }
+                            let _ = tx
+                                .send(Event::WebSearchDone {
+                                    query: String::new(),
+                                    results: hits,
+                                })
+                                .await;
+                        }
+                        _ => {}
+                    }
+                }
+
+                if data["type"] == "content_block_delta" {
+                    let delta = &data["delta"];
+                    if delta["type"] == "thinking_delta" {
+                        if let Some(t) = delta["thinking"].as_str() {
+                            let _ = tx.send(Event::Thinking(t.to_owned())).await;
+                        }
+                    } else if delta["type"] == "text_delta" {
+                        if let Some(t) = delta["text"].as_str() {
+                            text.push_str(t);
+                            let _ = tx.send(Event::Token(t.to_owned())).await;
+                        }
+                    } else if delta["type"] == "input_json_delta"
+                        && let Some(j) = delta["partial_json"].as_str()
+                    {
+                        current_args.push_str(j);
+
+                        // Web search query: feed server-tool extractor.
+                        if let Some(ex) = web_search_extractor.as_mut() {
+                            let chunk = ex.feed(j);
+                            if !chunk.is_empty() && !web_search_query_sent {
+                                let _ = tx.send(Event::WebSearchStart { query: chunk }).await;
+                                web_search_query_sent = true;
+                            }
+                        }
+
+                        // Tool arg preview: feed the per-tool extractor and
+                        // forward any unescaped characters that became
+                        // available as a ToolInput event.
+                        if let Some(ex) = arg_extractor.as_mut() {
+                            let chunk = ex.feed(j);
+                            if !chunk.is_empty() {
+                                let _ = tx
+                                    .send(Event::ToolInput {
+                                        name: current_name.clone(),
+                                        chunk,
+                                    })
+                                    .await;
+                            }
                         }
                     }
+                }
 
-                    if data["type"] == "content_block_stop" && !current_id.is_empty() {
+                if data["type"] == "content_block_stop" {
+                    if !current_id.is_empty() {
                         tool_calls.push(ToolCall {
                             id: std::mem::take(&mut current_id),
                             r#type: "function".into(),
@@ -273,64 +268,88 @@ impl Provider for ClaudeProvider {
                             },
                         });
                     }
+                    // Reset per-block extractors regardless of whether this
+                    // was a tool_use, server_tool_use, or text block.
+                    arg_extractor = None;
+                    web_search_extractor = None;
+                }
 
-                    if data["type"] == "message_start"
-                        && let Some(u) = data["message"]["usage"].as_object()
-                    {
-                        let u_data = Usage {
-                            input_tokens: u
-                                .get("input_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0),
-                            output_tokens: u
-                                .get("output_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0),
-                            cache_read: u.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
-                            cache_write: u
-                                .get("cache_creation_input_tokens")
-                                .and_then(|v| v.as_u64()),
-                        };
-                        *usage_ref = u_data.clone();
-                        let _ = tx_ref.try_send(Event::Usage(u_data));
+                if data["type"] == "message_start"
+                    && let Some(u) = data["message"]["usage"].as_object()
+                {
+                    let u_data = Usage {
+                        input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                        output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                        cache_read: u.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
+                        cache_write: u
+                            .get("cache_creation_input_tokens")
+                            .and_then(|v| v.as_u64()),
+                    };
+                    usage = u_data.clone();
+                    let _ = tx.send(Event::Usage(u_data)).await;
+                }
+
+                // message_delta carries final output_tokens and stop_reason
+                if data["type"] == "message_delta" {
+                    if let Some(reason) = data["delta"]["stop_reason"].as_str() {
+                        stop_reason = reason.to_owned();
                     }
-
-                    // message_delta carries final output_tokens
-                    if data["type"] == "message_delta"
-                        && let Some(u) = data["usage"].as_object()
+                    if let Some(u) = data["usage"].as_object()
                         && let Some(out) = u.get("output_tokens").and_then(|v| v.as_u64())
                     {
-                        usage_ref.output_tokens = out;
+                        usage.output_tokens = out;
                         // Send without cache values — they were already reported in message_start
-                        let _ = tx_ref.try_send(Event::Usage(Usage {
-                            input_tokens: usage_ref.input_tokens,
-                            output_tokens: out,
-                            cache_read: None,
-                            cache_write: None,
-                        }));
+                        let _ = tx
+                            .send(Event::Usage(Usage {
+                                input_tokens: usage.input_tokens,
+                                output_tokens: out,
+                                cache_read: None,
+                                cache_write: None,
+                            }))
+                            .await;
                     }
+                }
 
-                    if data["type"] == "message_stop" {
-                        saw_message_stop = true;
-                    }
-                },
-            )
-            .await?;
+                if data["type"] == "message_stop" {
+                    saw_message_stop = true;
+                }
+            }
 
-            // Stream ended without message_stop — network cut, server error, etc.
-            // Return partial content so the turn is not silently lost.
-            if !saw_message_stop && text.is_empty() && tool_calls.is_empty() {
+            // Stream ended without message_stop AND without content → truly
+            // interrupted (network cut, proxy failure). Retryable.
+            //
+            // Match claude-code behavior: a valid stop_reason with empty content
+            // is a legitimate turn (e.g. structured output tool call on turn 1,
+            // then end_turn on turn 2 with no text). Do NOT error — let the
+            // caller decide what to do based on stop_reason.
+            let is_empty = text.is_empty() && tool_calls.is_empty();
+            if !saw_message_stop && is_empty {
                 return Err(crate::provider::sse::StreamInterrupted(
                     "Claude stream ended with no content".into(),
-                ).into());
+                )
+                .into());
             }
 
             let mut msg = Message::assistant(text);
             if !tool_calls.is_empty() {
                 msg.tool_calls = Some(tool_calls);
             }
-            Ok((msg, usage))
+            Ok(StreamResponse {
+                message: msg,
+                usage,
+                stop_reason: parse_stop_reason(&stop_reason),
+            })
         })
+    }
+}
+
+/// Map Anthropic stop_reason string to the unified [`StopReason`] enum.
+fn parse_stop_reason(s: &str) -> StopReason {
+    match s {
+        "end_turn" => StopReason::EndTurn,
+        "max_tokens" | "model_context_window_exceeded" => StopReason::MaxTokens,
+        "tool_use" => StopReason::ToolUse,
+        _ => StopReason::Other,
     }
 }
 
@@ -490,88 +509,121 @@ fn to_api_tools(tools: &[ToolSchema]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Tools whose content field should be streamed to UI as preview.
-const STREAMABLE_TOOLS: &[&str] = &["Write", "Edit"];
-
-fn is_streamable_tool(name: &str) -> bool {
-    STREAMABLE_TOOLS.contains(&name)
-}
-
-/// Content field keys in streaming JSON args.
-const CONTENT_KEYS: &[&str] = &[
-    "\"content\": \"",
-    "\"content\":\"",
-    "\"new_string\": \"",
-    "\"new_string\":\"",
-];
-
-fn has_content_key(args: &str) -> bool {
-    CONTENT_KEYS.iter().any(|k| args.contains(k))
-}
-
-/// Extract text after the content key's opening quote.
-/// Extract a JSON string value from partial JSON like `"query": "rust async"`.
-fn extract_json_string_value(s: &str) -> Option<String> {
-    // Find pattern: "key": "value"
-    let colon = s.find(':')?;
-    let rest = s[colon + 1..].trim_start();
-    if !rest.starts_with('"') {
+/// Resolve the effective `budget_tokens` for Anthropic's thinking parameter.
+///
+/// API invariant: `budget_tokens < max_tokens`. Returns `None` when thinking
+/// is disabled (so the caller can skip the field entirely) or when
+/// `max_tokens <= 1` (no room for any budget).
+fn resolve_thinking_budget(level: ThinkingLevel, max_tokens: u32) -> Option<u32> {
+    let budget = level.budget();
+    if budget == 0 || max_tokens <= 1 {
         return None;
     }
-    let inner = &rest[1..];
-    // Find closing quote (handle escapes)
-    let mut end = 0;
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            chars.next();
-            end += 2;
-            continue;
-        }
-        if c == '"' {
-            return Some(unescape_json_chunk(&inner[..end]));
-        }
-        end += c.len_utf8();
-    }
-    None // incomplete JSON, query not fully received yet
+    Some(budget.min(max_tokens - 1))
 }
 
-fn extract_content_value(args: &str) -> Option<String> {
-    let mut best_pos = None;
-    let mut best_key_len = 0;
-    for key in CONTENT_KEYS {
-        if let Some(pos) = args.rfind(key)
-            && best_pos.is_none_or(|bp| pos > bp)
-        {
-            best_pos = Some(pos);
-            best_key_len = key.len();
+/// Apply a single `cache_control: ephemeral` breakpoint to the last block of
+/// the last message. Mutates the messages in place.
+///
+/// Anthropic's prompt caching uses breakpoints to mark cache boundaries; a
+/// single breakpoint on the last message caches the full prefix.
+fn apply_cache_breakpoint(api_messages: &mut [serde_json::Value]) {
+    let Some(last_msg) = api_messages.last_mut() else {
+        return;
+    };
+    if let Some(content) = last_msg["content"].as_array_mut() {
+        if let Some(last_block) = content.last_mut() {
+            last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
         }
+        return;
     }
-    best_pos.map(|pos| unescape_json_chunk(&args[pos + best_key_len..]))
+    // Content is a bare string — lift it into an array with a cache_control
+    // annotation.
+    let text_val = last_msg["content"].take();
+    last_msg["content"] = serde_json::json!([{
+        "type": "text",
+        "text": text_val,
+        "cache_control": {"type": "ephemeral"}
+    }]);
 }
 
-/// Unescape JSON string escapes in a streaming chunk.
-fn unescape_json_chunk(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some('r') => out.push('\r'),
-                Some('"') => out.push('"'),
-                Some('\\') => out.push('\\'),
-                Some('/') => out.push('/'),
-                Some(other) => {
-                    out.push('\\');
-                    out.push(other);
-                }
-                None => out.push('\\'),
-            }
-        } else {
-            out.push(c);
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_stop_reason_known_values() {
+        assert_eq!(parse_stop_reason("end_turn"), StopReason::EndTurn);
+        assert_eq!(parse_stop_reason("max_tokens"), StopReason::MaxTokens);
+        assert_eq!(
+            parse_stop_reason("model_context_window_exceeded"),
+            StopReason::MaxTokens,
+        );
+        assert_eq!(parse_stop_reason("tool_use"), StopReason::ToolUse);
+        assert_eq!(parse_stop_reason("refusal"), StopReason::Other);
+        assert_eq!(parse_stop_reason(""), StopReason::Other);
     }
-    out
+
+    #[test]
+    fn thinking_budget_off_returns_none() {
+        assert_eq!(resolve_thinking_budget(ThinkingLevel::Off, 8192), None);
+    }
+
+    #[test]
+    fn thinking_budget_under_max_is_passed_through() {
+        // Low = 1024, max = 8192 → 1024 fits.
+        assert_eq!(
+            resolve_thinking_budget(ThinkingLevel::Low, 8192),
+            Some(1024)
+        );
+    }
+
+    #[test]
+    fn thinking_budget_capped_to_max_minus_one() {
+        // High = 8192, max = 8192 → must cap to 8191 (invariant budget < max).
+        assert_eq!(
+            resolve_thinking_budget(ThinkingLevel::High, 8192),
+            Some(8191)
+        );
+    }
+
+    #[test]
+    fn thinking_budget_with_tiny_max_returns_none() {
+        assert_eq!(resolve_thinking_budget(ThinkingLevel::Low, 1), None);
+        assert_eq!(resolve_thinking_budget(ThinkingLevel::Low, 0), None);
+    }
+
+    #[test]
+    fn cache_breakpoint_on_string_content() {
+        let mut msgs = vec![serde_json::json!({"role": "user", "content": "hi"})];
+        apply_cache_breakpoint(&mut msgs);
+        let content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "hi");
+        assert_eq!(content[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn cache_breakpoint_on_array_content() {
+        let mut msgs = vec![serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "a"},
+                {"type": "text", "text": "b"},
+            ]
+        })];
+        apply_cache_breakpoint(&mut msgs);
+        let content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert!(content[0].get("cache_control").is_none());
+        assert_eq!(content[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn cache_breakpoint_on_empty_messages_is_noop() {
+        let mut msgs: Vec<serde_json::Value> = vec![];
+        apply_cache_breakpoint(&mut msgs);
+        assert!(msgs.is_empty());
+    }
 }

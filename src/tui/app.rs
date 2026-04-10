@@ -22,7 +22,6 @@ use crate::tui::view::ViewState;
 use std::io::Write;
 use std::time::Duration;
 use termina::Terminal as _;
-use tokio::sync::mpsc;
 
 const TICK_INTERVAL: Duration = Duration::from_millis(80);
 const SCROLL_STEP: usize = 3;
@@ -125,7 +124,7 @@ pub struct App {
     regions: Regions,
     agent: AgentHandle,
     config: AppConfig,
-    tx: Option<mpsc::Sender<Event>>,
+    tx: Option<crate::event_bus::Sender>,
     term: Option<termina::PlatformTerminal>,
 }
 
@@ -277,7 +276,7 @@ impl App {
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
-        let (tx, mut rx) = mpsc::channel::<Event>(1024);
+        let (tx, mut rx) = crate::event_bus::channel();
         self.tx = Some(tx.clone());
 
         let mut term = self
@@ -326,7 +325,7 @@ impl App {
             let mut drained = 1usize;
             while drained < DRAIN_BUDGET {
                 match rx.try_recv() {
-                    Ok(event) => {
+                    Some(event) => {
                         if self.process_event(event) {
                             self.render();
                             Self::exit_terminal(&mut term);
@@ -335,7 +334,7 @@ impl App {
                         }
                         drained += 1;
                     }
-                    Err(_) => break,
+                    None => break,
                 }
             }
             self.render();

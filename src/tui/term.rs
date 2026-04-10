@@ -9,9 +9,7 @@ use std::io::{self, BufWriter, Stdout, Write};
 #[cfg(target_os = "macos")]
 pub fn copy_to_clipboard(_out: &mut impl Write, text: &str) -> io::Result<()> {
     use std::process::{Command, Stdio};
-    let mut child = Command::new("pbcopy")
-        .stdin(Stdio::piped())
-        .spawn()?;
+    let mut child = Command::new("pbcopy").stdin(Stdio::piped()).spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(text.as_bytes())?;
     }
@@ -30,9 +28,7 @@ pub fn copy_to_clipboard(out: &mut impl Write, text: &str) -> io::Result<()> {
 #[cfg(windows)]
 pub fn copy_to_clipboard(_out: &mut impl Write, text: &str) -> io::Result<()> {
     use std::process::{Command, Stdio};
-    let mut child = Command::new("clip")
-        .stdin(Stdio::piped())
-        .spawn()?;
+    let mut child = Command::new("clip").stdin(Stdio::piped()).spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(text.as_bytes())?;
     }

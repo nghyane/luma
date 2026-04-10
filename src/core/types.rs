@@ -145,11 +145,20 @@ pub struct ToolCallFunction {
 }
 
 /// JSON schema for tool parameters.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolSchema {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
+    /// Name of a string argument whose value should be streamed to the UI as
+    /// the model writes it (e.g. `"content"` for Write, `"new_string"` for
+    /// Edit). `None` disables the preview for this tool.
+    ///
+    /// Streaming is opt-in so tools own the decision: which field is a large
+    /// user-visible payload vs control flags. Provider layer must not
+    /// hardcode tool names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streamable_arg: Option<String>,
 }
 
 /// Thinking budget level.

@@ -1,14 +1,12 @@
 /// OpenAI-compatible chat completions provider with SSE streaming.
-use crate::core::provider::Provider;
+use crate::core::provider::{Provider, StopReason, StreamRequest, StreamResponse};
 use crate::core::types::{
     ContentBlock, Message, Role, ThinkingLevel, ToolCall, ToolCallFunction, ToolSchema, Usage,
 };
 use crate::event::Event;
-use crate::provider::sse::{SseEvent, post_sse};
+use crate::provider::sse::post_sse;
 use anyhow::Result;
 use std::collections::HashMap;
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 const BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -18,7 +16,6 @@ pub struct OpenAIProvider {
     max_tokens: u32,
     base_url: String,
     api_key: String,
-    thinking: ThinkingLevel,
 }
 
 impl OpenAIProvider {
@@ -26,10 +23,9 @@ impl OpenAIProvider {
     pub fn new(model: &str, api_key: &str) -> Self {
         Self {
             model: model.to_owned(),
-            max_tokens: 8192,
+            max_tokens: crate::provider::claude::DEFAULT_MAX_TOKENS,
             base_url: BASE_URL.to_owned(),
             api_key: api_key.to_owned(),
-            thinking: ThinkingLevel::Low,
         }
     }
 }
@@ -38,11 +34,8 @@ impl Provider for OpenAIProvider {
     fn name(&self) -> &str {
         "openai"
     }
-    fn thinking(&self) -> ThinkingLevel {
-        self.thinking
-    }
-    fn set_thinking(&mut self, level: ThinkingLevel) {
-        self.thinking = level;
+    fn set_thinking(&mut self, _level: ThinkingLevel) {
+        // OpenAI Chat Completions has no reasoning/thinking parameter.
     }
 
     fn server_tool_schemas(&self, _capabilities: &[String]) -> Vec<serde_json::Value> {
@@ -54,15 +47,20 @@ impl Provider for OpenAIProvider {
 
     fn stream<'a>(
         &'a self,
-        messages: &'a [Message],
-        tools: &'a [ToolSchema],
-        server_tools: &'a [serde_json::Value],
-        resolve_image: &'a crate::core::provider::ImageResolver,
-        tx: mpsc::Sender<Event>,
-        cancel: CancellationToken,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(Message, Usage)>> + Send + 'a>>
+        req: StreamRequest<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<StreamResponse>> + Send + 'a>>
     {
         Box::pin(async move {
+            let StreamRequest {
+                messages,
+                tools,
+                server_tools,
+                resolve_image,
+                max_tokens_override,
+                tx,
+                cancel,
+            } = req;
+            let effective_max_tokens = max_tokens_override.unwrap_or(self.max_tokens);
             let api_messages = to_api_messages(messages, resolve_image);
             let mut api_tools = to_api_tools(tools);
 
@@ -73,7 +71,7 @@ impl Provider for OpenAIProvider {
 
             let mut body = serde_json::json!({
                 "model": self.model,
-                "max_tokens": self.max_tokens,
+                "max_tokens": effective_max_tokens,
                 "messages": api_messages,
                 "stream": true,
             });
@@ -82,44 +80,46 @@ impl Provider for OpenAIProvider {
                 body["tools"] = api_tools.into();
             }
 
-            let budget = self.thinking.budget();
-            if budget > 0 {
-                body["thinking"] = serde_json::json!({"type": "enabled", "budget_tokens": budget});
-            }
-
             let auth_header = format!("Bearer {}", self.api_key);
             let headers = [("Authorization", auth_header.as_str())];
 
             let mut text = String::new();
             let mut tool_map: HashMap<u64, (String, String, String)> = HashMap::new();
             let mut usage = Usage::default();
+            let mut finish_reason = String::new();
 
-            let tx_ref = &tx;
-            let usage_ref = &mut usage;
-            let outcome = post_sse(
+            let mut stream = post_sse(
                 "openai",
                 &format!("{}/chat/completions", self.base_url),
                 &headers,
                 &body,
                 &tx,
                 &cancel,
-                |event: SseEvent| {
-                    let delta = &event.data["choices"][0]["delta"];
-                    if delta.is_null() {
-                        return;
-                    }
+            )
+            .await?;
 
+            while let Some(event_result) = stream.next().await {
+                let event = event_result?;
+                let choice = &event.data["choices"][0];
+                if let Some(r) = choice["finish_reason"].as_str()
+                    && !r.is_empty()
+                {
+                    finish_reason = r.to_owned();
+                }
+                let delta = &choice["delta"];
+
+                if !delta.is_null() {
                     if let Some(t) = delta["reasoning_content"].as_str()
                         && !t.is_empty()
                     {
-                        let _ = tx_ref.try_send(Event::Thinking(t.to_owned()));
+                        let _ = tx.send(Event::Thinking(t.to_owned())).await;
                     }
 
                     if let Some(t) = delta["content"].as_str()
                         && !t.is_empty()
                     {
                         text.push_str(t);
-                        let _ = tx_ref.try_send(Event::Token(t.to_owned()));
+                        let _ = tx.send(Event::Token(t.to_owned())).await;
                     }
 
                     if let Some(tcs) = delta["tool_calls"].as_array() {
@@ -139,37 +139,38 @@ impl Provider for OpenAIProvider {
                             }
                         }
                     }
+                }
 
-                    if let Some(u) = event.data["usage"].as_object() {
-                        let cached = u
-                            .get("prompt_tokens_details")
-                            .and_then(|d| d.get("cached_tokens"))
-                            .and_then(|v| v.as_u64());
-                        let prompt = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                        // OpenAI prompt_tokens includes cached — subtract to match Claude semantics
-                        let non_cached = prompt.saturating_sub(cached.unwrap_or(0));
-                        let u_data = Usage {
-                            input_tokens: non_cached,
-                            output_tokens: u
-                                .get("completion_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0),
-                            cache_read: cached,
-                            cache_write: None,
-                        };
-                        *usage_ref = u_data.clone();
-                        let _ = tx_ref.try_send(Event::Usage(u_data));
-                    }
-                },
-            )
-            .await?;
+                if let Some(u) = event.data["usage"].as_object() {
+                    let cached = u
+                        .get("prompt_tokens_details")
+                        .and_then(|d| d.get("cached_tokens"))
+                        .and_then(|v| v.as_u64());
+                    let prompt = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    // OpenAI prompt_tokens includes cached — subtract to match Claude semantics
+                    let non_cached = prompt.saturating_sub(cached.unwrap_or(0));
+                    let u_data = Usage {
+                        input_tokens: non_cached,
+                        output_tokens: u
+                            .get("completion_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0),
+                        cache_read: cached,
+                        cache_write: None,
+                    };
+                    usage = u_data.clone();
+                    let _ = tx.send(Event::Usage(u_data)).await;
+                }
+            }
 
-            // Stream ended without [DONE] — network cut, server error, etc.
-            // Return partial content so the turn is not silently lost.
-            if !outcome.saw_done && text.is_empty() && tool_map.is_empty() {
+            // Stream ended without [DONE] AND without content → truly
+            // interrupted. Retryable. Valid finish_reason + empty is legitimate.
+            let is_empty = text.is_empty() && tool_map.is_empty();
+            if !stream.saw_done() && is_empty {
                 return Err(crate::provider::sse::StreamInterrupted(
                     "OpenAI stream ended with no content".into(),
-                ).into());
+                )
+                .into());
             }
 
             let tool_calls: Vec<ToolCall> = tool_map
@@ -188,8 +189,22 @@ impl Provider for OpenAIProvider {
             if !tool_calls.is_empty() {
                 msg.tool_calls = Some(tool_calls);
             }
-            Ok((msg, usage))
+            Ok(StreamResponse {
+                message: msg,
+                usage,
+                stop_reason: parse_finish_reason(&finish_reason),
+            })
         })
+    }
+}
+
+/// Map OpenAI finish_reason string to unified [`StopReason`].
+fn parse_finish_reason(s: &str) -> StopReason {
+    match s {
+        "stop" => StopReason::EndTurn,
+        "length" => StopReason::MaxTokens,
+        "tool_calls" => StopReason::ToolUse,
+        _ => StopReason::Other,
     }
 }
 

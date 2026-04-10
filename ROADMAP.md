@@ -49,9 +49,9 @@ Current: ~20K lines Rust, 360 tests, 3 providers, 12 tools. Cross-platform (macO
 - [x] Windows rendering — synchronized output, clipboard, escape sequence guards
 - [x] Crash safety — panic hook, crash log, orphaned tool_use repair on resume
 - [x] Input polish — dynamic height, wrap, cursor tracking
+- [x] Large-session profiling (65K+ tokens) — Layout/renderer not bottleneck; FxHash for row diff (6.9x, 63→9 µs)
 - [ ] Bare URL highlighting in markdown
 - [ ] Streaming resize stability across providers
-- [ ] Large-session profiling (65K+ tokens) — render throughput, memory, freeze points
 - [ ] Tool output polish — clearer summaries and more consistent formatting
 
 ## v0.5 — UX & Extensibility

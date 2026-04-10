@@ -43,6 +43,7 @@ impl Tool for GlobTool {
                 },
                 "required": ["pattern"]
             }),
+            streamable_arg: None,
         }
     }
 

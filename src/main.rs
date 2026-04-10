@@ -22,6 +22,7 @@ macro_rules! dbg_log {
 mod config;
 mod core;
 mod event;
+mod event_bus;
 mod provider;
 mod tool;
 mod tui;
@@ -203,11 +204,21 @@ fn build_env_context() -> String {
         ("docker-compose.yml", &[("docker", "--version")]),
         (
             "requirements.txt",
-            &[("python3", "--version"), ("python", "--version"), ("pip3", "--version"), ("pip", "--version")],
+            &[
+                ("python3", "--version"),
+                ("python", "--version"),
+                ("pip3", "--version"),
+                ("pip", "--version"),
+            ],
         ),
         (
             "pyproject.toml",
-            &[("python3", "--version"), ("python", "--version"), ("pip3", "--version"), ("pip", "--version")],
+            &[
+                ("python3", "--version"),
+                ("python", "--version"),
+                ("pip3", "--version"),
+                ("pip", "--version"),
+            ],
         ),
         ("go.mod", &[("go", "version")]),
         ("Makefile", &[("make", "--version")]),

@@ -67,6 +67,7 @@ impl Tool for BashTool {
                 },
                 "required": ["command"]
             }),
+            streamable_arg: Some("command".into()),
         }
     }
 

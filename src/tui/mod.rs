@@ -2,6 +2,8 @@ pub mod app;
 pub mod block;
 pub mod document;
 pub mod layout;
+#[cfg(test)]
+mod layout_bench;
 pub mod markdown;
 pub mod picker;
 pub mod prompt;

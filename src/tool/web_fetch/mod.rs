@@ -49,6 +49,7 @@ impl Tool for WebFetchTool {
                 },
                 "required": ["url"]
             }),
+            streamable_arg: None,
         }
     }
 

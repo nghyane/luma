@@ -61,6 +61,7 @@ impl Tool for WebSearchTool {
                 },
                 "required": ["query"]
             }),
+            streamable_arg: None,
         }
     }
 

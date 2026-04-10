@@ -56,6 +56,7 @@ pub struct AgentHandle {
     pub turn_start: Option<std::time::Instant>,
     pub state: RunState,
     pub pending_content: Option<Vec<crate::core::types::ContentBlock>>,
+    pub pending_images: Option<Vec<(String, Vec<u8>)>>,
     pub abort_countdown: u8,
 }
 
@@ -67,6 +68,7 @@ impl AgentHandle {
             turn_start: None,
             state: RunState::Idle,
             pending_content: None,
+            pending_images: None,
             abort_countdown: 0,
         }
     }
