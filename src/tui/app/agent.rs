@@ -172,6 +172,11 @@ impl super::App {
     }
 
     pub(super) fn on_agent_done(&mut self) {
+        // Any tool/skill block that never received a matching end event
+        // (provider retry discarded it, stream cut mid-tool, etc.) is
+        // finalised here so the UI never shows a "preparing..." block
+        // after the turn has returned to idle.
+        self.doc.close_pending("");
         self.doc.newline();
         if let Some(start) = self.agent.turn_start.take() {
             let label = super::format_duration(start.elapsed());

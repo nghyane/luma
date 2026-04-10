@@ -103,7 +103,11 @@ impl Document {
         attempt: u8,
         max_attempts: u8,
     ) {
-        self.commit_last();
+        // Any tool block left pending from the failed attempt is now
+        // stale — the provider is going to re-stream from scratch and
+        // may issue a different tool call. Finalise them so the UI
+        // doesn't carry a "preparing..." ghost into the next attempt.
+        self.close_pending("retry");
         self.blocks.push(Block::Warn(format!(
             "{provider} temporary throttling — retrying in {delay_secs}s (attempt {attempt}/{max_attempts})"
         )));
@@ -213,22 +217,38 @@ impl Document {
 
     // ── State control ──
 
-    pub fn abort(&mut self) {
+    /// Finalise every tool/skill block that never received a matching
+    /// `tool_end` / `skill_end`. Called on abort, agent completion, or
+    /// agent error to prevent pending blocks from staying in the
+    /// "preparing..." state forever.
+    ///
+    /// Unlike [`Self::abort`], this scans the entire document — pending
+    /// blocks can be left behind anywhere if a provider retry discards a
+    /// tool_use in the middle of a turn.
+    pub fn close_pending(&mut self, end_summary: &str) {
         self.commit_last();
-        for block in self.blocks.iter_mut().rev() {
+        for block in self.blocks.iter_mut() {
             match block {
                 Block::Tool(tb) if !tb.is_done => {
                     tb.is_done = true;
-                    tb.end_summary = "aborted".to_owned();
+                    if tb.end_summary.is_empty() {
+                        tb.end_summary = end_summary.to_owned();
+                    }
                     tb.stream = None;
                 }
                 Block::Skill(sb) if !sb.is_done => {
                     sb.is_done = true;
-                    sb.end_summary = "aborted".to_owned();
+                    if sb.end_summary.is_empty() {
+                        sb.end_summary = end_summary.to_owned();
+                    }
                 }
-                _ => break,
+                _ => {}
             }
         }
+    }
+
+    pub fn abort(&mut self) {
+        self.close_pending("aborted");
     }
 
     pub fn newline(&mut self) {
@@ -399,7 +419,13 @@ mod tests {
         let tb = doc
             .blocks
             .iter()
-            .find_map(|b| if let Block::Tool(tb) = b { Some(tb) } else { None })
+            .find_map(|b| {
+                if let Block::Tool(tb) = b {
+                    Some(tb)
+                } else {
+                    None
+                }
+            })
             .unwrap();
         assert!(tb.is_done);
         assert_eq!(tb.output, vec!["  1 + line one", "  2 + line two"]);
@@ -460,6 +486,51 @@ mod tests {
             })
             .unwrap();
         assert!(tb.is_done);
+    }
+
+    #[test]
+    fn close_pending_finalises_all_unfinished_tools() {
+        // Simulate a turn where a provider retry leaves a pending Write
+        // block buried under later content.
+        let mut doc = Document::new();
+        doc.tool_selected("Write");
+        // Add another block "after" the pending Write so it isn't the tail.
+        doc.append_token("some assistant text\n");
+        doc.newline();
+        doc.tool_start("Bash", "$ ls");
+        doc.tool_output("Bash", "out\n");
+        doc.tool_end("Bash", "exit 0");
+
+        doc.close_pending("retry");
+
+        let pending_count = doc
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Tool(tb) if !tb.is_done))
+            .count();
+        assert_eq!(pending_count, 0, "all pending tools must be finalised");
+
+        let write_block = doc
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Tool(tb) if tb.name == "Write" => Some(tb),
+                _ => None,
+            })
+            .unwrap();
+        assert!(write_block.is_done);
+        assert_eq!(write_block.end_summary, "retry");
+
+        // Existing completed tool should keep its original end_summary.
+        let bash_block = doc
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Tool(tb) if tb.name == "Bash" => Some(tb),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(bash_block.end_summary, "exit 0");
     }
 
     #[test]
