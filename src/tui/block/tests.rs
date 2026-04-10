@@ -189,12 +189,12 @@ fn full_edit_tool_flow() {
     let mut doc = Document::new();
     let mut view = ViewState::new(80, 30);
 
-    doc.tool_start("Edit", "");
+    doc.tool_selected("Edit");
+    doc.tool_start("Edit", "test.rs");
     doc.tool_output("Edit", "  1   aaa\n");
     doc.tool_output("Edit", "  2 - bbb\n");
     doc.tool_output("Edit", "  2 + BBB\n");
     doc.tool_output("Edit", "  3   ccc\n");
-    doc.tool_start("Edit", "test.rs");
     doc.tool_end("Edit", "");
 
     view.prepare_frame(doc.blocks());

@@ -184,6 +184,19 @@ impl Provider for CodexProvider {
                             event["output_index"].as_u64(),
                             &event["item"],
                         );
+                        // Signal tool block creation immediately so the UI
+                        // shows a pending card during the gap between the
+                        // function_call start and the first arguments delta.
+                        if event["item"]["type"].as_str() == Some("function_call")
+                            && let Some(name) = event["item"]["name"].as_str()
+                            && !name.is_empty()
+                        {
+                            let _ = tx
+                                .send(Event::ToolSelected {
+                                    name: name.to_owned(),
+                                })
+                                .await;
+                        }
                     }
                     "response.function_call_arguments.delta" => {
                         if let Some(idx) = event["output_index"].as_u64()

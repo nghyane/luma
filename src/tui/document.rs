@@ -122,12 +122,33 @@ impl Document {
 
     // ── Tool lifecycle ──
 
+    /// Create a pending tool block as soon as the provider starts a tool_use
+    /// stream. Called before [`Self::tool_input`] / [`Self::tool_start`]
+    /// reach the document, so the UI can show a spinner during the gap
+    /// between tool selection and the first streamable-arg delta.
+    ///
+    /// If an active (not-done) block with the same name already exists,
+    /// this is a no-op — the provider may re-announce the tool on retry,
+    /// and we want to keep any partial args already collected.
+    pub fn tool_selected(&mut self, name: &str) {
+        if self.find_active_tool_mut(name).is_some() {
+            return;
+        }
+        self.commit_last();
+        let block = Block::Tool(ToolBlock::streaming(name, ""));
+        self.auto_gap(&block);
+        self.blocks.push(block);
+    }
+
+    /// Announce that a tool is about to execute with resolved arguments.
+    /// Called by the agent turn loop once the provider's tool call is
+    /// complete. Upgrades the summary of any existing pending block and
+    /// resets its stream buffer so subsequent [`Self::tool_output`] chunks
+    /// accumulate into the output phase cleanly.
     pub fn tool_start(&mut self, name: &str, summary: &str) {
         if let Some(tb) = self.find_active_tool_mut(name) {
-            if !summary.is_empty() {
-                tb.summary = summary.to_owned();
-                tb.stream = Some(StreamBuf::new());
-            }
+            tb.summary = summary.to_owned();
+            tb.stream = Some(StreamBuf::new());
             return;
         }
         self.commit_last();
@@ -136,10 +157,10 @@ impl Document {
         self.blocks.push(block);
     }
 
+    /// Feed streamed argument characters into the active tool block's
+    /// stream buffer. Called while the provider is still delivering the
+    /// tool's input JSON.
     pub fn tool_input(&mut self, name: &str, chunk: &str) {
-        if self.find_active_tool_mut(name).is_none() {
-            self.tool_start(name, "");
-        }
         if let Some(tb) = self.find_active_tool_mut(name)
             && let Some(stream) = &mut tb.stream
         {
@@ -341,6 +362,61 @@ mod tests {
         assert!(tb.is_done);
         assert_eq!(tb.output, vec!["file1", "file2"]);
         assert_eq!(tb.end_summary, "exit 0");
+    }
+
+    #[test]
+    fn write_streaming_lifecycle() {
+        // Simulate the Claude Write flow: provider emits ToolSelected ->
+        // ToolInput chunks (arg preview) -> orchestrator emits ToolStart
+        // with path -> ToolOutput diff lines -> ToolEnd.
+        let mut doc = Document::new();
+
+        doc.tool_selected("Write");
+        let tb = active_tool(&doc, "Write").unwrap();
+        assert!(!tb.is_done);
+        assert!(tb.summary.is_empty());
+        assert!(tb.stream.as_ref().is_some_and(|s| s.is_empty()));
+
+        doc.tool_input("Write", "line one\n");
+        doc.tool_input("Write", "line two\n");
+        doc.tool_input("Write", "parti");
+        let tb = active_tool(&doc, "Write").unwrap();
+        let stream = tb.stream.as_ref().unwrap();
+        assert_eq!(stream.committed, vec!["line one", "line two"]);
+        assert_eq!(stream.partial(), "parti");
+
+        // Orchestrator resolves the call and starts execution.
+        doc.tool_start("Write", "/tmp/foo.txt");
+        let tb = active_tool(&doc, "Write").unwrap();
+        assert_eq!(tb.summary, "/tmp/foo.txt");
+        // Stream reset so output can accumulate cleanly.
+        assert!(tb.stream.as_ref().is_some_and(|s| s.is_empty()));
+
+        doc.tool_output("Write", "  1 + line one\n");
+        doc.tool_output("Write", "  2 + line two\n");
+        doc.tool_end("Write", "Created /tmp/foo.txt");
+
+        let tb = doc
+            .blocks
+            .iter()
+            .find_map(|b| if let Block::Tool(tb) = b { Some(tb) } else { None })
+            .unwrap();
+        assert!(tb.is_done);
+        assert_eq!(tb.output, vec!["  1 + line one", "  2 + line two"]);
+        assert_eq!(tb.end_summary, "Created /tmp/foo.txt");
+    }
+
+    fn active_tool<'a>(doc: &'a Document, name: &str) -> Option<&'a crate::tui::block::ToolBlock> {
+        doc.blocks.iter().rev().find_map(|b| {
+            if let Block::Tool(tb) = b
+                && tb.name == name
+                && !tb.is_done
+            {
+                Some(tb)
+            } else {
+                None
+            }
+        })
     }
 
     #[test]

@@ -78,6 +78,11 @@ impl super::App {
                 self.doc.append_thinking(&t);
                 Action::Continue
             }
+            Event::ToolSelected { name } => {
+                crate::dbg_log!("tool_selected {name}");
+                self.doc.tool_selected(&name);
+                Action::Render
+            }
             Event::ToolInput { name, chunk } => {
                 crate::dbg_log!("tool_input {name}: {}B", chunk.len());
                 self.doc.tool_input(&name, &chunk);

@@ -18,6 +18,18 @@ pub enum Event {
 
     Token(String),
     Thinking(String),
+    /// Provider has started a tool_use block and knows the tool name, but
+    /// arguments are still streaming. Emitted by providers once per tool
+    /// invocation, before any [`Self::ToolInput`]. Gives the UI a chance to
+    /// show a pending block during the gap between tool selection and the
+    /// first streamable-arg delta (Claude in particular may pause ~10s
+    /// between the `path` field and the `content` field of a Write call).
+    ToolSelected {
+        name: String,
+    },
+    /// Orchestrator is about to execute the tool. Carries the final, parsed
+    /// argument summary (e.g. file path). Emitted by the agent turn loop
+    /// after the provider stream resolves the tool call.
     ToolStart {
         name: String,
         summary: String,

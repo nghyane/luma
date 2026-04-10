@@ -178,6 +178,18 @@ impl Provider for ClaudeProvider {
                             current_args.clear();
                             arg_extractor = streamable_arg_for(tools, &current_name)
                                 .map(JsonStringExtractor::new);
+                            // Signal block creation immediately so the UI shows
+                            // a pending card during the gap between tool_use
+                            // start and the first streamable-arg delta
+                            // (Anthropic frequently pauses ~10s before emitting
+                            // the `content` / `new_string` field).
+                            if !current_name.is_empty() {
+                                let _ = tx
+                                    .send(Event::ToolSelected {
+                                        name: current_name.clone(),
+                                    })
+                                    .await;
+                            }
                         }
                         "server_tool_use" if block["name"] == "web_search" => {
                             web_search_extractor = Some(JsonStringExtractor::new("query"));
