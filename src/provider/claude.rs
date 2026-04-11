@@ -384,10 +384,11 @@ fn parse_stop_reason(s: &str) -> StopReason {
     }
 }
 
-/// Upstream CLI version. Used for `User-Agent`, `cc_version`, and as input
-/// to [`compute_fingerprint`]. Must match across the three so the backend's
-/// attribution validator accepts the fingerprint.
-const CLI_VERSION: &str = "2.1.101";
+/// Upstream CLI version reverse-engineered from `~/.local/bin/claude@2.1.100`.
+/// Used for `User-Agent`, `cc_version`, and as input to [`compute_fingerprint`].
+/// Must match across the three so the backend's attribution validator
+/// accepts the fingerprint.
+const CLI_VERSION: &str = "2.1.100";
 
 const IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -420,10 +421,13 @@ fn claude_cli_user_agent() -> String {
 /// 3. optional user system text (same cache_control)
 fn build_oauth_system(user_system: &str, first_user_content: &str) -> serde_json::Value {
     let fingerprint = compute_fingerprint(first_user_content);
-    // Default shape — `cch` and `cc_workload` segments are only emitted
-    // under internal feature flags (`src/constants/system.ts:82`).
+    // Native-client-attestation placeholder — claude-code@2.1.100 always
+    // emits ` cch=00000;` on first-party traffic. The real CLI's HTTP
+    // stack overwrites the zeros with a computed attestation token in
+    // flight; omitting the segment entirely trips the backend's
+    // first-party client check.
     let billing = format!(
-        "x-anthropic-billing-header: cc_version={CLI_VERSION}.{fingerprint}; cc_entrypoint=cli;"
+        "x-anthropic-billing-header: cc_version={CLI_VERSION}.{fingerprint}; cc_entrypoint=cli; cch=00000;"
     );
     let cache_ephemeral = serde_json::json!({"type": "ephemeral"});
     let mut blocks = vec![
@@ -753,7 +757,9 @@ mod tests {
         assert!(billing.starts_with("x-anthropic-billing-header: cc_version="));
         assert!(billing.contains(&format!("cc_version={CLI_VERSION}.")));
         assert!(billing.contains("cc_entrypoint=cli;"));
-        assert!(!billing.contains("cch="));
+        // claude-code@2.1.100 always emits the native-client-attestation
+        // placeholder on first-party traffic — omitting it trips the backend.
+        assert!(billing.contains("cch=00000;"));
         assert!(!billing.contains("ttl"));
         assert!(arr[0].get("cache_control").is_none());
 
