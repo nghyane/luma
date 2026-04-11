@@ -7,8 +7,8 @@
 
 use super::{
     AccountEntry, AuthProvider, CLAUDE_CLIENT_ID, CLAUDE_OAUTH_ENDPOINT, CLAUDE_SCOPES,
-    OPENAI_CLIENT_ID, OPENAI_OAUTH_ENDPOINT, UsageRec, decode_jwt_payload, derive_label,
-    extract_email_from_jwt, now_unix, upsert_by_label, with_pool_mut,
+    CODEX_ORIGINATOR, OPENAI_CLIENT_ID, OPENAI_OAUTH_ENDPOINT, UsageRec, decode_jwt_payload,
+    derive_label, extract_email_from_jwt, now_unix, upsert_by_label, with_pool_mut,
 };
 use anyhow::{Context as _, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -90,9 +90,11 @@ impl ProviderFlow {
              &code_challenge_method=S256\
              &id_token_add_organizations=true\
              &codex_cli_simplified_flow=true\
-             &state={state}",
+             &state={state}\
+             &originator={originator}",
             redirect = url_encode(redirect_uri),
             scope = url_encode(CODEX_SCOPE),
+            originator = url_encode(CODEX_ORIGINATOR),
         );
 
         Self {
@@ -617,6 +619,7 @@ mod tests {
         assert!(url.contains("codex_cli_simplified_flow=true"));
         assert!(url.contains("code_challenge=CHALLENGE"));
         assert!(url.contains("state=STATE"));
+        assert!(url.contains("originator=codex_cli_rs"));
         assert_eq!(flow.callback_path, "/auth/callback");
         // redirect must be encoded
         assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A1%2Fauth%2Fcallback"));

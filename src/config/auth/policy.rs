@@ -84,13 +84,22 @@ impl AuthProvider {
                     content_type: "application/json",
                 }
             }
-            Self::OpenAI => RefreshRequest {
-                url: OPENAI_OAUTH_ENDPOINT,
-                body: format!(
-                    "grant_type=refresh_token&refresh_token={refresh_token}&client_id={OPENAI_CLIENT_ID}"
-                ),
-                content_type: "application/x-www-form-urlencoded",
-            },
+            Self::OpenAI => {
+                // Upstream codex-rs refresh body is JSON with exactly these
+                // three fields — no scope echo. Matching byte-for-byte keeps
+                // luma classified as a first-party client during refresh.
+                // See `codex-rs/login/src/auth/manager.rs::RefreshRequest`.
+                let body = serde_json::json!({
+                    "client_id": OPENAI_CLIENT_ID,
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                });
+                RefreshRequest {
+                    url: OPENAI_OAUTH_ENDPOINT,
+                    body: body.to_string(),
+                    content_type: "application/json",
+                }
+            }
         }
     }
 }

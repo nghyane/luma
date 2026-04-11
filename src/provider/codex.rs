@@ -1,4 +1,5 @@
 /// Codex provider — OpenAI Responses API at chatgpt.com/backend-api/codex.
+use crate::config::auth::{CODEX_ORIGINATOR, codex_user_agent, resolve_installation_id};
 use crate::core::provider::{Provider, StopReason, StreamRequest, StreamResponse};
 use crate::core::types::{
     Message, Role, ThinkingLevel, ToolCall, ToolCallFunction, ToolSchema, Usage,
@@ -113,6 +114,15 @@ impl Provider for CodexProvider {
             if let Some(key) = &self.session_id {
                 body["prompt_cache_key"] = serde_json::json!(key);
             }
+            // Upstream always inlines the installation id in `client_metadata`
+            // so the backend can correlate traffic to a persistent install.
+            // Match that exactly — see `codex-rs/core/src/client.rs`
+            // `build_responses_request`.
+            if let Some(installation_id) = resolve_installation_id() {
+                body["client_metadata"] = serde_json::json!({
+                    "x-codex-installation-id": installation_id,
+                });
+            }
 
             // Reasoning: map ThinkingLevel → effort + summary for Responses API
             let effort = match self.thinking {
@@ -128,10 +138,22 @@ impl Provider for CodexProvider {
                 });
             }
 
+            // Upstream always attaches `originator`, `User-Agent`, and a
+            // per-conversation `session_id` header on every Responses API
+            // call. Matching this exactly is what keeps luma classified as a
+            // first-party `codex_cli_rs` client by the backend.
             let auth_header = format!("Bearer {}", self.api_key);
-            let mut header_vec: Vec<(&str, &str)> = vec![("Authorization", &auth_header)];
+            let user_agent = codex_user_agent();
+            let mut header_vec: Vec<(&str, &str)> = vec![
+                ("Authorization", &auth_header),
+                ("originator", CODEX_ORIGINATOR),
+                ("User-Agent", user_agent.as_str()),
+            ];
             if let Some(aid) = &self.account_id {
                 header_vec.push(("chatgpt-account-id", aid.as_str()));
+            }
+            if let Some(sid) = &self.session_id {
+                header_vec.push(("session_id", sid.as_str()));
             }
 
             let mut stream = crate::provider::sse::post_sse(

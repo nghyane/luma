@@ -25,8 +25,10 @@ use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod codex_identity;
 mod pkce;
 mod policy;
+pub(crate) use codex_identity::{CODEX_ORIGINATOR, codex_user_agent, resolve_installation_id};
 pub use pkce::{login, login_with_reporter};
 pub(crate) use policy::AuthFailureKind;
 
