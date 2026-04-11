@@ -12,6 +12,8 @@ use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 impl super::App {
     fn apply_loaded_session(&mut self, session: &crate::core::session::Session, is_new: bool) {
+        // Only clear the in-flight flag — agent is already idle when this ack arrives.
+        self.agent.is_loading_session = false;
         self.enter_chat();
         self.doc.clear();
         self.view.clear();
@@ -44,17 +46,22 @@ impl super::App {
                     .sum::<usize>() as u64
                     / 4
             };
-            let ctx_window = self
-                .config
-                .model
-                .as_ref()
-                .map(|m| models::context_window(&m.id))
-                .unwrap_or(200_000);
-            let pct = ((total as f64 / ctx_window as f64) * 100.0).min(100.0) as u8;
-            self.ui.status.set_context(total, pct);
+            self.update_context_from_tokens(total);
         }
 
         self.sync_prompt_commands();
+    }
+
+    /// Compute context window percentage and push to status bar.
+    fn update_context_from_tokens(&mut self, total: u64) {
+        let ctx_window = self
+            .config
+            .model
+            .as_ref()
+            .map(|m| models::context_window(&m.id))
+            .unwrap_or(200_000);
+        let pct = ((total as f64 / ctx_window as f64) * 100.0).min(100.0) as u8;
+        self.ui.status.set_context(total, pct);
     }
 
     pub(super) fn handle(&mut self, event: Event) -> Action {
@@ -103,7 +110,7 @@ impl super::App {
                 }
             }
 
-            // --- Agent / streaming events — skipped while aborting ---
+            // --- Agent lifecycle — always handled, even while aborting ---
             Event::AgentDone => {
                 crate::dbg_log!("agent done");
                 self.on_agent_done();
@@ -114,6 +121,18 @@ impl super::App {
                 self.on_agent_error(&msg);
                 Action::Render
             }
+            Event::SessionLoaded { session, is_new } => {
+                crate::dbg_log!(
+                    "session_loaded is_new={} agent_state={:?} msgs={}",
+                    is_new,
+                    self.agent.state,
+                    session.messages.len()
+                );
+                self.apply_loaded_session(&session, is_new);
+                Action::Render
+            }
+
+            // --- Streaming events — skipped while aborting ---
             _ if aborting => Action::Continue,
 
             Event::Token(t) => {
@@ -237,18 +256,7 @@ impl super::App {
                 let cache_read = usage.cache_read.unwrap_or(cr);
                 let cache_write = usage.cache_write.unwrap_or(cw);
                 let total = usage.input_tokens + cache_read + cache_write + usage.output_tokens;
-                let ctx_window = self
-                    .config
-                    .model
-                    .as_ref()
-                    .map(|m| models::context_window(&m.id))
-                    .unwrap_or(200_000);
-                let pct = ((total as f64 / ctx_window as f64) * 100.0).min(100.0) as u8;
-                self.ui.status.set_context(total, pct);
-                Action::Render
-            }
-            Event::SessionLoaded { session, is_new } => {
-                self.apply_loaded_session(&session, is_new);
+                self.update_context_from_tokens(total);
                 Action::Render
             }
         }

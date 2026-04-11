@@ -58,6 +58,10 @@ pub struct AgentHandle {
     pub pending_content: Option<Vec<crate::core::types::ContentBlock>>,
     pub pending_images: Option<Vec<(String, Vec<u8>)>>,
     pub abort_countdown: u8,
+    /// Set while a `LoadSession` command is in-flight. Suppresses the
+    /// intermediate Ready state that `on_agent_done` would otherwise set
+    /// before `SessionLoaded` arrives.
+    pub is_loading_session: bool,
 }
 
 impl AgentHandle {
@@ -70,6 +74,7 @@ impl AgentHandle {
             pending_content: None,
             pending_images: None,
             abort_countdown: 0,
+            is_loading_session: false,
         }
     }
 }

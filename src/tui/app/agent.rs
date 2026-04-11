@@ -18,6 +18,12 @@ impl super::App {
         {
             return self.handle_command(cmd);
         }
+        // Session load in flight — agent queue has a LoadSession ahead of any
+        // Chat command. Drop this submit rather than queuing behind a session
+        // replace that would discard the message anyway.
+        if self.agent.is_loading_session {
+            return Action::Continue;
+        }
         if self.agent.state != RunState::Idle {
             self.agent.pending_content = Some(content);
             self.agent.pending_images = Some(images);
@@ -179,21 +185,29 @@ impl super::App {
     }
 
     pub(super) fn on_agent_done(&mut self) {
-        // Any tool/skill block that never received a matching end event
-        // (provider retry discarded it, stream cut mid-tool, etc.) is
-        // finalised here so the UI never shows a "preparing..." block
-        // after the turn has returned to idle.
-        self.doc.close_pending("");
-        self.doc.newline();
-        if let Some(start) = self.agent.turn_start.take() {
-            let label = super::format_duration(start.elapsed());
-            self.doc.divider_with_label(&label);
+        // If a session load is in flight the doc is about to be cleared by
+        // apply_loaded_session — skip cosmetic doc writes to avoid flicker.
+        if !self.agent.is_loading_session {
+            // Any tool/skill block that never received a matching end event
+            // (provider retry discarded it, stream cut mid-tool, etc.) is
+            // finalised here so the UI never shows a "preparing..." block
+            // after the turn has returned to idle.
+            self.doc.close_pending("");
+            self.doc.newline();
+            if let Some(start) = self.agent.turn_start.take() {
+                let label = super::format_duration(start.elapsed());
+                self.doc.divider_with_label(&label);
+            } else {
+                self.doc.divider();
+            }
+            self.ui.status.set_state(StatusState::Ready);
         } else {
-            self.doc.divider();
+            self.agent.turn_start = None;
         }
+
         self.agent.state = RunState::Idle;
         self.agent.cancel = None;
-        self.ui.status.set_state(StatusState::Ready);
+
         // Surface any cooldowns set during the turn in the status bar.
         self.refresh_pool_health();
 

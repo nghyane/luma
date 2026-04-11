@@ -227,6 +227,16 @@ impl ThinkingLevel {
             Self::High => Self::Off,
         }
     }
+
+    /// Display label — consistent with `AgentMode::as_str` convention.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
 }
 
 /// Token usage from a provider response.

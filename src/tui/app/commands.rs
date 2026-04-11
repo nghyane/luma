@@ -3,7 +3,6 @@ use super::Action;
 use super::state::PickerMode;
 use crate::config::auth::{self, AccountHealth, AuthProvider};
 use crate::config::models::{self, AgentMode};
-use crate::core::types::ThinkingLevel;
 use crate::event::{AgentCommand, Event};
 use crate::tui::status::PoolHealth;
 use crate::tui::theme::palette;
@@ -12,21 +11,35 @@ impl super::App {
     fn request_session_load(
         &mut self,
         session: crate::core::session::Session,
+        is_new: bool,
         busy_message: &str,
     ) -> bool {
         self.ensure_agent_loop();
+
+        // ensure_agent_loop is a no-op when model is None — agent.tx stays
+        // None. Guard here so we never set is_loading_session without a
+        // command actually in the channel.
+        let Some(tx) = &self.agent.tx else {
+            self.doc.error("no model — run 'luma sync'");
+            return false;
+        };
+
         if let Some(cancel) = self.agent.cancel.take() {
             cancel.cancel();
         }
         self.agent.pending_content = None;
         self.agent.pending_images = None;
         self.agent.turn_start = None;
-        if let Some(tx) = &self.agent.tx
-            && tx.try_send(AgentCommand::LoadSession { session }).is_err()
+
+        if tx
+            .try_send(AgentCommand::LoadSession { session, is_new })
+            .is_err()
         {
             self.doc.warn(busy_message);
             return false;
         }
+
+        self.agent.is_loading_session = true;
         self.ui
             .status
             .set_state(crate::tui::status::StatusState::Thinking);
@@ -38,6 +51,7 @@ impl super::App {
             "new" => {
                 let _ = self.request_session_load(
                     crate::core::session::Session::new(),
+                    true,
                     "agent is busy; could not start a new thread right now",
                 );
                 Action::Render
@@ -160,14 +174,13 @@ impl super::App {
             .info(&format!("{} login · opening browser…", provider.as_str()));
         tokio::spawn(async move {
             let tx_url = tx.clone();
-            let tx_result = tx.clone();
             let outcome = auth::login_with_reporter(provider, move |url| {
                 let _ = tx_url.try_send(Event::LoginUrl(url.to_owned()));
             })
             .await;
             match outcome {
                 Ok(o) => {
-                    let _ = tx_result
+                    let _ = tx
                         .send(Event::LoginDone {
                             label: o.label,
                             email: o.email,
@@ -176,7 +189,7 @@ impl super::App {
                         .await;
                 }
                 Err(e) => {
-                    let _ = tx_result.send(Event::LoginFailed(e.to_string())).await;
+                    let _ = tx.send(Event::LoginFailed(e.to_string())).await;
                 }
             }
         });
@@ -233,6 +246,7 @@ impl super::App {
             c.cancel();
         }
         self.agent.state = super::state::RunState::Idle;
+        self.agent.is_loading_session = false;
         if let Some(tx) = self.agent.tx.take() {
             let _ = tx.try_send(AgentCommand::Shutdown);
         }
@@ -252,8 +266,11 @@ impl super::App {
             return;
         };
 
-        let _ =
-            self.request_session_load(session, "agent is busy; could not load session right now");
+        let _ = self.request_session_load(
+            session,
+            false,
+            "agent is busy; could not load session right now",
+        );
     }
 
     pub(super) fn render_history(
@@ -348,13 +365,7 @@ impl super::App {
         }
         crate::config::prefs::save_thinking(self.config.thinking);
         self.update_status();
-        let label = match self.config.thinking {
-            ThinkingLevel::Off => "off",
-            ThinkingLevel::Low => "low",
-            ThinkingLevel::Medium => "medium",
-            ThinkingLevel::High => "high",
-        };
-        self.ui.status.set_thinking_level(label);
+        self.ui.status.set_thinking_level(self.config.thinking.as_str());
     }
 
     pub(super) fn update_status(&mut self) {

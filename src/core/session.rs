@@ -6,6 +6,11 @@ use std::path::PathBuf;
 
 /// Last-turn token snapshot — represents current context window usage.
 /// Not cumulative across turns; each turn's response replaces this.
+///
+/// Uses `u64` (not `Option<u64>`) for cache fields because this is persisted
+/// state: once written, the absence of cache data is represented as 0, not
+/// `None`. Contrast with [`crate::core::types::Usage`] which uses `Option`
+/// because a provider response may genuinely omit cache fields mid-stream.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionUsage {
     pub input_tokens: u64,

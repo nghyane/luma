@@ -387,6 +387,15 @@ fn build_oauth_system(user_system: &str, first_user_content: &str) -> serde_json
     serde_json::Value::Array(blocks)
 }
 
+/// Compute the `cch` billing fingerprint sent in the OAuth system header.
+///
+/// Reverse-engineered from the official claude-code CLI binary. The value is
+/// a 5-char hex prefix of SHA-256(salt + chars_at_positions + version).
+/// Positions [4, 7, 20] sample characters from the first user message; if the
+/// message is shorter than a position, '0' is substituted. Changing any of
+/// these constants will produce a different fingerprint and may break billing
+/// attribution on Anthropic's side — do not alter without verifying against
+/// the reference implementation.
 fn compute_cch(first_user_content: &str) -> String {
     use sha2::{Digest, Sha256};
     let salt = "59cf53e54c78";

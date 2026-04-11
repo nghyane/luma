@@ -70,6 +70,8 @@ pub enum Event {
     },
     Usage(Usage),
     SessionLoaded {
+        /// Boxed to keep `Event` enum size small — `Session` contains a `Vec<Message>`
+        /// which makes this variant significantly larger than others.
         session: Box<crate::core::session::Session>,
         is_new: bool,
     },
@@ -121,8 +123,10 @@ pub enum AgentCommand {
     /// Update thinking level on current provider.
     SetThinking(crate::core::types::ThinkingLevel),
     /// Replace the current thread with a specific session.
+    /// `is_new` is set by the caller (App) — true for `/new`, false for resume.
     LoadSession {
         session: crate::core::session::Session,
+        is_new: bool,
     },
     /// Shut down the agent loop.
     Shutdown,

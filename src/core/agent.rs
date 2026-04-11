@@ -118,16 +118,18 @@ async fn agent_loop(
                             session.messages.push(Message::system(
                                 "[user interrupted the previous turn]".to_owned(),
                             ));
+                            fix_orphaned_tool_uses(&mut session.messages);
                         }
-                        fix_orphaned_tool_uses(&mut session.messages);
                         session.save();
                         let _ = event_tx.send(Event::AgentError(msg)).await;
                     }
                 }
             }
-            AgentCommand::LoadSession { session: loaded } => {
+            AgentCommand::LoadSession {
+                session: loaded,
+                is_new,
+            } => {
                 session.save();
-                let is_new = loaded.messages.is_empty();
                 session = loaded;
                 if !config.system_prompt.is_empty()
                     && !session
