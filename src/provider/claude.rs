@@ -97,8 +97,10 @@ impl Provider for ClaudeProvider {
                 "stream": true,
             });
 
-            if let Some(budget) = resolve_thinking_budget(self.thinking, effective_max_tokens) {
-                body["thinking"] = serde_json::json!({"type": "enabled", "budget_tokens": budget});
+            if self.thinking != ThinkingLevel::Off
+                && let Some(config) = build_thinking_config(&self.model, self.thinking, effective_max_tokens)
+            {
+                body["thinking"] = config;
             }
 
             if self.is_oauth {
@@ -700,17 +702,45 @@ fn to_api_tools(tools: &[ToolSchema]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Resolve the effective `budget_tokens` for Anthropic's thinking parameter.
+/// Build the `thinking` config object for a Claude Messages request.
 ///
-/// API invariant: `budget_tokens < max_tokens`. Returns `None` when thinking
-/// is disabled (so the caller can skip the field entirely) or when
-/// `max_tokens <= 1` (no room for any budget).
-fn resolve_thinking_budget(level: ThinkingLevel, max_tokens: u32) -> Option<u32> {
+/// Mirrors `claude-code@2.1.100`'s logic from `src/services/api/claude.ts`:
+///
+/// * If the model supports adaptive thinking (Sonnet/Opus 4.6), emit
+///   `{"type": "adaptive"}` — the backend picks an appropriate budget
+///   at runtime. The SDK explicitly warns that `type: "enabled"` is
+///   deprecated for these models.
+/// * Otherwise fall back to `{"type": "enabled", "budget_tokens": N}`.
+///   `budget_tokens < max_tokens` is an API invariant; we cap accordingly.
+/// * Returns `None` when `max_tokens <= 1` (no room for any budget) and
+///   the model is not adaptive-capable — caller should skip the field.
+fn build_thinking_config(
+    model: &str,
+    level: ThinkingLevel,
+    max_tokens: u32,
+) -> Option<serde_json::Value> {
+    if is_adaptive_thinking_model(model) {
+        return Some(serde_json::json!({"type": "adaptive"}));
+    }
     let budget = level.budget();
     if budget == 0 || max_tokens <= 1 {
         return None;
     }
-    Some(budget.min(max_tokens - 1))
+    let capped = budget.min(max_tokens - 1);
+    Some(serde_json::json!({
+        "type": "enabled",
+        "budget_tokens": capped,
+    }))
+}
+
+/// Whether `model` supports Anthropic's adaptive thinking mode.
+///
+/// Mirrors upstream `rN_(model)` in `claude-code@2.1.100`: true only for
+/// `opus-4-6` and `sonnet-4-6`. Other Claude 4.x models still use the
+/// old `{type: "enabled", budget_tokens: N}` shape.
+fn is_adaptive_thinking_model(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m.contains("opus-4-6") || m.contains("sonnet-4-6")
 }
 
 /// Apply a single `cache_control: ephemeral` breakpoint to the last block
@@ -748,32 +778,61 @@ mod tests {
     }
 
     #[test]
-    fn thinking_budget_off_returns_none() {
-        assert_eq!(resolve_thinking_budget(ThinkingLevel::Off, 8192), None);
-    }
-
-    #[test]
-    fn thinking_budget_under_max_is_passed_through() {
-        // Low = 1024, max = 8192 → 1024 fits.
+    fn thinking_config_off_returns_none() {
         assert_eq!(
-            resolve_thinking_budget(ThinkingLevel::Low, 8192),
-            Some(1024)
+            build_thinking_config("claude-sonnet-4-5", ThinkingLevel::Off, 8192),
+            None
         );
     }
 
     #[test]
-    fn thinking_budget_capped_to_max_minus_one() {
-        // High = 8192, max = 8192 → must cap to 8191 (invariant budget < max).
+    fn thinking_config_enabled_under_max_is_passed_through() {
+        // claude-sonnet-4-5 → non-adaptive → enabled with Low=1024 budget.
+        let cfg = build_thinking_config("claude-sonnet-4-5", ThinkingLevel::Low, 8192).unwrap();
+        assert_eq!(cfg["type"], "enabled");
+        assert_eq!(cfg["budget_tokens"], 1024);
+    }
+
+    #[test]
+    fn thinking_config_enabled_capped_to_max_minus_one() {
+        // High=8192, max=8192 → must cap to 8191.
+        let cfg = build_thinking_config("claude-sonnet-4-5", ThinkingLevel::High, 8192).unwrap();
+        assert_eq!(cfg["budget_tokens"], 8191);
+    }
+
+    #[test]
+    fn thinking_config_enabled_with_tiny_max_returns_none() {
         assert_eq!(
-            resolve_thinking_budget(ThinkingLevel::High, 8192),
-            Some(8191)
+            build_thinking_config("claude-sonnet-4-5", ThinkingLevel::Low, 1),
+            None
+        );
+        assert_eq!(
+            build_thinking_config("claude-sonnet-4-5", ThinkingLevel::Low, 0),
+            None
         );
     }
 
     #[test]
-    fn thinking_budget_with_tiny_max_returns_none() {
-        assert_eq!(resolve_thinking_budget(ThinkingLevel::Low, 1), None);
-        assert_eq!(resolve_thinking_budget(ThinkingLevel::Low, 0), None);
+    fn thinking_config_adaptive_for_sonnet_4_6() {
+        // Sonnet/Opus 4.6 → adaptive, no budget, any level.
+        let cfg = build_thinking_config("claude-sonnet-4-6", ThinkingLevel::Low, 8192).unwrap();
+        assert_eq!(cfg["type"], "adaptive");
+        assert!(cfg.get("budget_tokens").is_none());
+
+        let cfg = build_thinking_config("claude-opus-4-6", ThinkingLevel::High, 64_000).unwrap();
+        assert_eq!(cfg["type"], "adaptive");
+    }
+
+    #[test]
+    fn adaptive_thinking_model_matches_upstream() {
+        // Upstream rN_(model): true only for opus-4-6 / sonnet-4-6.
+        assert!(is_adaptive_thinking_model("claude-opus-4-6"));
+        assert!(is_adaptive_thinking_model("claude-sonnet-4-6"));
+        assert!(is_adaptive_thinking_model("claude-sonnet-4-6-20251002"));
+        assert!(!is_adaptive_thinking_model("claude-sonnet-4-5"));
+        assert!(!is_adaptive_thinking_model("claude-opus-4-5"));
+        assert!(!is_adaptive_thinking_model("claude-haiku-4-5"));
+        assert!(!is_adaptive_thinking_model("claude-3-opus"));
     }
 
     #[test]
