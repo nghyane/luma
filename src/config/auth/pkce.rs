@@ -139,9 +139,7 @@ where
     let challenge = gen_challenge(&verifier);
     let state = gen_state();
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .context("could not bind loopback listener")?;
+    let listener = bind_listener(provider).await?;
     let port = listener
         .local_addr()
         .context("could not read listener port")?
@@ -183,8 +181,37 @@ where
 }
 
 // =============================================================================
-// redirect URI
+// loopback listener + redirect URI
 // =============================================================================
+
+/// Upstream codex-rs hardcodes `DEFAULT_PORT: u16 = 1455`
+/// (`codex-rs/login/src/server.rs:52`). The OAuth client `app_EMoam…` is
+/// registered with `http://localhost:1455/auth/callback` as its redirect
+/// URI, so any other port is rejected with an opaque `unknown_error`
+/// before the authorize page renders.
+const CODEX_CALLBACK_PORT: u16 = 1455;
+
+/// Bind the loopback callback listener. Codex must use a fixed port so the
+/// redirect URI matches the OAuth client registration; Claude accepts any
+/// loopback port so we pick one dynamically.
+async fn bind_listener(provider: AuthProvider) -> Result<tokio::net::TcpListener> {
+    let port = match provider {
+        AuthProvider::Anthropic => 0,
+        AuthProvider::OpenAI => CODEX_CALLBACK_PORT,
+    };
+    tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .with_context(|| {
+            if port == 0 {
+                "could not bind loopback listener".to_owned()
+            } else {
+                format!(
+                    "could not bind loopback listener on port {port} — another \
+                     login flow may already be in progress, free the port and retry"
+                )
+            }
+        })
+}
 
 /// Build the OAuth callback URI for `provider`. Both upstream CLIs register
 /// `http://localhost:{port}/...` (not `127.0.0.1`); the OAuth servers
@@ -675,5 +702,11 @@ mod tests {
             build_redirect_uri(AuthProvider::OpenAI, 12345),
             "http://localhost:12345/auth/callback"
         );
+    }
+
+    #[test]
+    fn codex_callback_port_matches_upstream() {
+        // codex-rs/login/src/server.rs:52 hardcodes DEFAULT_PORT = 1455.
+        assert_eq!(CODEX_CALLBACK_PORT, 1455);
     }
 }
