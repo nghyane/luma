@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-beta.9] - 2026-04-11
+
+### Added
+- Multi-account auth pool with interactive OAuth login — PKCE flow for Anthropic and OpenAI/Codex (`src/config/auth/pkce.rs`) spins up a loopback listener, opens the system browser, and writes the new account straight into the shared pool; reachable from the CLI (`luma login [anthropic|openai]`, `luma accounts`) and the TUI (`/login`, `/accounts` dialog)
+- `/accounts` centered modal dialog (`src/tui/dialog.rs`) — lists every known account with provider and health (`ok`, `cooling`, `relogin`, `off`); keyboard actions to toggle disabled and remove
+- Automatic pool failover on HTTP 429 — turn-level retry loop marks the current account on cooldown via `auth::mark_rate_limited`, resolves the next healthy account for the same provider, and rebuilds the provider transparently; surfaces `all accounts cooling` only when every account for the provider is exhausted
+- Typed `ProviderRateLimited` error so the turn loop can distinguish rate limiting from transient 5xx and drive the failover path without string-matching
+- Rate-limit header parsing (`parse_rate_limit_headers`) for Anthropic (`anthropic-ratelimit-*`, HTTP-date resets) and OpenAI/Codex (`x-ratelimit-*`, epoch resets) — normalized into a shared `UsageSnapshot` and recorded against the account label that issued the request
+- Pool-health chip in the status bar — only rendered when at least one account is cooling or needs relogin (zero visual noise when everything is healthy)
+- `FileChangeArtifact` / `FileArtifact` / `FileOp` / `ToolStatus` data model in `core::types` — shared structured result for Write, Edit, and `apply_patch` tools, streamed to the TUI through a new `Event::ToolArtifact`
+- `ToolExecution` wraps a tool's string result together with an optional artifact so file-changing tools can return structured data without losing the streaming path
+- Built-in `models.catalog.json` overlaid onto discovered models — provides `display_name`, `context_window`, and `max_output_tokens` metadata when the provider snapshot omits them
+
+### Changed
+- `config::auth` split into a proper module (`auth/mod.rs`, `auth/policy.rs`, `auth/pkce.rs`) replacing the single 500-line file — policy module owns `AuthFailureKind` classification and OAuth refresh-request building; account identity is `account_id` or `email` instead of a label string
+- `pick_candidate` now ranks candidates (`email > account_id > refresh_token > expires_at`) instead of taking the first match — accounts with real identity beat anonymous placeholders and failover picks the best-credentialed account
+- `upsert_by_label` merges by identity key so a fresh login that arrives with a different label still merges into the existing entry, preserving cooldown and usage state
+- `ensure_bootstrapped` no longer short-circuits when the pool already has the provider — the identity-based merge path makes re-imports idempotent and picks up keychain rotations
+- `dedup_accounts` drops anonymous legacy labels (`anthropic-1`) when a richer entry exists for the same provider
+- `try_refresh` wraps the OAuth HTTP call in a 20-second timeout so a stuck network no longer freezes the agent loop
+- Write, Edit, and `apply_patch` tools rewritten to return `ToolExecution` with a structured `FileChangeArtifact` instead of `(String, wire-format diff)` strings parsed by the TUI — removes string-based special casing and restores expand/collapse for every file-changing tool
+- `render_tool` routes on `artifact.is_some()` instead of sniffing tool names, so any future tool that emits `FileChangeArtifact` gets the diff block renderer for free
+- `post_sse` takes an `account_label` so the retry layer reports 429 events and usage snapshots back to the pool under the right label
+- `is_auth_error` in `agent/turn.rs` takes the provider name as a parameter instead of hardcoding `"openai"`, so Anthropic auth errors classify with the correct policy
+- `format_http_error` 401 message suggests `/login` instead of the removed `luma sync` command
+- `StatusBar::reset_cache` renamed to `reset_usage` — now resets context tokens and pct together with cache counters when switching threads, fixing stale token count carry-over across `/new` and `/resume`
+- `ThinkingLevel::as_str()` is a `const fn` returning `&'static str`, matching `AgentMode` / `AuthProvider` and removing manual match at every call site
+- `AgentCommand::LoadSession` gains `is_new: bool` so the caller (App) owns new-vs-resume classification instead of the agent inferring from `messages.is_empty()`
+- New-thread and resume flows unified — both go through `LoadSession`, the agent emits `SessionLoaded` after replacing state, and the TUI updates only from that acknowledgement (removes UI/agent state races and duplicated orchestration)
+- Removed the background-refresher task — synchronous refresh in `resolve_inner` covers every case the background path did, without the extra complexity
+
+### Fixed
+- Account races on multi-client setups — when another CLI rotates the keychain, merging by identity key keeps a single pool entry and inherits the latest refresh token instead of creating a duplicate anonymous row
+- `fix_orphaned_tool_uses` was called twice on the error path in `run_chat_turn` — only repair when `Aborted` (the happy path already repaired the message)
+- `epoch_days_to_ymd` underflowed on negative epoch days (dates before 1970) — return type is now `(i32, u32, u32)` with signed era arithmetic so `Date::format` round-trips pre-epoch timestamps correctly
+- Apply-patch error for a missing `@@` context now names the context hint and the path instead of a generic "failed to find context" — makes patch failures actionable from the tool output alone
+- Stale token counter on `/new` and `/resume` — status bar now resets context tokens and pct, not just cache
+
+### Internal
+- `getrandom` dependency added for PKCE verifier / state generation
+- `clippy::cast_lossless` enabled — widening numeric casts across hot paths (text buffer hash, JSON escape decoder, retry date parsing, render geometry) now use `From` instead of `as`; RULES.md section VI documents the numeric cast policy
+- `format_http_error` 401 message updated to point at `/login`
+
 ## [0.4.0-beta.8] - 2026-04-10
 
 ### Fixed
