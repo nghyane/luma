@@ -97,10 +97,13 @@ impl Provider for ClaudeProvider {
                 "stream": true,
             });
 
-            if self.thinking != ThinkingLevel::Off
-                && let Some(config) = build_thinking_config(&self.model, self.thinking, effective_max_tokens)
+            if let Some((thinking, output_config)) =
+                build_thinking_config(&self.model, self.thinking, effective_max_tokens)
             {
-                body["thinking"] = config;
+                body["thinking"] = thinking;
+                if let Some(output_config) = output_config {
+                    body["output_config"] = output_config;
+                }
             }
 
             if self.is_oauth {
@@ -202,14 +205,8 @@ impl Provider for ClaudeProvider {
                             }
                             "thinking" => {
                                 pending = Some(PendingBlock::Thinking {
-                                    thinking: block["thinking"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_owned(),
-                                    signature: block["signature"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_owned(),
+                                    thinking: block["thinking"].as_str().unwrap_or("").to_owned(),
+                                    signature: block["signature"].as_str().unwrap_or("").to_owned(),
                                 });
                             }
                             "redacted_thinking" => {
@@ -221,12 +218,11 @@ impl Provider for ClaudeProvider {
                                 let id = block["id"].as_str().unwrap_or("").to_owned();
                                 let name = block["name"].as_str().unwrap_or("").to_owned();
                                 if !name.is_empty() {
-                                    let _ = tx
-                                        .send(Event::ToolSelected { name: name.clone() })
-                                        .await;
+                                    let _ =
+                                        tx.send(Event::ToolSelected { name: name.clone() }).await;
                                 }
-                                let arg_extractor = streamable_arg_for(tools, &name)
-                                    .map(JsonStringExtractor::new);
+                                let arg_extractor =
+                                    streamable_arg_for(tools, &name).map(JsonStringExtractor::new);
                                 pending = Some(PendingBlock::ToolUse {
                                     id,
                                     name,
@@ -241,10 +237,8 @@ impl Provider for ClaudeProvider {
                                 web_search_query_sent = false;
                             }
                             "web_search_tool_result" => {
-                                let content_len = block["content"]
-                                    .as_array()
-                                    .map(|a| a.len())
-                                    .unwrap_or(0);
+                                let content_len =
+                                    block["content"].as_array().map(|a| a.len()).unwrap_or(0);
                                 crate::dbg_log!(
                                     "claude web_search_tool_result: {} items in content",
                                     content_len
@@ -252,8 +246,7 @@ impl Provider for ClaudeProvider {
                                 let mut hits = Vec::new();
                                 if let Some(results) = block["content"].as_array() {
                                     for r in results {
-                                        let title =
-                                            r["title"].as_str().unwrap_or("").to_owned();
+                                        let title = r["title"].as_str().unwrap_or("").to_owned();
                                         let url = r["url"].as_str().unwrap_or("").to_owned();
                                         if !url.is_empty() {
                                             hits.push(crate::event::SearchHit {
@@ -329,9 +322,8 @@ impl Provider for ClaudeProvider {
                                 if let Some(j) = delta["partial_json"].as_str() {
                                     let chunk = query_extractor.feed(j);
                                     if !chunk.is_empty() && !web_search_query_sent {
-                                        let _ = tx
-                                            .send(Event::WebSearchStart { query: chunk })
-                                            .await;
+                                        let _ =
+                                            tx.send(Event::WebSearchStart { query: chunk }).await;
                                         web_search_query_sent = true;
                                     }
                                 }
@@ -702,35 +694,49 @@ fn to_api_tools(tools: &[ToolSchema]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Build the `thinking` config object for a Claude Messages request.
+/// Build the Claude request config for thinking-related fields.
 ///
-/// Mirrors `claude-code@2.1.100`'s logic from `src/services/api/claude.ts`:
+/// Returns `(thinking, output_config)` where:
 ///
-/// * If the model supports adaptive thinking (Sonnet/Opus 4.6), emit
-///   `{"type": "adaptive"}` — the backend picks an appropriate budget
-///   at runtime. The SDK explicitly warns that `type: "enabled"` is
-///   deprecated for these models.
-/// * Otherwise fall back to `{"type": "enabled", "budget_tokens": N}`.
-///   `budget_tokens < max_tokens` is an API invariant; we cap accordingly.
-/// * Returns `None` when `max_tokens <= 1` (no room for any budget) and
-///   the model is not adaptive-capable — caller should skip the field.
+/// * Adaptive-capable models (Sonnet/Opus 4.6) use
+///   `thinking: {"type": "adaptive"}` plus optional
+///   `output_config: {"effort": ...}`.
+/// * Older thinking-capable models use
+///   `thinking: {"type": "enabled", "budget_tokens": N}` and no
+///   `output_config`.
+/// * `ThinkingLevel::Off` disables both fields.
 fn build_thinking_config(
     model: &str,
     level: ThinkingLevel,
     max_tokens: u32,
-) -> Option<serde_json::Value> {
+) -> Option<(serde_json::Value, Option<serde_json::Value>)> {
+    if level == ThinkingLevel::Off {
+        return None;
+    }
     if is_adaptive_thinking_model(model) {
-        return Some(serde_json::json!({"type": "adaptive"}));
+        let effort = match level {
+            ThinkingLevel::Off => return None,
+            ThinkingLevel::Low => "low",
+            ThinkingLevel::Medium => "medium",
+            ThinkingLevel::High => "max",
+        };
+        return Some((
+            serde_json::json!({"type": "adaptive"}),
+            Some(serde_json::json!({"effort": effort})),
+        ));
     }
     let budget = level.budget();
     if budget == 0 || max_tokens <= 1 {
         return None;
     }
     let capped = budget.min(max_tokens - 1);
-    Some(serde_json::json!({
-        "type": "enabled",
-        "budget_tokens": capped,
-    }))
+    Some((
+        serde_json::json!({
+            "type": "enabled",
+            "budget_tokens": capped,
+        }),
+        None,
+    ))
 }
 
 /// Whether `model` supports Anthropic's adaptive thinking mode.
@@ -753,10 +759,16 @@ fn apply_cache_breakpoint(api_messages: &mut [serde_json::Value]) {
     let Some(last_msg) = api_messages.last_mut() else {
         return;
     };
-    if let Some(content) = last_msg["content"].as_array_mut()
-        && let Some(last_block) = content.last_mut()
-    {
-        last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+    let Some(content) = last_msg["content"].as_array_mut() else {
+        return;
+    };
+    for block in content.iter_mut().rev() {
+        let block_type = block["type"].as_str().unwrap_or("");
+        if matches!(block_type, "thinking" | "redacted_thinking") {
+            continue;
+        }
+        block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+        break;
     }
 }
 
@@ -788,16 +800,20 @@ mod tests {
     #[test]
     fn thinking_config_enabled_under_max_is_passed_through() {
         // claude-sonnet-4-5 → non-adaptive → enabled with Low=1024 budget.
-        let cfg = build_thinking_config("claude-sonnet-4-5", ThinkingLevel::Low, 8192).unwrap();
-        assert_eq!(cfg["type"], "enabled");
-        assert_eq!(cfg["budget_tokens"], 1024);
+        let (thinking, output_config) =
+            build_thinking_config("claude-sonnet-4-5", ThinkingLevel::Low, 8192).unwrap();
+        assert_eq!(thinking["type"], "enabled");
+        assert_eq!(thinking["budget_tokens"], 1024);
+        assert!(output_config.is_none());
     }
 
     #[test]
     fn thinking_config_enabled_capped_to_max_minus_one() {
         // High=8192, max=8192 → must cap to 8191.
-        let cfg = build_thinking_config("claude-sonnet-4-5", ThinkingLevel::High, 8192).unwrap();
-        assert_eq!(cfg["budget_tokens"], 8191);
+        let (thinking, output_config) =
+            build_thinking_config("claude-sonnet-4-5", ThinkingLevel::High, 8192).unwrap();
+        assert_eq!(thinking["budget_tokens"], 8191);
+        assert!(output_config.is_none());
     }
 
     #[test]
@@ -813,14 +829,26 @@ mod tests {
     }
 
     #[test]
-    fn thinking_config_adaptive_for_sonnet_4_6() {
-        // Sonnet/Opus 4.6 → adaptive, no budget, any level.
-        let cfg = build_thinking_config("claude-sonnet-4-6", ThinkingLevel::Low, 8192).unwrap();
-        assert_eq!(cfg["type"], "adaptive");
-        assert!(cfg.get("budget_tokens").is_none());
+    fn thinking_config_adaptive_for_sonnet_4_6_uses_effort() {
+        let (thinking, output_config) =
+            build_thinking_config("claude-sonnet-4-6", ThinkingLevel::Low, 8192).unwrap();
+        assert_eq!(thinking["type"], "adaptive");
+        assert!(thinking.get("budget_tokens").is_none());
+        let output_config = output_config.expect("adaptive output_config");
+        assert_eq!(output_config["effort"], "low");
 
-        let cfg = build_thinking_config("claude-opus-4-6", ThinkingLevel::High, 64_000).unwrap();
-        assert_eq!(cfg["type"], "adaptive");
+        let (thinking, output_config) =
+            build_thinking_config("claude-opus-4-6", ThinkingLevel::Medium, 64_000).unwrap();
+        assert_eq!(thinking["type"], "adaptive");
+        assert_eq!(output_config.unwrap()["effort"], "medium");
+    }
+
+    #[test]
+    fn thinking_config_adaptive_high_maps_to_max_effort() {
+        let (thinking, output_config) =
+            build_thinking_config("claude-sonnet-4-6", ThinkingLevel::High, 8192).unwrap();
+        assert_eq!(thinking["type"], "adaptive");
+        assert_eq!(output_config.unwrap()["effort"], "max");
     }
 
     #[test]
@@ -849,6 +877,38 @@ mod tests {
         assert_eq!(content.len(), 2);
         assert!(content[0].get("cache_control").is_none());
         assert_eq!(content[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn cache_breakpoint_skips_thinking_and_marks_last_mutable_block() {
+        let mut msgs = vec![serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "answer"},
+                {"type": "thinking", "thinking": "x", "signature": "sig"},
+                {"type": "redacted_thinking", "data": "opaque"},
+            ]
+        })];
+        apply_cache_breakpoint(&mut msgs);
+        let content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["cache_control"]["type"], "ephemeral");
+        assert!(content[1].get("cache_control").is_none());
+        assert!(content[2].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn cache_breakpoint_with_only_thinking_blocks_is_noop() {
+        let mut msgs = vec![serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "x", "signature": "sig"},
+                {"type": "redacted_thinking", "data": "opaque"},
+            ]
+        })];
+        apply_cache_breakpoint(&mut msgs);
+        let content = msgs[0]["content"].as_array().unwrap();
+        assert!(content[0].get("cache_control").is_none());
+        assert!(content[1].get("cache_control").is_none());
     }
 
     #[test]
