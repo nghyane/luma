@@ -149,12 +149,10 @@ where
 
     let flow = match provider {
         AuthProvider::Anthropic => {
-            let redirect = format!("http://127.0.0.1:{port}/callback");
-            ProviderFlow::claude(&challenge, &state, &redirect)
+            ProviderFlow::claude(&challenge, &state, &build_redirect_uri(provider, port))
         }
         AuthProvider::OpenAI => {
-            let redirect = format!("http://127.0.0.1:{port}/auth/callback");
-            ProviderFlow::codex(&challenge, &state, &redirect)
+            ProviderFlow::codex(&challenge, &state, &build_redirect_uri(provider, port))
         }
     };
 
@@ -182,6 +180,22 @@ where
     };
     with_pool_mut(|p| upsert_by_label(p, entry));
     Ok(outcome)
+}
+
+// =============================================================================
+// redirect URI
+// =============================================================================
+
+/// Build the OAuth callback URI for `provider`. Both upstream CLIs register
+/// `http://localhost:{port}/...` (not `127.0.0.1`); the OAuth servers
+/// strict-match the hostname and reject any alternative with an opaque
+/// `unknown_error`. The loopback listener still binds on `127.0.0.1`;
+/// `localhost` resolves there so the redirect still lands correctly.
+fn build_redirect_uri(provider: AuthProvider, port: u16) -> String {
+    match provider {
+        AuthProvider::Anthropic => format!("http://localhost:{port}/callback"),
+        AuthProvider::OpenAI => format!("http://localhost:{port}/auth/callback"),
+    }
 }
 
 // =============================================================================
@@ -598,7 +612,8 @@ mod tests {
 
     #[test]
     fn claude_authorize_url_correct() {
-        let flow = ProviderFlow::claude("CHALLENGE", "STATE", "http://127.0.0.1:1/callback");
+        let flow =
+            ProviderFlow::claude("CHALLENGE", "STATE", "http://localhost:12345/callback");
         let url = &flow.authorize_url;
         assert!(url.starts_with(CLAUDE_AUTHORIZE_URL));
         assert!(url.contains("response_type=code"));
@@ -607,12 +622,16 @@ mod tests {
         assert!(url.contains("state=STATE"));
         assert!(url.contains("code=true"));
         assert!(url.contains("scope="));
-        assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A1%2Fcallback"));
+        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A12345%2Fcallback"));
     }
 
     #[test]
     fn codex_authorize_url_correct() {
-        let flow = ProviderFlow::codex("CHALLENGE", "STATE", "http://127.0.0.1:1/auth/callback");
+        let flow = ProviderFlow::codex(
+            "CHALLENGE",
+            "STATE",
+            "http://localhost:12345/auth/callback",
+        );
         let url = &flow.authorize_url;
         assert!(url.contains("auth.openai.com/oauth/authorize"));
         assert!(url.contains("id_token_add_organizations=true"));
@@ -622,26 +641,39 @@ mod tests {
         assert!(url.contains("originator=codex_cli_rs"));
         assert_eq!(flow.callback_path, "/auth/callback");
         // redirect must be encoded
-        assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A1%2Fauth%2Fcallback"));
+        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A12345%2Fauth%2Fcallback"));
     }
 
     #[test]
     fn claude_scopes_do_not_include_org_create_api_key() {
-        let flow = ProviderFlow::claude("C", "S", "http://127.0.0.1:1/callback");
+        let flow = ProviderFlow::claude("C", "S", "http://localhost:12345/callback");
         assert!(!flow.authorize_url.contains("org%3Acreate_api_key"));
     }
 
     #[test]
     fn extract_redirect_roundtrips() {
-        let redirect = "http://127.0.0.1:54321/callback";
+        let redirect = "http://localhost:54321/callback";
         let flow = ProviderFlow::claude("C", "S", redirect);
         assert_eq!(extract_redirect(&flow), redirect);
     }
 
     #[test]
     fn extract_redirect_codex_roundtrips() {
-        let redirect = "http://127.0.0.1:54321/auth/callback";
+        let redirect = "http://localhost:54321/auth/callback";
         let flow = ProviderFlow::codex("C", "S", redirect);
         assert_eq!(extract_redirect(&flow), redirect);
+    }
+
+    #[test]
+    fn redirect_uri_uses_localhost_for_both_providers() {
+        // Regression: `127.0.0.1` fails on both OAuth servers.
+        assert_eq!(
+            build_redirect_uri(AuthProvider::Anthropic, 12345),
+            "http://localhost:12345/callback"
+        );
+        assert_eq!(
+            build_redirect_uri(AuthProvider::OpenAI, 12345),
+            "http://localhost:12345/auth/callback"
+        );
     }
 }
