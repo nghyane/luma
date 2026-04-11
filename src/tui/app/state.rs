@@ -77,6 +77,7 @@ impl AgentHandle {
 pub struct UiComponents {
     pub prompt: PromptState,
     pub picker: Picker,
+    pub dialog: crate::tui::dialog::Dialog,
     pub status: StatusBar,
     pub selection: Selection,
     pub drag: Option<DragState>,

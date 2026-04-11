@@ -7,6 +7,7 @@ use crate::core::types::{Message, ToolCall};
 use crate::event::Event;
 use crate::event_bus::Sender as EventSender;
 use crate::provider::claude::ESCALATED_MAX_TOKENS;
+use crate::provider::retry::ProviderRateLimited;
 use anyhow::Result;
 use tokio::sync::mpsc;
 
@@ -15,8 +16,21 @@ const MAX_RESULT_LEN: usize = 32_000;
 const STREAM_RETRIES: u8 = 2;
 const STREAM_RETRY_DELAY_SECS: u64 = 2;
 
+/// Max outer retries for auth (401) + pool failover (429) combined. Bounds
+/// runaway loops when several accounts are sequentially unhealthy.
+const MAX_AUTH_RETRIES: u8 = 5;
+
 /// Run a chat turn: resolve auth → build provider → run tool loop.
-/// Retries once on 401.
+///
+/// Handles two kinds of cross-request retries at this level:
+///
+/// * **401** — token rejected by the server. Force-refresh the current
+///   account's OAuth tokens and retry once.
+/// * **429** — account is rate-limited. Mark it on cooldown in the pool
+///   and resolve a *different* account for the same provider, then
+///   rebuild the provider and retry. This is transparent to the user
+///   unless every account for the provider is cooling, in which case a
+///   clear "all accounts cooling" error surfaces.
 pub async fn run_chat_turn(
     session: &mut Session,
     config: &AgentConfig,
@@ -31,28 +45,53 @@ pub async fn run_chat_turn(
         _ => AuthProvider::OpenAI,
     };
 
-    let auth = auth::resolve(provider_kind).await?;
-    let provider = build_provider(config, &auth, &session.id);
+    let mut auth_cred = auth::resolve(provider_kind).await?;
+    for attempt in 0..MAX_AUTH_RETRIES {
+        let provider = build_provider(config, &auth_cred, &session.id);
+        let outcome = run_turn(session, &*provider, registry, tx, cancel.clone()).await;
+        let err = match outcome {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
 
-    match run_turn(session, &*provider, registry, tx, cancel.clone()).await {
-        Ok(()) => Ok(()),
-        Err(e) if is_auth_error(&e) => {
+        // 429 — rate-limited account. Mark cooldown and fail over to the
+        // next healthy account in the same provider.
+        if let Some(rl) = err.downcast_ref::<ProviderRateLimited>() {
+            let label = rl.label.clone();
+            let retry_after = rl.retry_after_secs;
+            auth::mark_rate_limited(&label, retry_after);
             let _ = tx
                 .send(Event::ToolOutput {
                     name: String::new(),
-                    chunk: "token rejected, refreshing...".into(),
+                    chunk: format!(
+                        "{} account {} rate limited, switching…",
+                        provider_kind.as_str(),
+                        label
+                    ),
                 })
                 .await;
-            // Force a refresh regardless of local expiration — the server
-            // said this token is bad, so the client clock or local cache
-            // is lying. `force_refresh` bypasses the `is_expired` fast
-            // path and always round-trips to the OAuth endpoint.
-            let auth = auth::force_refresh(provider_kind).await?;
-            let provider = build_provider(config, &auth, &session.id);
-            run_turn(session, &*provider, registry, tx, cancel).await
+            if attempt + 1 == MAX_AUTH_RETRIES {
+                return Err(err);
+            }
+            auth_cred = auth::resolve(provider_kind).await?;
+            continue;
         }
-        Err(e) => Err(e),
+
+        // 401 — stale / revoked token. Force a refresh and retry once.
+        if is_auth_error(&err) {
+            let _ = tx
+                .send(Event::ToolOutput {
+                    name: String::new(),
+                    chunk: "token rejected, refreshing…".into(),
+                })
+                .await;
+            auth_cred = auth::force_refresh(provider_kind).await?;
+            continue;
+        }
+
+        return Err(err);
     }
+    anyhow::bail!("exhausted auth retries")
 }
 
 fn is_auth_error(err: &anyhow::Error) -> bool {
@@ -71,7 +110,8 @@ fn build_provider(
 
     match config.source.as_str() {
         "anthropic" => {
-            let mut p = ClaudeProvider::new(&config.model_id, &auth.token, auth.is_oauth);
+            let mut p =
+                ClaudeProvider::new(&config.model_id, &auth.token, auth.is_oauth, &auth.label);
             p.set_thinking(config.thinking);
             Box::new(p)
         }
@@ -81,12 +121,13 @@ fn build_provider(
                 &auth.token,
                 auth.account_id.clone(),
                 session_id,
+                &auth.label,
             );
             p.set_thinking(config.thinking);
             Box::new(p)
         }
         _ => {
-            let mut p = OpenAIProvider::new(&config.model_id, &auth.token);
+            let mut p = OpenAIProvider::new(&config.model_id, &auth.token, &auth.label);
             p.set_thinking(config.thinking);
             Box::new(p)
         }
@@ -237,10 +278,11 @@ async fn run_turn(
             stop_reason,
         } = result;
 
-        session.usage.input_tokens += usage.input_tokens;
-        session.usage.output_tokens += usage.output_tokens;
-        session.usage.cache_read += usage.cache_read.unwrap_or(0);
-        session.usage.cache_write += usage.cache_write.unwrap_or(0);
+        // Snapshot current context window — replaces previous turn, not cumulative.
+        session.usage.input_tokens = usage.input_tokens;
+        session.usage.output_tokens = usage.output_tokens;
+        session.usage.cache_read = usage.cache_read.unwrap_or(0);
+        session.usage.cache_write = usage.cache_write.unwrap_or(0);
 
         session.messages.push(response.clone());
         // Mid-turn save: persist after each assistant message.
@@ -353,8 +395,16 @@ async fn execute_one(
             fwd_handle.await.ok();
 
             match res {
-                Ok(r) => {
-                    let end_summary = format_tool_result(&tc.function.name, &r);
+                Ok(exec) => {
+                    if let Some(artifact) = exec.artifact {
+                        let _ = tx
+                            .send(Event::ToolArtifact {
+                                name: tc.function.name.clone(),
+                                artifact: Box::new(artifact),
+                            })
+                            .await;
+                    }
+                    let end_summary = format_tool_result(&tc.function.name, &exec.result);
                     let _ = tx
                         .send(Event::ToolEnd {
                             name: tc.function.name.clone(),
@@ -364,7 +414,7 @@ async fn execute_one(
                     if let Some(name) = &skill {
                         let _ = tx.send(Event::SkillEnd(format!("loaded {name}"))).await;
                     }
-                    r
+                    exec.result
                 }
                 Err(e) => {
                     let msg = format!("Error: {e}");
@@ -411,7 +461,7 @@ use super::summary::{format_tool_result, format_tool_summary};
 mod tests {
     use super::*;
     use crate::core::registry::Registry;
-    use crate::core::tool::Tool;
+    use crate::core::tool::{Tool, ToolExecution};
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio_util::sync::CancellationToken;
@@ -437,13 +487,16 @@ mod tests {
             _args: serde_json::Value,
             _output_tx: mpsc::Sender<String>,
             _cancel: CancellationToken,
-        ) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + '_>>
+        ) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<ToolExecution>> + Send + '_>>
         {
             let counter = self.counter;
             Box::pin(async move {
                 counter.fetch_add(1, Ordering::SeqCst);
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                Ok(format!("done_{}", counter.load(Ordering::SeqCst)))
+                Ok(ToolExecution {
+                    result: format!("done_{}", counter.load(Ordering::SeqCst)),
+                    artifact: None,
+                })
             })
         }
     }

@@ -9,7 +9,9 @@ mod tool;
 pub use render::{RenderState, render_block};
 
 use crate::core::types::ContentBlock;
+use crate::core::types::FileChangeArtifact;
 use crate::tui::stream::StreamBuf;
+use std::hash::{Hash, Hasher};
 
 /// A content block in the conversation document.
 #[derive(Debug, Clone)]
@@ -108,6 +110,7 @@ pub struct ToolBlock {
     pub name: String,
     pub summary: String,
     pub output: Vec<String>,
+    pub artifact: Option<FileChangeArtifact>,
     pub stream: Option<StreamBuf>,
     pub is_done: bool,
     pub end_summary: String,
@@ -121,6 +124,7 @@ impl ToolBlock {
             name: name.to_owned(),
             summary: summary.to_owned(),
             output: Vec::new(),
+            artifact: None,
             stream: Some(StreamBuf::new()),
             is_done: false,
             end_summary: String::new(),
@@ -134,6 +138,7 @@ impl ToolBlock {
             name: name.to_owned(),
             summary: summary.to_owned(),
             output: Vec::new(),
+            artifact: None,
             stream: None,
             is_done: true,
             end_summary: String::new(),
@@ -160,8 +165,8 @@ pub enum Snapshot {
     Immutable,
     /// Streaming content — track committed + partial lengths.
     Stream { committed: usize, partial: usize },
-    /// Tool with output — track completion and expand state.
-    Tool { output_len: usize, expanded: bool },
+    /// Completed tool — fingerprint of state that affects rendering.
+    Tool { fingerprint: u64 },
     /// Skill — track completion.
     Skill { is_done: bool },
 }
@@ -181,16 +186,7 @@ impl PartialEq for Snapshot {
                     partial: d,
                 },
             ) => a == c && b == d,
-            (
-                Self::Tool {
-                    output_len: a,
-                    expanded: b,
-                },
-                Self::Tool {
-                    output_len: c,
-                    expanded: d,
-                },
-            ) => a == c && b == d,
+            (Self::Tool { fingerprint: a }, Self::Tool { fingerprint: b }) => a == b,
             (Self::Skill { is_done: a }, Self::Skill { is_done: b }) => a == b,
             _ => false,
         }
@@ -216,14 +212,46 @@ impl Block {
                 partial: tb.stream.partial().len(),
             },
             Block::Tool(tb) if tb.is_done => Snapshot::Tool {
-                output_len: tb.output.len(),
-                expanded: tb.is_expanded,
+                fingerprint: tool_snapshot_fingerprint(tb),
             },
             Block::Tool(_) => Snapshot::Volatile,
             Block::Skill(sb) => Snapshot::Skill {
                 is_done: sb.is_done,
             },
         }
+    }
+}
+
+fn tool_snapshot_fingerprint(tb: &ToolBlock) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tb.name.hash(&mut hasher);
+    tb.summary.hash(&mut hasher);
+    tb.end_summary.hash(&mut hasher);
+    tb.is_done.hash(&mut hasher);
+    tb.is_expanded.hash(&mut hasher);
+
+    if let Some(artifact) = &tb.artifact {
+        hash_file_change_artifact(artifact, &mut hasher);
+    } else {
+        tb.output.hash(&mut hasher);
+    }
+
+    hasher.finish()
+}
+
+fn hash_file_change_artifact(
+    artifact: &FileChangeArtifact,
+    hasher: &mut std::collections::hash_map::DefaultHasher,
+) {
+    artifact.status.hash(hasher);
+    artifact.raw_input.hash(hasher);
+    artifact.error.hash(hasher);
+    artifact.files.len().hash(hasher);
+    for file in &artifact.files {
+        file.path.hash(hasher);
+        file.operation.hash(hasher);
+        file.diff.hash(hasher);
+        file.preview.hash(hasher);
     }
 }
 

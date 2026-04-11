@@ -1,10 +1,17 @@
 /// Trait for agent tools (read, write, bash, edit).
-use crate::core::types::ToolSchema;
+use crate::core::types::{FileChangeArtifact, ToolSchema};
 use anyhow::Result;
 use std::future::Future;
 use std::pin::Pin;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+/// Structured result returned by a tool execution.
+#[derive(Debug)]
+pub struct ToolExecution {
+    pub result: String,
+    pub artifact: Option<FileChangeArtifact>,
+}
 
 /// A tool the agent can invoke. Dyn-compatible via boxed future.
 pub trait Tool: Send + Sync {
@@ -15,11 +22,11 @@ pub trait Tool: Send + Sync {
     fn schema(&self) -> ToolSchema;
 
     /// Execute the tool with parsed arguments. Streams incremental output
-    /// into `output_tx`. Returns the full result string.
+    /// into `output_tx`. Returns the full result and any structured artifact.
     fn execute(
         &self,
         args: serde_json::Value,
         output_tx: mpsc::Sender<String>,
         cancel: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>>;
 }

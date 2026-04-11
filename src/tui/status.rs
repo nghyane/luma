@@ -26,6 +26,21 @@ struct UsageStats {
     cache_write: u64,
 }
 
+/// Health summary of the auth account pool. Only surfaced in the status
+/// bar when something actually needs the user's attention — when every
+/// account is healthy we render nothing (no clutter).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PoolHealth {
+    pub cooling: u8,
+    pub needs_relogin: u8,
+}
+
+impl PoolHealth {
+    fn is_clean(&self) -> bool {
+        self.cooling == 0 && self.needs_relogin == 0
+    }
+}
+
 /// Status bar model.
 pub struct StatusBar {
     state: StatusState,
@@ -33,6 +48,7 @@ pub struct StatusBar {
     usage: UsageStats,
     thinking_level: String,
     spinner_idx: usize,
+    pool: PoolHealth,
 }
 
 impl StatusBar {
@@ -54,7 +70,13 @@ impl StatusBar {
             },
             thinking_level: String::new(),
             spinner_idx: 0,
+            pool: PoolHealth::default(),
         }
+    }
+
+    /// Update the pool-health summary. Rendered only when non-clean.
+    pub fn set_pool_health(&mut self, health: PoolHealth) {
+        self.pool = health;
     }
 
     /// Set the active mode name and color.
@@ -90,10 +112,14 @@ impl StatusBar {
         self.usage.cache_write = write;
     }
 
-    /// Reset cache counters (new session).
-    pub fn reset_cache(&mut self) {
-        self.usage.cache_read = 0;
-        self.usage.cache_write = 0;
+    /// Reset all usage counters — context tokens and cache — for a new thread.
+    pub fn reset_usage(&mut self) {
+        self.usage = UsageStats {
+            context_tokens: 0,
+            context_pct: 0,
+            cache_read: 0,
+            cache_write: 0,
+        };
     }
 
     /// Current cache values for fallback when provider omits them.
@@ -154,8 +180,18 @@ impl StatusBar {
             left.push(Span::new("interrupt".to_owned(), palette::MUTED));
         }
 
-        // Right side: usage (always) + cache
+        // Right side: usage (always) + cache + pool-health (only when dirty)
         let mut right: SmallVec<[Span; 4]> = smallvec![];
+        if !self.pool.is_clean() {
+            let label = format_pool_health(&self.pool);
+            let color = if self.pool.needs_relogin > 0 {
+                palette::ERROR
+            } else {
+                palette::WARN
+            };
+            right.push(Span::new(label, color));
+            right.push(Span::new("  ".to_owned(), palette::DIM));
+        }
         let color = match self.usage.context_pct {
             81..=100 => palette::ERROR,
             51..=80 => palette::WARN,
@@ -167,9 +203,7 @@ impl StatusBar {
             color,
         ));
         if self.usage.cache_read > 0 || self.usage.cache_write > 0 {
-            if !right.is_empty() {
-                right.push(Span::new("  ".to_owned(), palette::DIM));
-            }
+            right.push(Span::new("  ".to_owned(), palette::DIM));
             let label = format_cache(self.usage.cache_read, self.usage.cache_write);
             right.push(Span::new(label, palette::DIM));
         }
@@ -202,6 +236,17 @@ fn compact_tokens(n: u64) -> String {
         format!("{:.1}K", n as f64 / 1_000.0)
     } else {
         n.to_string()
+    }
+}
+
+/// Format the pool-health label shown in the status bar. Called only when
+/// there's something to show (see `PoolHealth::is_clean`).
+fn format_pool_health(h: &PoolHealth) -> String {
+    match (h.cooling, h.needs_relogin) {
+        (0, 0) => String::new(),
+        (c, 0) => format!("⚠ {c} cooling"),
+        (0, r) => format!("⚠ {r} re-login"),
+        (c, r) => format!("⚠ {c} cooling · {r} re-login"),
     }
 }
 
@@ -308,13 +353,15 @@ mod tests {
     }
 
     #[test]
-    fn cache_reset() {
+    fn reset_usage_clears_cache_and_context() {
         let mut sb = StatusBar::new();
         sb.set_cache(1000, 500);
-        sb.reset_cache();
+        sb.set_context(120_000, 60);
+        sb.reset_usage();
         let l = sb.hint_line(80);
         let text: String = l.spans.iter().map(|s| s.text.as_str()).collect();
         assert!(!text.contains("cache"));
+        assert!(text.contains("0 (0%)"));
     }
 
     #[test]
@@ -322,5 +369,68 @@ mod tests {
         assert_eq!(super::format_cache(1_500_000, 0), "cache ⚡1.5M");
         assert_eq!(super::format_cache(500, 0), "cache ⚡500");
         assert_eq!(super::format_cache(0, 3000), "cache ↑3.0K");
+    }
+
+    #[test]
+    fn pool_health_clean_by_default() {
+        assert!(PoolHealth::default().is_clean());
+    }
+
+    #[test]
+    fn pool_health_cooling_is_not_clean() {
+        assert!(
+            !PoolHealth {
+                cooling: 1,
+                needs_relogin: 0,
+            }
+            .is_clean()
+        );
+    }
+
+    #[test]
+    fn format_pool_health_variants() {
+        assert_eq!(super::format_pool_health(&PoolHealth::default()), "");
+        assert_eq!(
+            super::format_pool_health(&PoolHealth {
+                cooling: 2,
+                needs_relogin: 0,
+            }),
+            "⚠ 2 cooling"
+        );
+        assert_eq!(
+            super::format_pool_health(&PoolHealth {
+                cooling: 0,
+                needs_relogin: 1,
+            }),
+            "⚠ 1 re-login"
+        );
+        assert_eq!(
+            super::format_pool_health(&PoolHealth {
+                cooling: 1,
+                needs_relogin: 2,
+            }),
+            "⚠ 1 cooling · 2 re-login"
+        );
+    }
+
+    #[test]
+    fn hint_line_hides_pool_when_clean() {
+        let sb = StatusBar::new();
+        let l = sb.hint_line(80);
+        let text: String = l.spans.iter().map(|s| s.text.as_str()).collect();
+        assert!(!text.contains("cooling"));
+        assert!(!text.contains("re-login"));
+    }
+
+    #[test]
+    fn hint_line_shows_pool_when_dirty() {
+        let mut sb = StatusBar::new();
+        sb.set_pool_health(PoolHealth {
+            cooling: 1,
+            needs_relogin: 0,
+        });
+        let l = sb.hint_line(80);
+        let text: String = l.spans.iter().map(|s| s.text.as_str()).collect();
+        assert!(text.contains("1 cooling"));
     }
 }

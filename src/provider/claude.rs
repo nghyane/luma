@@ -25,11 +25,13 @@ pub struct ClaudeProvider {
     api_key: String,
     is_oauth: bool,
     thinking: ThinkingLevel,
+    account_label: String,
 }
 
 impl ClaudeProvider {
     /// Create from token. Set `is_oauth` true for OAuth tokens, false for raw API keys.
-    pub fn new(model: &str, api_key: &str, is_oauth: bool) -> Self {
+    /// `account_label` is the pool entry name used for rate-limit / usage accounting.
+    pub fn new(model: &str, api_key: &str, is_oauth: bool, account_label: &str) -> Self {
         Self {
             max_tokens: DEFAULT_MAX_TOKENS,
             model: model.to_owned(),
@@ -37,6 +39,7 @@ impl ClaudeProvider {
             api_key: api_key.to_owned(),
             is_oauth,
             thinking: ThinkingLevel::Off,
+            account_label: account_label.to_owned(),
         }
     }
 }
@@ -156,6 +159,7 @@ impl Provider for ClaudeProvider {
 
             let mut stream = post_sse(
                 "claude",
+                &self.account_label,
                 &format!("{}/v1/messages", self.base_url),
                 &headers,
                 &body,

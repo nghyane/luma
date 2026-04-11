@@ -187,6 +187,8 @@ impl super::App {
         self.agent.state = RunState::Idle;
         self.agent.cancel = None;
         self.ui.status.set_state(StatusState::Ready);
+        // Surface any cooldowns set during the turn in the status bar.
+        self.refresh_pool_health();
 
         if let Some(content) = self.agent.pending_content.take() {
             let images = self.agent.pending_images.take().unwrap_or_default();

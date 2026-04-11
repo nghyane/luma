@@ -14,6 +14,7 @@
 /// Scenarios: 500, 2000, 5000 blocks with mixed content (markdown text + tool output).
 #[cfg(test)]
 mod bench {
+    use crate::core::types::{FileArtifact, FileChangeArtifact, FileOp, ToolStatus};
     use crate::tui::block::{Block, TextBlock, ToolBlock};
     use crate::tui::layout::Layout;
     use std::time::Instant;
@@ -97,11 +98,24 @@ mod bench {
 
             // Tool 2 — Write diff (long content)
             let mut tool2 = ToolBlock::history("Edit", "src/tui/layout.rs");
-            for k in 0..30 {
-                tool2
-                    .output
-                    .push(format!("+    let x_{k} = compute_value({k});"));
-            }
+            tool2.artifact = Some(FileChangeArtifact {
+                files: vec![FileArtifact {
+                    path: "src/tui/layout.rs".to_owned(),
+                    operation: FileOp::Update,
+                    diff: Some(
+                        (0..30)
+                            .map(|k| {
+                                format!("  {:>2} +     let x_{k} = compute_value({k});", k + 1)
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
+                    preview: None,
+                }],
+                raw_input: None,
+                error: None,
+                status: ToolStatus::Done,
+            });
             tool2.end_summary = "+30 -0".to_owned();
             blocks.push(Block::Tool(tool2));
             if blocks.len() >= n_blocks {

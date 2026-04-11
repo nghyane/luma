@@ -183,11 +183,30 @@ impl Document {
         }
     }
 
+    pub fn tool_artifact(&mut self, name: &str, artifact: crate::core::types::FileChangeArtifact) {
+        if let Some(tb) = self.find_active_tool_mut(name) {
+            tb.artifact = Some(artifact);
+        } else if let Some(tb) = self.blocks.iter_mut().rev().find_map(|b| {
+            if let Block::Tool(tb) = b
+                && tb.name == name
+            {
+                Some(tb)
+            } else {
+                None
+            }
+        }) {
+            tb.artifact = Some(artifact);
+        }
+    }
+
     pub fn tool_end(&mut self, name: &str, summary: &str) {
         self.commit_last();
         if let Some(tb) = self.find_active_tool_mut(name) {
             tb.is_done = true;
             tb.end_summary = summary.to_owned();
+            if tb.artifact.is_some() {
+                tb.output.clear();
+            }
             tb.stream = None;
         }
     }
@@ -261,7 +280,22 @@ impl Document {
 
     pub fn toggle_expand(&mut self, idx: usize) -> bool {
         if let Some(Block::Tool(tb)) = self.blocks.get_mut(idx) {
-            if !tb.is_done || tb.output.len() <= 4 {
+            let artifact_expandable = tb.artifact.as_ref().is_some_and(|artifact| {
+                let file_count = artifact.files.len();
+                let line_count: usize = artifact
+                    .files
+                    .iter()
+                    .map(|file| {
+                        file.diff
+                            .as_ref()
+                            .map(|text| text.lines().count())
+                            .or_else(|| file.preview.as_ref().map(|text| text.lines().count()))
+                            .unwrap_or(0)
+                    })
+                    .sum();
+                file_count > 1 || line_count > 4
+            });
+            if !tb.is_done || (tb.output.len() <= 4 && !artifact_expandable) {
                 return false;
             }
             tb.is_expanded = !tb.is_expanded;
@@ -388,7 +422,7 @@ mod tests {
     fn write_streaming_lifecycle() {
         // Simulate the Claude Write flow: provider emits ToolSelected ->
         // ToolInput chunks (arg preview) -> orchestrator emits ToolStart
-        // with path -> ToolOutput diff lines -> ToolEnd.
+        // with path -> ToolArtifact -> ToolEnd.
         let mut doc = Document::new();
 
         doc.tool_selected("Write");
@@ -412,8 +446,20 @@ mod tests {
         // Stream reset so output can accumulate cleanly.
         assert!(tb.stream.as_ref().is_some_and(|s| s.is_empty()));
 
-        doc.tool_output("Write", "  1 + line one\n");
-        doc.tool_output("Write", "  2 + line two\n");
+        doc.tool_artifact(
+            "Write",
+            crate::core::types::FileChangeArtifact {
+                files: vec![crate::core::types::FileArtifact {
+                    path: "/tmp/foo.txt".into(),
+                    operation: crate::core::types::FileOp::Add,
+                    diff: Some("  1 + line one\n  2 + line two".into()),
+                    preview: None,
+                }],
+                raw_input: None,
+                error: None,
+                status: crate::core::types::ToolStatus::Done,
+            },
+        );
         doc.tool_end("Write", "Created /tmp/foo.txt");
 
         let tb = doc
@@ -428,8 +474,100 @@ mod tests {
             })
             .unwrap();
         assert!(tb.is_done);
-        assert_eq!(tb.output, vec!["  1 + line one", "  2 + line two"]);
+        assert!(tb.artifact.is_some());
         assert_eq!(tb.end_summary, "Created /tmp/foo.txt");
+    }
+
+    #[test]
+    fn tool_artifact_is_attached_to_active_tool() {
+        let mut doc = Document::new();
+        doc.tool_start("apply_patch", "src/main.rs");
+        doc.tool_artifact(
+            "apply_patch",
+            crate::core::types::FileChangeArtifact {
+                files: vec![crate::core::types::FileArtifact {
+                    path: "src/main.rs".into(),
+                    operation: crate::core::types::FileOp::Update,
+                    diff: Some("  1 - old\n  1 + new".into()),
+                    preview: None,
+                }],
+                raw_input: None,
+                error: None,
+                status: crate::core::types::ToolStatus::Done,
+            },
+        );
+
+        let tb = active_tool(&doc, "apply_patch").unwrap();
+        assert!(tb.artifact.is_some());
+        assert!(tb.output.is_empty());
+    }
+
+    #[test]
+    fn tool_artifact_keeps_streamed_output_until_end() {
+        let mut doc = Document::new();
+        doc.tool_start("Write", "src/main.rs");
+        doc.tool_output("Write", "  1 + hello\n");
+        doc.tool_artifact(
+            "Write",
+            crate::core::types::FileChangeArtifact {
+                files: vec![crate::core::types::FileArtifact {
+                    path: "src/main.rs".into(),
+                    operation: crate::core::types::FileOp::Update,
+                    diff: Some("  1 + hello".into()),
+                    preview: None,
+                }],
+                raw_input: None,
+                error: None,
+                status: crate::core::types::ToolStatus::Done,
+            },
+        );
+
+        let tb = active_tool(&doc, "Write").unwrap();
+        assert_eq!(tb.output, vec!["  1 + hello"]);
+
+        doc.tool_end("Write", "done");
+        let tb = doc
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Tool(tb) if tb.name == "Write" => Some(tb),
+                _ => None,
+            })
+            .unwrap();
+        assert!(tb.output.is_empty());
+    }
+
+    #[test]
+    fn toggle_expand_works_for_file_change_artifact() {
+        let mut doc = Document::new();
+        doc.tool_start("Write", "src/main.rs");
+        doc.tool_artifact(
+            "Write",
+            crate::core::types::FileChangeArtifact {
+                files: vec![crate::core::types::FileArtifact {
+                    path: "src/main.rs".into(),
+                    operation: crate::core::types::FileOp::Update,
+                    diff: Some(
+                        (1..=20)
+                            .map(|i| format!("  {i} + line {i}"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
+                    preview: None,
+                }],
+                raw_input: None,
+                error: None,
+                status: crate::core::types::ToolStatus::Done,
+            },
+        );
+        doc.tool_end("Write", "");
+
+        let idx = doc
+            .blocks
+            .iter()
+            .position(|b| matches!(b, Block::Tool(_)))
+            .unwrap();
+        assert!(doc.toggle_expand(idx));
     }
 
     fn active_tool<'a>(doc: &'a Document, name: &str) -> Option<&'a crate::tui::block::ToolBlock> {

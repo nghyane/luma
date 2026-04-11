@@ -1,5 +1,5 @@
 /// Read tool — read files or list directories with line numbers.
-use crate::core::tool::Tool;
+use crate::core::tool::{Tool, ToolExecution};
 use crate::core::types::ToolSchema;
 use anyhow::{Result, bail};
 use std::fs;
@@ -60,7 +60,7 @@ impl Tool for ReadTool {
         args: serde_json::Value,
         _output_tx: mpsc::Sender<String>,
         _cancel: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             if path_str.is_empty() {
@@ -97,7 +97,10 @@ impl Tool for ReadTool {
                     })
                     .collect();
                 entries.sort();
-                return Ok(entries.join("\n"));
+                return Ok(ToolExecution {
+                    result: entries.join("\n"),
+                    artifact: None,
+                });
             }
 
             // Binary file check
@@ -166,11 +169,15 @@ impl Tool for ReadTool {
 
             if result.is_empty() {
                 if total_lines == 0 {
-                    return Ok("(empty file)".into());
+                    return Ok(ToolExecution {
+                        result: "(empty file)".into(),
+                        artifact: None,
+                    });
                 }
-                return Ok(format!(
-                    "(file has {total_lines} lines, offset {offset} is past end)"
-                ));
+                return Ok(ToolExecution {
+                    result: format!("(file has {total_lines} lines, offset {offset} is past end)"),
+                    artifact: None,
+                });
             }
 
             // Append total line count hint for model context
@@ -178,7 +185,10 @@ impl Tool for ReadTool {
                 result.push_str(&format!("\n({total_lines} lines total)\n"));
             }
 
-            Ok(result)
+            Ok(ToolExecution {
+                result,
+                artifact: None,
+            })
         })
     }
 }
@@ -252,8 +262,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.contains("1: line1"));
-        assert!(result.contains("3: line3"));
+        assert!(result.result.contains("1: line1"));
+        assert!(result.result.contains("3: line3"));
     }
 
     #[tokio::test]
@@ -274,8 +284,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.contains("a.txt"));
-        assert!(result.contains("sub/"));
+        assert!(result.result.contains("a.txt"));
+        assert!(result.result.contains("sub/"));
     }
 
     #[tokio::test]
@@ -299,9 +309,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.contains("50: line 50"));
-        assert!(result.contains("54: line 54"));
-        assert!(result.contains("100 lines total"));
+        assert!(result.result.contains("50: line 50"));
+        assert!(result.result.contains("54: line 54"));
+        assert!(result.result.contains("100 lines total"));
     }
 
     #[tokio::test]
@@ -376,8 +386,8 @@ mod tests {
             .unwrap();
 
         assert!(
-            result.contains("50 lines total"),
-            "should show total: {result}"
+            result.result.contains("50 lines total"),
+            "should show total: {result:?}"
         );
     }
 }

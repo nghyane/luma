@@ -1,5 +1,5 @@
 /// GhLs tool — list files in a GitHub repository via `gh` CLI.
-use crate::core::tool::Tool;
+use crate::core::tool::{Tool, ToolExecution};
 use crate::core::types::ToolSchema;
 use crate::tool::gh_file::{normalize_repo, resolve_default_branch, run_gh_api};
 use anyhow::{Result, bail};
@@ -60,7 +60,7 @@ impl Tool for GhLsTool {
         args: serde_json::Value,
         _output_tx: mpsc::Sender<String>,
         cancel: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let repo = normalize_repo(args["repo"].as_str().unwrap_or(""));
             if repo.is_empty() {
@@ -106,11 +106,19 @@ impl Tool for GhLsTool {
                     })
                     .take(limit)
                     .collect(),
-                None => return Ok(format!("Could not resolve tree for {repo}@{git_ref}")),
+                None => {
+                    return Ok(ToolExecution {
+                        result: format!("Could not resolve tree for {repo}@{git_ref}"),
+                        artifact: None,
+                    });
+                }
             };
 
             if entries.is_empty() {
-                return Ok(format!("No entries found for {repo}@{git_ref}"));
+                return Ok(ToolExecution {
+                    result: format!("No entries found for {repo}@{git_ref}"),
+                    artifact: None,
+                });
             }
 
             let mut result = String::new();
@@ -123,7 +131,10 @@ impl Tool for GhLsTool {
                 result.push_str(&format!("{kind} {path} {url}\n"));
             }
 
-            Ok(result)
+            Ok(ToolExecution {
+                result,
+                artifact: None,
+            })
         })
     }
 }

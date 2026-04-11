@@ -2,14 +2,23 @@
 use crate::config::auth::{self, AuthProvider};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
+
+const BUILTIN_MODELS_JSON: &str = include_str!("models.catalog.json");
 
 /// A discovered model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelEntry {
     pub id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
     pub source: String,
+    #[serde(default)]
+    pub context_window: Option<u64>,
+    #[serde(default)]
+    pub max_output_tokens: Option<u64>,
 }
 
 /// Agent mode.
@@ -60,6 +69,45 @@ pub(crate) fn load_snapshot() -> Option<Snapshot> {
     serde_json::from_str(&raw).ok()
 }
 
+fn builtin_models() -> Vec<ModelEntry> {
+    serde_json::from_str(BUILTIN_MODELS_JSON).unwrap_or_default()
+}
+
+fn overlay_metadata(models: Vec<ModelEntry>) -> Vec<ModelEntry> {
+    let meta: BTreeMap<(String, String), ModelEntry> = builtin_models()
+        .into_iter()
+        .map(|m| ((m.source.clone(), m.id.clone()), m))
+        .collect();
+
+    models
+        .into_iter()
+        .map(|mut model| {
+            if let Some(extra) = meta.get(&(model.source.clone(), model.id.clone())) {
+                if model.display_name.is_none() {
+                    model.display_name = extra.display_name.clone();
+                }
+                if model.context_window.is_none() {
+                    model.context_window = extra.context_window;
+                }
+                if model.max_output_tokens.is_none() {
+                    model.max_output_tokens = extra.max_output_tokens;
+                }
+            }
+            model
+        })
+        .collect()
+}
+
+fn normalize_models(models: Vec<ModelEntry>) -> Vec<ModelEntry> {
+    let mut seen = BTreeSet::new();
+    let mut models: Vec<_> = models
+        .into_iter()
+        .filter(|m| seen.insert((m.source.clone(), m.id.clone())))
+        .collect();
+    models.sort_by(|a, b| a.source.cmp(&b.source).then(a.id.cmp(&b.id)));
+    models
+}
+
 /// Whether models have been synced before.
 pub fn has_synced() -> bool {
     snapshot_path().exists()
@@ -67,13 +115,19 @@ pub fn has_synced() -> bool {
 
 /// All known models.
 pub fn all_models() -> Vec<ModelEntry> {
-    load_snapshot().map(|s| s.models).unwrap_or_default()
+    load_snapshot()
+        .map(|s| s.models)
+        .unwrap_or_else(builtin_models)
 }
 
 /// Context window for a model. Currently a constant default until per-model
-/// data is populated from provider APIs.
+/// data is populated from the bundled catalog.
 pub fn context_window(_model_id: &str) -> u64 {
-    200_000
+    all_models()
+        .into_iter()
+        .find(|m| m.id == _model_id)
+        .and_then(|m| m.context_window)
+        .unwrap_or(200_000)
 }
 
 /// Resolve default model for a mode.
@@ -91,7 +145,7 @@ pub fn resolve_default(mode: AgentMode) -> Option<ModelEntry> {
     let rules: &[(&[&str], &str)] = match mode {
         AgentMode::Rush => &[(&["haiku"], "anthropic"), (&["sonnet"], "anthropic")],
         AgentMode::Smart => &[(&["opus"], "anthropic"), (&["sonnet"], "anthropic")],
-        AgentMode::Deep => &[(&["codex"], "codex"), (&["opus"], "anthropic")],
+        AgentMode::Deep => &[(&["gpt-5.4"], "codex"), (&["opus"], "anthropic")],
     };
 
     for (keywords, source) in rules {
@@ -109,19 +163,26 @@ pub fn resolve_default(mode: AgentMode) -> Option<ModelEntry> {
     None
 }
 
-/// Sync models from APIs. Returns number of models synced.
+/// Sync models from provider APIs, then overlay bundled metadata.
 pub async fn sync() -> Result<usize> {
     let (anthropic, codex) = tokio::join!(scan_anthropic(), scan_codex());
 
     let mut models = Vec::new();
-    if let Ok(m) = anthropic {
-        models.extend(m);
+    match anthropic {
+        Ok(found) => models.extend(found),
+        Err(_) => models.extend(
+            builtin_models()
+                .into_iter()
+                .filter(|m| m.source == "anthropic"),
+        ),
     }
-    if let Ok(m) = codex {
-        models.extend(m);
+    match codex {
+        Ok(found) => models.extend(found),
+        Err(_) => models.extend(builtin_models().into_iter().filter(|m| m.source == "codex")),
     }
-
-    let snapshot = Snapshot { models };
+    let snapshot = Snapshot {
+        models: normalize_models(overlay_metadata(models)),
+    };
 
     let path = snapshot_path();
     if let Some(parent) = path.parent() {
@@ -149,21 +210,22 @@ async fn scan_anthropic() -> Result<Vec<ModelEntry>> {
     }
 
     let data: serde_json::Value = res.json().await?;
-    let models = data["data"]
+    Ok(data["data"]
         .as_array()
         .map(|arr| {
             arr.iter()
                 .filter_map(|m| {
                     Some(ModelEntry {
                         id: m["id"].as_str()?.to_owned(),
+                        display_name: None,
                         source: "anthropic".into(),
+                        context_window: None,
+                        max_output_tokens: None,
                     })
                 })
                 .collect()
         })
-        .unwrap_or_default();
-
-    Ok(models)
+        .unwrap_or_default())
 }
 
 async fn scan_codex() -> Result<Vec<ModelEntry>> {
@@ -180,21 +242,27 @@ async fn scan_codex() -> Result<Vec<ModelEntry>> {
     }
 
     let data: serde_json::Value = res.json().await?;
-    let models = data["models"]
+    Ok(data["models"]
         .as_array()
         .map(|arr| {
             arr.iter()
                 .filter_map(|m| {
+                    let slug = m["slug"].as_str()?;
+                    let visibility = m["visibility"].as_str().unwrap_or("list");
+                    if visibility != "list" {
+                        return None;
+                    }
                     Some(ModelEntry {
-                        id: m["slug"].as_str()?.to_owned(),
+                        id: slug.to_owned(),
+                        display_name: None,
                         source: "codex".into(),
+                        context_window: m["context_window"].as_u64(),
+                        max_output_tokens: m["max_output_tokens"].as_u64(),
                     })
                 })
                 .collect()
         })
-        .unwrap_or_default();
-
-    Ok(models)
+        .unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -210,5 +278,28 @@ mod tests {
     #[test]
     fn mode_as_str() {
         assert_eq!(AgentMode::Smart.as_str(), "smart");
+    }
+
+    #[test]
+    fn builtin_catalog_loads() {
+        let models = builtin_models();
+        assert!(models.iter().any(|m| m.source == "anthropic"));
+        assert!(models.iter().any(|m| m.source == "codex"));
+        assert!(models.iter().all(|m| m.context_window.is_some()));
+    }
+
+    #[test]
+    fn overlay_metadata_fills_missing_fields_only() {
+        let models = overlay_metadata(vec![ModelEntry {
+            id: "gpt-5.4".into(),
+            display_name: None,
+            source: "codex".into(),
+            context_window: None,
+            max_output_tokens: Some(123),
+        }]);
+        let model = &models[0];
+        assert_eq!(model.display_name.as_deref(), Some("GPT-5.4"));
+        assert_eq!(model.context_window, Some(1_000_000));
+        assert_eq!(model.max_output_tokens, Some(123));
     }
 }

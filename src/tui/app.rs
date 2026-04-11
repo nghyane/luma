@@ -151,6 +151,8 @@ impl App {
         prompt.add_command("model", "switch model");
         prompt.add_command("resume", "resume last session");
         prompt.add_command("sessions", "browse sessions");
+        prompt.add_command("accounts", "view account pool");
+        prompt.add_command("login", "add account via browser");
         prompt.add_command("exit", "quit luma");
 
         let mode = crate::config::prefs::load_mode();
@@ -160,6 +162,7 @@ impl App {
         let ui = UiComponents {
             prompt,
             picker: Picker::new(),
+            dialog: crate::tui::dialog::Dialog::new(),
             status: StatusBar::new(),
             selection: Selection::new(),
             drag: None,
@@ -191,6 +194,7 @@ impl App {
             term,
         };
         app.update_status();
+        app.refresh_pool_health();
         if thinking != ThinkingLevel::Off {
             let label = match thinking {
                 ThinkingLevel::Off => "off",
@@ -278,6 +282,11 @@ impl App {
     pub async fn run(mut self) -> anyhow::Result<()> {
         let (tx, mut rx) = crate::event_bus::channel();
         self.tx = Some(tx.clone());
+
+        // Keep pooled OAuth tokens warm so user turns never wait on a
+        // refresh. Cancelled implicitly when the process exits.
+        let refresher_cancel = tokio_util::sync::CancellationToken::new();
+        crate::config::auth::spawn_background_refresher(refresher_cancel.clone());
 
         let mut term = self
             .term

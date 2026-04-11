@@ -1,5 +1,5 @@
 /// Shell tool — execute commands via platform shell with streaming output and timeout.
-use crate::core::tool::Tool;
+use crate::core::tool::{Tool, ToolExecution};
 use crate::core::types::ToolSchema;
 use crate::tool::bash_safety;
 use crate::tool::shell;
@@ -76,7 +76,7 @@ impl Tool for BashTool {
         args: serde_json::Value,
         output_tx: mpsc::Sender<String>,
         cancel: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
             if command.is_empty() {
@@ -114,11 +114,14 @@ impl Tool for BashTool {
                 result_str.push_str(&format!("\n[exit code: {exit_code}]"));
             }
 
-            if result_str.trim().is_empty() {
-                Ok("(no output)".into())
-            } else {
-                Ok(result_str)
-            }
+            Ok(ToolExecution {
+                result: if result_str.trim().is_empty() {
+                    "(no output)".into()
+                } else {
+                    result_str
+                },
+                artifact: None,
+            })
         })
     }
 }
@@ -238,7 +241,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.contains("hello"));
+        assert!(result.result.contains("hello"));
         let chunk = rx.try_recv();
         assert!(chunk.is_ok());
     }
@@ -253,7 +256,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.contains("[exit code: 42]"));
+        assert!(result.result.contains("[exit code: 42]"));
     }
 
     #[tokio::test]
@@ -286,7 +289,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.contains("[aborted]"));
+        assert!(result.result.contains("[aborted]"));
     }
 
     #[tokio::test]
@@ -311,7 +314,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.contains("[aborted]"));
+        assert!(result.result.contains("[aborted]"));
     }
 
     #[test]

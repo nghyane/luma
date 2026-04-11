@@ -85,11 +85,12 @@ impl Picker {
             let is_current = *model == self.current;
             let is_selected = i == self.selected;
             let suffix = if is_current { "  ←" } else { "" };
+            let prefix = format!("{}  ", icon::PROMPT);
 
             if is_selected {
                 lines.push(Line {
                     spans: smallvec![
-                        Span::new(format!("{} ", icon::PROMPT), palette::ACCENT),
+                        Span::deco(prefix.clone(), palette::ACCENT),
                         Span::bold(model.clone(), palette::ACCENT),
                         Span::new(suffix.to_owned(), palette::DIM),
                     ],
@@ -99,18 +100,24 @@ impl Picker {
                     bleed: 0,
                 });
             } else {
-                lines.push(Line::new(smallvec![
-                    Span::new("  ", palette::DIM),
-                    Span::new(
-                        model.clone(),
-                        if is_current {
-                            palette::FG
-                        } else {
-                            palette::DIM
-                        }
-                    ),
-                    Span::new(suffix.to_owned(), palette::MUTED),
-                ]));
+                lines.push(Line {
+                    spans: smallvec![
+                        Span::deco(prefix, palette::BORDER),
+                        Span::new(
+                            model.clone(),
+                            if is_current {
+                                palette::FG
+                            } else {
+                                palette::DIM
+                            }
+                        ),
+                        Span::new(suffix.to_owned(), palette::MUTED),
+                    ],
+                    bg: None,
+                    margin: false,
+                    indent: 0,
+                    bleed: 0,
+                });
             }
         }
         lines.push(Line::empty());
@@ -178,6 +185,8 @@ mod tests {
         p.open(vec!["model-a".into(), "model-b".into()], "model-a");
         let lines = p.lines(20);
         assert!(lines.len() >= 3); // empty + 2 items + empty
+        assert_eq!(lines[1].bleed, 0);
+        assert_eq!(lines[2].bleed, 0);
     }
 
     #[test]

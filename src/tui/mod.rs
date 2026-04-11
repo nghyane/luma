@@ -1,5 +1,6 @@
 pub mod app;
 pub mod block;
+pub mod dialog;
 pub mod document;
 pub mod layout;
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use super::diff::diff_line_lang;
 use super::render::{RenderState, render_block};
 use super::*;
+use crate::core::types::{FileArtifact, FileChangeArtifact, FileOp, ToolStatus};
 use crate::tui::stream::StreamBuf;
 use crate::tui::text::ScreenBuffer;
 use crate::tui::theme::palette;
@@ -83,11 +84,24 @@ fn tool_inline_completed_read() {
 #[test]
 fn tool_block_completed_write_with_diff() {
     let mut tb = ToolBlock::history("Write", "src/main.rs");
-    tb.output = vec![
-        "  1 + fn main() {".into(),
-        "  2 +     println!(\"hello\");".into(),
-        "  3 + }".into(),
-    ];
+    tb.artifact = Some(FileChangeArtifact {
+        files: vec![FileArtifact {
+            path: "src/main.rs".into(),
+            operation: FileOp::Update,
+            diff: Some(
+                [
+                    "  1 + fn main() {",
+                    "  2 +     println!(\"hello\");",
+                    "  3 + }",
+                ]
+                .join("\n"),
+            ),
+            preview: None,
+        }],
+        raw_input: None,
+        error: None,
+        status: ToolStatus::Done,
+    });
     let mut st = RenderState::new();
     let lines = render_block(&Block::Tool(tb), &mut st, 80, 0);
     assert_eq!(lines.len(), 4, "block: title + 3 lines");
@@ -123,6 +137,7 @@ fn tool_streaming_write_shows_content() {
             "  1 + fn main() {".into(),
             "  2 +     println!(\"hi\");".into(),
         ],
+        artifact: None,
         stream: Some(stream),
         is_done: false,
         end_summary: String::new(),
@@ -136,6 +151,92 @@ fn tool_streaming_write_shows_content() {
         .collect();
     assert!(all.contains("fn"), "streaming content: {all}");
     assert!(all.contains("partial line"), "partial line: {all}");
+}
+
+#[test]
+fn tool_block_completed_patch_uses_artifact() {
+    let mut tb = ToolBlock::history("apply_patch", "src/main.rs");
+    tb.artifact = Some(FileChangeArtifact {
+        files: vec![FileArtifact {
+            path: "src/main.rs".into(),
+            operation: FileOp::Update,
+            diff: Some("  1 - old\n  1 + new".into()),
+            preview: None,
+        }],
+        raw_input: None,
+        error: None,
+        status: ToolStatus::Done,
+    });
+    let mut st = RenderState::new();
+    let lines = render_block(&Block::Tool(tb), &mut st, 80, 0);
+    let all: String = lines
+        .iter()
+        .flat_map(|l| l.spans.iter().map(|s| s.text.as_str()))
+        .collect();
+    assert!(all.contains("old"), "missing removed line: {all}");
+    assert!(all.contains("new"), "missing added line: {all}");
+}
+
+#[test]
+fn tool_block_artifact_collapsed_shows_expand_hint() {
+    let mut tb = ToolBlock::history("Write", "src/main.rs");
+    tb.artifact = Some(FileChangeArtifact {
+        files: vec![FileArtifact {
+            path: "src/main.rs".into(),
+            operation: FileOp::Update,
+            diff: Some(
+                (1..=20)
+                    .map(|i| format!("  {i} + line {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            preview: None,
+        }],
+        raw_input: None,
+        error: None,
+        status: ToolStatus::Done,
+    });
+    let mut st = RenderState::new();
+    let lines = render_block(&Block::Tool(tb), &mut st, 80, 0);
+    let title: String = lines[0].spans.iter().map(|s| s.text.as_str()).collect();
+    assert!(
+        title.contains("click to expand"),
+        "missing expand hint: {title}"
+    );
+    assert!(
+        lines.len() < 21,
+        "collapsed artifact should not show full diff"
+    );
+}
+
+#[test]
+fn tool_block_artifact_expanded_shows_full_diff() {
+    let mut tb = ToolBlock::history("apply_patch", "src/main.rs");
+    tb.is_expanded = true;
+    tb.artifact = Some(FileChangeArtifact {
+        files: vec![FileArtifact {
+            path: "src/main.rs".into(),
+            operation: FileOp::Update,
+            diff: Some(
+                (1..=20)
+                    .map(|i| format!("  {i} + line {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            preview: None,
+        }],
+        raw_input: None,
+        error: None,
+        status: ToolStatus::Done,
+    });
+    let mut st = RenderState::new();
+    let lines = render_block(&Block::Tool(tb), &mut st, 80, 0);
+    let title: String = lines[0].spans.iter().map(|s| s.text.as_str()).collect();
+    assert!(
+        title.contains("click to collapse"),
+        "missing collapse hint: {title}"
+    );
+    assert!(lines.len() >= 21, "expanded artifact should show full diff");
 }
 
 #[test]
@@ -191,10 +292,20 @@ fn full_edit_tool_flow() {
 
     doc.tool_selected("Edit");
     doc.tool_start("Edit", "test.rs");
-    doc.tool_output("Edit", "  1   aaa\n");
-    doc.tool_output("Edit", "  2 - bbb\n");
-    doc.tool_output("Edit", "  2 + BBB\n");
-    doc.tool_output("Edit", "  3   ccc\n");
+    doc.tool_artifact(
+        "Edit",
+        FileChangeArtifact {
+            files: vec![FileArtifact {
+                path: "test.rs".into(),
+                operation: FileOp::Update,
+                diff: Some(["  1   aaa", "  2 - bbb", "  2 + BBB", "  3   ccc"].join("\n")),
+                preview: None,
+            }],
+            raw_input: None,
+            error: None,
+            status: ToolStatus::Done,
+        },
+    );
     doc.tool_end("Edit", "");
 
     view.prepare_frame(doc.blocks());
@@ -420,6 +531,52 @@ fn same_content_group_logic() {
     assert!(!text.same_content_group(&tool1));
     // Thinking → Tool: different group
     assert!(!thinking.same_content_group(&tool1));
+}
+
+#[test]
+fn snapshot_tool_tracks_artifact_content() {
+    let mut tb = ToolBlock::history("Write", "src/main.rs");
+    tb.artifact = Some(FileChangeArtifact {
+        files: vec![FileArtifact {
+            path: "src/main.rs".into(),
+            operation: FileOp::Update,
+            diff: Some("  1 + hello".into()),
+            preview: None,
+        }],
+        raw_input: None,
+        error: None,
+        status: ToolStatus::Done,
+    });
+
+    match Block::Tool(tb).snapshot() {
+        Snapshot::Tool { fingerprint } => {
+            assert_ne!(fingerprint, 0);
+        }
+        _ => panic!("expected tool snapshot"),
+    }
+}
+
+#[test]
+fn snapshot_tool_changes_when_artifact_changes() {
+    let mut a = ToolBlock::history("Write", "src/main.rs");
+    a.artifact = Some(FileChangeArtifact {
+        files: vec![FileArtifact {
+            path: "src/main.rs".into(),
+            operation: FileOp::Update,
+            diff: Some("  1 + hello".into()),
+            preview: None,
+        }],
+        raw_input: None,
+        error: None,
+        status: ToolStatus::Done,
+    });
+
+    let mut b = a.clone();
+    if let Some(artifact) = &mut b.artifact {
+        artifact.files[0].diff = Some("  1 + world".into());
+    }
+
+    assert!(Block::Tool(a).snapshot() != Block::Tool(b).snapshot());
 }
 
 #[test]

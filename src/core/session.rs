@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-/// Cumulative token usage for a session.
+/// Last-turn token snapshot — represents current context window usage.
+/// Not cumulative across turns; each turn's response replaces this.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionUsage {
     pub input_tokens: u64,

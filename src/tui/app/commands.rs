@@ -1,9 +1,11 @@
 use super::Action;
 /// App commands — slash commands, mode/model selection, session resume.
 use super::state::PickerMode;
+use crate::config::auth::{self, AccountHealth, AuthProvider};
 use crate::config::models::{self, AgentMode};
 use crate::core::types::ThinkingLevel;
-use crate::event::AgentCommand;
+use crate::event::{AgentCommand, Event};
+use crate::tui::status::PoolHealth;
 use crate::tui::theme::palette;
 
 impl super::App {
@@ -19,7 +21,7 @@ impl super::App {
                 self.doc.divider();
                 self.doc.info("new thread started");
                 self.doc.divider();
-                self.ui.status.reset_cache();
+                self.ui.status.reset_usage();
                 self.sync_prompt_commands();
                 Action::Render
             }
@@ -75,12 +77,107 @@ impl super::App {
                 }
                 Action::Render
             }
+            "accounts" => {
+                self.open_accounts_dialog();
+                Action::Render
+            }
+            "login" | "login anthropic" | "login claude" => {
+                self.start_login(AuthProvider::Anthropic);
+                Action::Render
+            }
+            "login openai" | "login codex" => {
+                self.start_login(AuthProvider::OpenAI);
+                Action::Render
+            }
             "exit" => Action::Quit,
             _ => {
                 self.doc.warn(&format!("unknown command: /{cmd}"));
                 Action::Render
             }
         }
+    }
+
+    /// Open the /accounts dialog — centered modal with toggle + remove.
+    pub(super) fn open_accounts_dialog(&mut self) {
+        self.refresh_pool_health();
+        let accounts = auth::list_accounts();
+        if accounts.is_empty() {
+            self.doc.info("no accounts · run /login to add one");
+            return;
+        }
+        let items = accounts
+            .iter()
+            .map(|a| {
+                let provider = match a.provider {
+                    AuthProvider::Anthropic => "claude",
+                    AuthProvider::OpenAI => "codex",
+                };
+                let status = match a.health {
+                    AccountHealth::Ok if a.disabled => "off",
+                    AccountHealth::Ok => "ok",
+                    AccountHealth::Cooldown { .. } => "cooling",
+                    AccountHealth::NeedsRelogin => "relogin",
+                };
+                // col1: email if available, else label; col2: provider · status
+                let col1 = a.email.clone().unwrap_or_else(|| a.label.clone());
+                let col2 = format!("{provider}  {status}");
+                crate::tui::dialog::DialogItem {
+                    id: a.label.clone(),
+                    col1,
+                    col2,
+                    dim: a.disabled,
+                }
+            })
+            .collect();
+        self.ui.dialog.open("accounts", items);
+    }
+
+    /// Spawn a detached PKCE login flow for `provider`. Progress and the
+    /// final outcome are reported to the UI via the event bus.
+    pub(super) fn start_login(&mut self, provider: AuthProvider) {
+        let Some(tx) = self.tx.clone() else {
+            self.doc.error("internal: event bus not ready");
+            return;
+        };
+        self.doc
+            .info(&format!("{} login · opening browser…", provider.as_str()));
+        tokio::spawn(async move {
+            let tx_url = tx.clone();
+            let tx_result = tx.clone();
+            let outcome = auth::login_with_reporter(provider, move |url| {
+                let _ = tx_url.try_send(Event::LoginUrl(url.to_owned()));
+            })
+            .await;
+            match outcome {
+                Ok(o) => {
+                    let _ = tx_result
+                        .send(Event::LoginDone {
+                            label: o.label,
+                            email: o.email,
+                            provider: o.provider.as_str().to_owned(),
+                        })
+                        .await;
+                }
+                Err(e) => {
+                    let _ = tx_result.send(Event::LoginFailed(e.to_string())).await;
+                }
+            }
+        });
+    }
+
+    /// Re-read the pool and push a fresh health summary into the status bar.
+    pub(super) fn refresh_pool_health(&mut self) {
+        let mut health = PoolHealth::default();
+        for a in auth::list_accounts() {
+            match a.health {
+                AccountHealth::Ok => {}
+                AccountHealth::Cooldown { .. } => health.cooling = health.cooling.saturating_add(1),
+                AccountHealth::NeedsRelogin => {
+                    health.needs_relogin = health.needs_relogin.saturating_add(1)
+                }
+            }
+        }
+        self.ui.status.set_pool_health(health);
     }
 
     pub(super) fn select_model(&mut self, model_id: &str) {
@@ -121,6 +218,7 @@ impl super::App {
         self.doc.clear();
         self.view.clear();
         self.doc.divider_with_label(self.config.mode.as_str());
+        self.ui.status.reset_usage();
         self.update_status();
         self.sync_prompt_commands();
     }
@@ -304,5 +402,74 @@ impl super::App {
         let is_new_thread = !self.doc.has_user_content();
         self.ui.prompt.set_command_visible("resume", is_new_thread);
         self.ui.prompt.set_command_visible("new", !is_new_thread);
+    }
+}
+
+/// Format a single account as one picker row:
+/// `●  nghia@gmail  ·  anthropic  ·  ok  ·  847/1000 req`
+///
+/// The picker is text-only (no per-item color), so we use unicode dot
+/// glyphs to convey health: `●` ok, `◐` cooling, `○` needs re-login.
+#[cfg(test)]
+fn format_account_row(a: &crate::config::auth::AccountView) -> String {
+    let dot = match a.health {
+        AccountHealth::Ok => "●",
+        AccountHealth::Cooldown { .. } => "◐",
+        AccountHealth::NeedsRelogin => "○",
+    };
+    let who = a.email.as_deref().unwrap_or(a.label.as_str());
+    let provider = match a.provider {
+        AuthProvider::Anthropic => "anthropic",
+        AuthProvider::OpenAI => "openai",
+    };
+    let status = match a.health {
+        AccountHealth::Ok => "ok".to_owned(),
+        AccountHealth::Cooldown { until_unix } => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            format!("cooling {}s", until_unix.saturating_sub(now))
+        }
+        AccountHealth::NeedsRelogin => "needs re-login".to_owned(),
+    };
+    format!("{dot}  {who}  ·  {provider}  ·  {status}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::auth::AccountView;
+
+    fn view(health: AccountHealth, email: Option<&str>) -> AccountView {
+        AccountView {
+            label: "nghia@gmail".into(),
+            provider: AuthProvider::Anthropic,
+            email: email.map(str::to_owned),
+            health,
+            disabled: false,
+        }
+    }
+
+    #[test]
+    fn account_row_healthy() {
+        let row = format_account_row(&view(AccountHealth::Ok, Some("nghia@gmail.com")));
+        assert!(row.starts_with("●"));
+        assert!(row.contains("nghia@gmail.com"));
+        assert!(row.contains("anthropic"));
+        assert!(row.contains("ok"));
+    }
+
+    #[test]
+    fn account_row_needs_relogin() {
+        let row = format_account_row(&view(AccountHealth::NeedsRelogin, Some("x@y.com")));
+        assert!(row.starts_with("○"));
+        assert!(row.contains("needs re-login"));
+    }
+
+    #[test]
+    fn account_row_falls_back_to_label_when_no_email() {
+        let row = format_account_row(&view(AccountHealth::Ok, None));
+        assert!(row.contains("nghia@gmail"));
     }
 }

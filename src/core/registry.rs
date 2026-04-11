@@ -68,6 +68,7 @@ impl Registry {
 mod tests {
     use super::*;
     use crate::core::tool::Tool;
+    use crate::core::tool::ToolExecution;
     use crate::core::types::ToolSchema;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
@@ -91,9 +92,15 @@ mod tests {
             _args: serde_json::Value,
             _output_tx: mpsc::Sender<String>,
             _cancel: CancellationToken,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + '_>>
-        {
-            Box::pin(async { Ok("done".into()) })
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<ToolExecution>> + Send + '_>,
+        > {
+            Box::pin(async {
+                Ok(ToolExecution {
+                    result: "done".into(),
+                    artifact: None,
+                })
+            })
         }
     }
 

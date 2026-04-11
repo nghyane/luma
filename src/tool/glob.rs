@@ -2,7 +2,7 @@
 ///
 /// Respects `.gitignore`, `.ignore`, skips hidden files by default.
 /// Same engine as ripgrep for consistent, fast directory walking.
-use crate::core::tool::Tool;
+use crate::core::tool::{Tool, ToolExecution};
 use crate::core::types::ToolSchema;
 use anyhow::{Result, bail};
 use std::path::Path;
@@ -52,7 +52,7 @@ impl Tool for GlobTool {
         args: serde_json::Value,
         output_tx: mpsc::Sender<String>,
         _cancel: CancellationToken,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + '_>> {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let pattern = args["pattern"].as_str().unwrap_or("**/*");
             let path = args["path"].as_str().unwrap_or(".");
@@ -128,7 +128,10 @@ impl Tool for GlobTool {
             if files.is_empty() {
                 result = "No files found".to_owned();
             }
-            Ok(result)
+            Ok(ToolExecution {
+                result,
+                artifact: None,
+            })
         })
     }
 }
@@ -152,8 +155,8 @@ mod tests {
             .execute(args, tx, CancellationToken::new())
             .await
             .unwrap();
-        assert!(result.contains(".rs"));
-        assert!(!result.contains("readme.md"));
+        assert!(result.result.contains(".rs"));
+        assert!(!result.result.contains("readme.md"));
     }
 
     #[tokio::test]
@@ -165,7 +168,7 @@ mod tests {
             .execute(args, tx, CancellationToken::new())
             .await
             .unwrap();
-        assert_eq!(result, "No files found");
+        assert_eq!(result.result, "No files found");
     }
 
     #[tokio::test]
@@ -196,12 +199,12 @@ mod tests {
             .unwrap();
 
         assert!(
-            result.contains("keep.rs"),
-            "should include keep.rs: {result}"
+            result.result.contains("keep.rs"),
+            "should include keep.rs: {result:?}"
         );
         assert!(
-            !result.contains("skip.log"),
-            "should exclude skip.log: {result}"
+            !result.result.contains("skip.log"),
+            "should exclude skip.log: {result:?}"
         );
     }
 }

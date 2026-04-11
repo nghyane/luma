@@ -1,6 +1,6 @@
 /// Write tool — write content to a file, creating parent dirs if needed.
-use crate::core::tool::Tool;
-use crate::core::types::ToolSchema;
+use crate::core::tool::{Tool, ToolExecution};
+use crate::core::types::{FileArtifact, FileChangeArtifact, FileOp, ToolSchema, ToolStatus};
 use anyhow::{Result, bail};
 use std::future::Future;
 use std::path::PathBuf;
@@ -42,7 +42,7 @@ impl Tool for WriteTool {
         args: serde_json::Value,
         output_tx: mpsc::Sender<String>,
         _cancel: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -62,7 +62,20 @@ impl Tool for WriteTool {
 
             // Skip write if content unchanged
             if old == content {
-                return Ok(format!("{} is unchanged", path.display()));
+                return Ok(ToolExecution {
+                    result: format!("{} is unchanged", path.display()),
+                    artifact: Some(FileChangeArtifact {
+                        files: vec![FileArtifact {
+                            path: path.display().to_string(),
+                            operation: FileOp::Update,
+                            diff: None,
+                            preview: Some(content.to_owned()),
+                        }],
+                        raw_input: None,
+                        error: None,
+                        status: ToolStatus::Done,
+                    }),
+                });
             }
 
             std::fs::write(&path, content)?;
@@ -76,17 +89,30 @@ impl Tool for WriteTool {
             let total_lines = content.lines().count();
             let (adds, dels) = crate::tool::diff::diff_stats(&diff);
             let stat = format!("+{adds} -{dels}");
-            if is_create {
-                Ok(format!(
-                    "Created {} ({total_lines} lines, {stat})",
-                    path.display()
-                ))
+            let result = if is_create {
+                format!("Created {} ({total_lines} lines, {stat})", path.display())
             } else {
-                Ok(format!(
-                    "Updated {} ({total_lines} lines, {stat})",
-                    path.display()
-                ))
-            }
+                format!("Updated {} ({total_lines} lines, {stat})", path.display())
+            };
+
+            Ok(ToolExecution {
+                result,
+                artifact: Some(FileChangeArtifact {
+                    files: vec![FileArtifact {
+                        path: path.display().to_string(),
+                        operation: if is_create {
+                            FileOp::Add
+                        } else {
+                            FileOp::Update
+                        },
+                        diff: Some(diff.join("\n")),
+                        preview: Some(content.to_owned()),
+                    }],
+                    raw_input: None,
+                    error: None,
+                    status: ToolStatus::Done,
+                }),
+            })
         })
     }
 }
@@ -112,7 +138,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.contains("Created"));
+        assert!(result.result.contains("Created"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello");
     }
 

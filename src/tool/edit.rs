@@ -1,6 +1,6 @@
 /// Edit tool — find-and-replace in files with safety checks.
-use crate::core::tool::Tool;
-use crate::core::types::ToolSchema;
+use crate::core::tool::{Tool, ToolExecution};
+use crate::core::types::{FileArtifact, FileChangeArtifact, FileOp, ToolSchema, ToolStatus};
 use anyhow::{Result, bail};
 use std::future::Future;
 use std::path::PathBuf;
@@ -78,7 +78,7 @@ impl Tool for EditTool {
         args: serde_json::Value,
         output_tx: mpsc::Sender<String>,
         _cancel: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let old = args
@@ -114,7 +114,20 @@ impl Tool for EditTool {
                     for line in &diff {
                         let _ = output_tx.send(format!("{line}\n")).await;
                     }
-                    return Ok(format!("Created {}", path.display()));
+                    return Ok(ToolExecution {
+                        result: format!("Created {}", path.display()),
+                        artifact: Some(FileChangeArtifact {
+                            files: vec![FileArtifact {
+                                path: path.display().to_string(),
+                                operation: FileOp::Add,
+                                diff: Some(diff.join("\n")),
+                                preview: Some(new.to_owned()),
+                            }],
+                            raw_input: None,
+                            error: None,
+                            status: ToolStatus::Done,
+                        }),
+                    });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     let suggestion = crate::tool::read::suggest_similar_file(&path);
@@ -157,7 +170,20 @@ impl Tool for EditTool {
 
             // Skip write if nothing changed
             if updated == content {
-                return Ok(format!("{} is unchanged", path.display()));
+                return Ok(ToolExecution {
+                    result: format!("{} is unchanged", path.display()),
+                    artifact: Some(FileChangeArtifact {
+                        files: vec![FileArtifact {
+                            path: path.display().to_string(),
+                            operation: FileOp::Update,
+                            diff: None,
+                            preview: Some(updated),
+                        }],
+                        raw_input: None,
+                        error: None,
+                        status: ToolStatus::Done,
+                    }),
+                });
             }
 
             std::fs::write(&path, &updated)?;
@@ -170,12 +196,25 @@ impl Tool for EditTool {
 
             let (adds, dels) = crate::tool::diff::diff_stats(&diff);
 
-            Ok(format!(
-                "Edited {} ({} replacement{}, +{adds} -{dels})",
-                path.display(),
-                count,
-                if count > 1 { "s" } else { "" }
-            ))
+            Ok(ToolExecution {
+                result: format!(
+                    "Edited {} ({} replacement{}, +{adds} -{dels})",
+                    path.display(),
+                    count,
+                    if count > 1 { "s" } else { "" }
+                ),
+                artifact: Some(FileChangeArtifact {
+                    files: vec![FileArtifact {
+                        path: path.display().to_string(),
+                        operation: FileOp::Update,
+                        diff: Some(diff.join("\n")),
+                        preview: Some(updated),
+                    }],
+                    raw_input: None,
+                    error: None,
+                    status: ToolStatus::Done,
+                }),
+            })
         })
     }
 }
@@ -198,7 +237,7 @@ mod tests {
             tx, cancel,
         ).await.unwrap();
 
-        assert!(result.contains("Edited"));
+        assert!(result.result.contains("Edited"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "hi world");
     }
 
@@ -233,7 +272,7 @@ mod tests {
             tx, cancel,
         ).await.unwrap();
 
-        assert!(result.contains("2 replacements"));
+        assert!(result.result.contains("2 replacements"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "x bbb x");
     }
 
@@ -250,7 +289,7 @@ mod tests {
             tx, cancel,
         ).await.unwrap();
 
-        assert!(result.contains("Created"));
+        assert!(result.result.contains("Created"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "content");
     }
 }

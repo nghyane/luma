@@ -192,9 +192,28 @@ impl super::App {
         }
     }
 
-    /// Set floating layers for dropdown/picker — bottom-anchored over output.
+    /// Set floating layers — dialog (centered), picker and dropdown (bottom-anchored).
     fn set_floating_layers(&mut self) {
         use crate::tui::renderer::FloatingLayer;
+
+        // Centered dialog takes priority over picker/dropdown.
+        if self.ui.dialog.is_active {
+            let term_w = self.regions.output.width + super::OUTER_MARGIN * 2;
+            let term_h =
+                self.regions.output.height + self.regions.input.height + self.regions.status.height;
+            let lines = self.ui.dialog.lines(term_w);
+            let (row, col) = self.ui.dialog.position(term_w, term_h);
+            // box_w must match what dialog.lines() computed internally.
+            let box_w = (term_w as usize).clamp(44, 68) as u16;
+            self.renderer.set_floating(vec![FloatingLayer {
+                row,
+                col,
+                width: box_w,
+                lines,
+                bg: crate::tui::theme::palette::BG,
+            }]);
+            return;
+        }
 
         let content_h = self.regions.output.content_height() as usize;
         let dropdown = self.ui.prompt.dropdown();

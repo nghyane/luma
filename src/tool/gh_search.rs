@@ -1,5 +1,5 @@
 /// GhSearch tool — search code in a GitHub repository via `gh` CLI.
-use crate::core::tool::Tool;
+use crate::core::tool::{Tool, ToolExecution};
 use crate::core::types::ToolSchema;
 use crate::tool::gh_file::normalize_repo;
 use anyhow::{Result, bail};
@@ -60,7 +60,7 @@ impl Tool for GhSearchTool {
         args: serde_json::Value,
         _output_tx: mpsc::Sender<String>,
         cancel: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let repo = normalize_repo(args["repo"].as_str().unwrap_or(""));
             let query = args["query"].as_str().unwrap_or("");
@@ -93,7 +93,10 @@ impl Tool for GhSearchTool {
             let items: Vec<serde_json::Value> = serde_json::from_str(&output)?;
 
             if items.is_empty() {
-                return Ok(format!("No results for \"{query}\" in {repo}"));
+                return Ok(ToolExecution {
+                    result: format!("No results for \"{query}\" in {repo}"),
+                    artifact: None,
+                });
             }
 
             let mut result = format!("{} results in {repo}:\n\n", items.len());
@@ -103,7 +106,10 @@ impl Tool for GhSearchTool {
                 result.push_str(&format!("{}. {path}\n   {url}\n\n", i + 1));
             }
 
-            Ok(result)
+            Ok(ToolExecution {
+                result,
+                artifact: None,
+            })
         })
     }
 }

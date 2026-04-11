@@ -1,6 +1,7 @@
 use super::ToolBlock;
 /// Tool block rendering — pending, block (write/edit), search, inline.
 use super::diff::{diff_line_lang, lang_from_path};
+use crate::core::types::{FileArtifact, FileChangeArtifact, FileOp, ToolStatus};
 use crate::tui::text::{Line, Span};
 use crate::tui::theme::{icon, palette};
 use smallvec::smallvec;
@@ -30,13 +31,132 @@ pub fn render_tool(tb: &ToolBlock, content_w: usize, spinner_frame: usize) -> Ve
     if !tb.is_done {
         return render_pending(tb, content_w, spinner_frame);
     }
-    if is_write_tool(&tb.name) && !tb.output.is_empty() {
-        return render_block_layout(tb, content_w);
+    if let Some(artifact) = &tb.artifact {
+        return render_file_change_block(tb, artifact, content_w);
     }
     if is_search_tool(&tb.name) {
         return render_search(tb, content_w);
     }
     render_inline(tb, content_w)
+}
+
+fn render_file_change_block(tb: &ToolBlock, artifact: &FileChangeArtifact, w: usize) -> Vec<Line> {
+    let ic = tool_icon(&tb.name);
+    let title = format!("{} {} {}", ic, tb.name, tb.summary);
+    let mut h = smallvec![Span::new(title, palette::DIM)];
+    push_end_summary(&mut h, tb);
+    push_file_change_expand_hint(&mut h, tb, artifact);
+    let mut result = crate::tui::text::wrap_line(&Line::new(h), w, None);
+
+    match artifact.status {
+        ToolStatus::Streaming => {
+            if let Some(raw) = &artifact.raw_input {
+                for line in raw.lines() {
+                    result.push(Line::new(smallvec![
+                        Span::new("  ".to_owned(), palette::DIM),
+                        Span::new(line.to_owned(), palette::DIM),
+                    ]));
+                }
+            }
+        }
+        ToolStatus::Failed => {
+            if let Some(err) = &artifact.error {
+                result.push(Line::new(smallvec![Span::new(err.clone(), palette::ERROR)]));
+            }
+        }
+        ToolStatus::Done => {
+            if artifact.files.len() == 1 {
+                render_file_artifact(&artifact.files[0], tb.is_expanded, &mut result);
+            } else {
+                for file in &artifact.files {
+                    result.push(Line::new(smallvec![
+                        Span::new("  ".to_owned(), palette::DIM),
+                        Span::new(
+                            format!("{} {}", file_op_label(&file.operation), file.path),
+                            palette::FG
+                        ),
+                    ]));
+                    if tb.is_expanded {
+                        render_file_artifact(file, true, &mut result);
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+fn render_file_artifact(file: &FileArtifact, is_expanded: bool, result: &mut Vec<Line>) {
+    let lang = lang_from_path(&file.path);
+    if let Some(diff) = &file.diff {
+        for line in visible_tail_lines(diff, is_expanded) {
+            result.push(diff_line_lang(line, lang));
+        }
+    } else if let Some(preview) = &file.preview {
+        for line in visible_tail_lines(preview, is_expanded) {
+            result.push(Line::new(smallvec![
+                Span::new("  ".to_owned(), palette::DIM),
+                Span::new(line.to_owned(), palette::DIM),
+            ]));
+        }
+    }
+}
+
+fn file_op_label(op: &FileOp) -> &'static str {
+    match op {
+        FileOp::Add => "A",
+        FileOp::Update => "M",
+        FileOp::Delete => "D",
+        FileOp::Move { .. } => "R",
+    }
+}
+
+fn push_file_change_expand_hint(
+    h: &mut smallvec::SmallVec<[Span; 4]>,
+    tb: &ToolBlock,
+    artifact: &FileChangeArtifact,
+) {
+    let total_lines = artifact_line_count(artifact);
+    let total_files = artifact.files.len();
+    if total_files > 1 || total_lines > TOOL_PREVIEW_LINES {
+        if tb.is_expanded {
+            h.push(Span::new(" (click to collapse)".to_owned(), palette::MUTED));
+        } else if total_files > 1 {
+            h.push(Span::new(
+                format!(" ({total_files} files · click to expand)"),
+                palette::MUTED,
+            ));
+        } else {
+            h.push(Span::new(
+                format!(" ({total_lines} lines · click to expand)"),
+                palette::MUTED,
+            ));
+        }
+    }
+}
+
+fn artifact_line_count(artifact: &FileChangeArtifact) -> usize {
+    artifact
+        .files
+        .iter()
+        .map(|file| {
+            file.diff
+                .as_ref()
+                .map(|text| text.lines().count())
+                .or_else(|| file.preview.as_ref().map(|text| text.lines().count()))
+                .unwrap_or(0)
+        })
+        .sum()
+}
+
+fn visible_tail_lines(text: &str, is_expanded: bool) -> Vec<&str> {
+    let lines: Vec<&str> = text.lines().collect();
+    if is_expanded || lines.len() <= TOOL_PREVIEW_LINES {
+        lines
+    } else {
+        lines[lines.len().saturating_sub(TOOL_PREVIEW_LINES)..].to_vec()
+    }
 }
 
 fn render_pending(tb: &ToolBlock, w: usize, spinner_frame: usize) -> Vec<Line> {
@@ -115,23 +235,6 @@ fn render_pending_read(tb: &ToolBlock, result: &mut Vec<Line>) {
             Span::new(stream.partial().to_owned(), palette::DIM),
         ]));
     }
-}
-
-/// Completed write/edit tool — title bar + diff content.
-fn render_block_layout(tb: &ToolBlock, w: usize) -> Vec<Line> {
-    let ic = tool_icon(&tb.name);
-    let title = format!("{} {} {}", ic, tb.name, tb.summary);
-    let mut h = smallvec![Span::new(title, palette::DIM)];
-    push_end_summary(&mut h, tb);
-    push_expand_hint(&mut h, tb);
-    let mut result = crate::tui::text::wrap_line(&Line::new(h), w, None);
-
-    let show = visible_output(tb);
-    let lang = lang_from_path(&tb.summary);
-    for t in show {
-        result.push(diff_line_lang(t, lang));
-    }
-    result
 }
 
 /// Completed search tool — query + numbered results.

@@ -2,7 +2,7 @@
 ///
 /// Respects `.gitignore`, skips binary files, hidden files.
 /// Same walker as ripgrep for consistent behavior.
-use crate::core::tool::Tool;
+use crate::core::tool::{Tool, ToolExecution};
 use crate::core::types::ToolSchema;
 use anyhow::Result;
 use std::path::Path;
@@ -60,7 +60,7 @@ impl Tool for GrepTool {
         args: serde_json::Value,
         output_tx: mpsc::Sender<String>,
         _cancel: CancellationToken,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + '_>> {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let pattern_str = args["pattern"].as_str().unwrap_or("");
             let path = args["path"].as_str().unwrap_or(".");
@@ -165,7 +165,10 @@ impl Tool for GrepTool {
             }
 
             if lines.is_empty() {
-                return Ok("No matches found".to_owned());
+                return Ok(ToolExecution {
+                    result: "No matches found".to_owned(),
+                    artifact: None,
+                });
             }
 
             let truncated = lines.len() >= MAX_RESULTS;
@@ -173,7 +176,10 @@ impl Tool for GrepTool {
             if truncated {
                 result.push_str("\n(Results truncated. Use a more specific pattern or path.)");
             }
-            Ok(result)
+            Ok(ToolExecution {
+                result,
+                artifact: None,
+            })
         })
     }
 }
@@ -202,7 +208,7 @@ mod tests {
             .execute(args, tx, CancellationToken::new())
             .await
             .unwrap();
-        assert!(result.contains("fn main"));
+        assert!(result.result.contains("fn main"));
     }
 
     #[tokio::test]
@@ -217,7 +223,7 @@ mod tests {
             .execute(args, tx, CancellationToken::new())
             .await
             .unwrap();
-        assert_eq!(result, "No matches found");
+        assert_eq!(result.result, "No matches found");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -235,8 +241,8 @@ mod tests {
             .execute(args, tx, CancellationToken::new())
             .await
             .unwrap();
-        assert!(result.contains("pub struct"));
-        assert!(!result.contains("main.py"));
+        assert!(result.result.contains("pub struct"));
+        assert!(!result.result.contains("main.py"));
     }
 
     #[tokio::test]
@@ -257,12 +263,12 @@ mod tests {
             .unwrap();
 
         assert!(
-            result.contains("keep.txt"),
-            "should include keep.txt: {result}"
+            result.result.contains("keep.txt"),
+            "should include keep.txt: {result:?}"
         );
         assert!(
-            !result.contains("ignored.txt"),
-            "should exclude ignored.txt: {result}"
+            !result.result.contains("ignored.txt"),
+            "should exclude ignored.txt: {result:?}"
         );
     }
 }

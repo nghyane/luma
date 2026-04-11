@@ -1,6 +1,7 @@
 /// Event dispatch — routes events to document (model) or view.
 use super::state::{PickerMode, RunState};
 use super::{ABORT_HINT_TICKS, Action};
+use crate::config::auth;
 use crate::config::models;
 use crate::event::Event;
 use crate::tui::picker::PickerAction;
@@ -96,6 +97,11 @@ impl super::App {
                 self.doc.tool_output(&name, &chunk);
                 Action::Continue
             }
+            Event::ToolArtifact { name, artifact } => {
+                crate::dbg_log!("tool_artifact {name}");
+                self.doc.tool_artifact(&name, *artifact);
+                Action::Render
+            }
             Event::ToolStart { name, summary } => {
                 crate::dbg_log!("tool_start {name} {summary}");
                 self.doc.tool_start(&name, &summary);
@@ -147,6 +153,30 @@ impl super::App {
             } => {
                 self.doc
                     .provider_retry(&provider, delay_secs, attempt, max_attempts);
+                Action::Render
+            }
+            Event::LoginUrl(url) => {
+                self.doc
+                    .info(&format!("open this URL to sign in:\n  {url}"));
+                Action::Render
+            }
+            Event::LoginDone {
+                label,
+                email,
+                provider,
+            } => {
+                let who = email.as_deref().unwrap_or(label.as_str());
+                self.doc
+                    .info(&format!("signed in as {who} ({provider} · {label})"));
+                self.refresh_pool_health();
+                // Rebuild dialog if open so the new account appears immediately.
+                if self.ui.dialog.is_active {
+                    self.open_accounts_dialog();
+                }
+                Action::Render
+            }
+            Event::LoginFailed(msg) => {
+                self.doc.error(&format!("login failed: {msg}"));
                 Action::Render
             }
             Event::Usage(usage) => {
@@ -202,6 +232,26 @@ impl super::App {
                 return Action::Quit;
             }
             self.ui.prompt.buf.clear();
+            return Action::Render;
+        }
+
+        if self.ui.dialog.is_active {
+            use crate::tui::dialog::DialogAction;
+            match self.ui.dialog.handle_key(&key) {
+                DialogAction::Toggle(label) => {
+                    auth::toggle_disabled(&label);
+                    self.open_accounts_dialog();
+                }
+                DialogAction::Remove(label) => {
+                    auth::remove_account(&label);
+                    self.refresh_pool_health();
+                    if self.ui.dialog.items_is_empty() {
+                        self.ui.dialog.close();
+                    }
+                }
+                DialogAction::Close => {}
+                DialogAction::Redraw | DialogAction::None => {}
+            }
             return Action::Render;
         }
 

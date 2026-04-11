@@ -21,6 +21,7 @@ pub enum StopReason {
 }
 
 /// Response from a provider stream: assistant message, token usage, and stop reason.
+#[derive(Debug)]
 pub struct StreamResponse {
     pub message: Message,
     pub usage: Usage,

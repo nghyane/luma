@@ -1,6 +1,6 @@
 /// Central event type. All input (keyboard, mouse, resize) and agent output
 /// flow through a single `mpsc::channel<Event>`. The app loop matches exhaustively.
-use crate::core::types::Usage;
+use crate::core::types::{FileChangeArtifact, Usage};
 
 /// A single web search result.
 #[derive(Debug, Clone)]
@@ -43,6 +43,10 @@ pub enum Event {
         name: String,
         chunk: String,
     },
+    ToolArtifact {
+        name: String,
+        artifact: Box<FileChangeArtifact>,
+    },
     ToolEnd {
         name: String,
         summary: String,
@@ -70,6 +74,19 @@ pub enum Event {
 
     /// Async clipboard image result — None means no image found.
     ClipboardImage(Option<(String, Vec<u8>)>),
+
+    /// PKCE login produced an authorize URL. Surface it in the TUI so the
+    /// user can click/copy (the flow already tries to open the browser, but
+    /// we want a visible fallback in case that fails on SSH / WSL / etc.).
+    LoginUrl(String),
+    /// PKCE login completed successfully. The account is already in the pool.
+    LoginDone {
+        label: String,
+        email: Option<String>,
+        provider: String,
+    },
+    /// PKCE login failed — surface the reason to the user.
+    LoginFailed(String),
 
     Tick,
 }

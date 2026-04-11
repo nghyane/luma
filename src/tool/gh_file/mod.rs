@@ -1,7 +1,7 @@
 /// GhFile tool — fetch a file from a GitHub repository via `gh` CLI.
 mod scoring;
 
-use crate::core::tool::Tool;
+use crate::core::tool::{Tool, ToolExecution};
 use crate::core::types::ToolSchema;
 use anyhow::{Result, bail};
 use std::future::Future;
@@ -61,7 +61,7 @@ impl Tool for GhFileTool {
         args: serde_json::Value,
         _output_tx: mpsc::Sender<String>,
         cancel: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let repo = normalize_repo(args["repo"].as_str().unwrap_or(""));
             let path = args["path"].as_str().unwrap_or("");
@@ -111,7 +111,10 @@ impl Tool for GhFileTool {
                     result.push_str("\n\n");
                     result.push_str(&e);
                 }
-                Ok(result)
+                Ok(ToolExecution {
+                    result,
+                    artifact: None,
+                })
             } else {
                 let mut result = format!("{header}\n\n");
                 for (i, line) in content.lines().enumerate() {
@@ -121,7 +124,10 @@ impl Tool for GhFileTool {
                         break;
                     }
                 }
-                Ok(result)
+                Ok(ToolExecution {
+                    result,
+                    artifact: None,
+                })
             }
         })
     }

@@ -161,6 +161,43 @@ pub struct ToolSchema {
     pub streamable_arg: Option<String>,
 }
 
+/// File operation captured by a tool artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FileOp {
+    Add,
+    Update,
+    Delete,
+    Move { from: String },
+}
+
+/// Lifecycle state for a structured tool artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ToolStatus {
+    Streaming,
+    Done,
+    Failed,
+}
+
+/// Structured per-file artifact for file-changing tools.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileArtifact {
+    pub path: String,
+    pub operation: FileOp,
+    pub diff: Option<String>,
+    pub preview: Option<String>,
+}
+
+/// Shared artifact for write/edit/apply_patch style tools.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileChangeArtifact {
+    pub files: Vec<FileArtifact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_input: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub status: ToolStatus,
+}
+
 /// Thinking budget level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThinkingLevel {

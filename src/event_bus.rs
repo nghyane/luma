@@ -102,11 +102,11 @@ pub fn channel_with(soft_cap_bytes: usize, hard_cap_events: usize) -> (Sender, R
 /// Error returned when a send fails because the receiver has been dropped.
 /// The original event is preserved inside so callers can retry or drop.
 #[derive(Debug)]
-pub struct SendError(#[allow(dead_code)] pub Event);
+pub struct SendError(pub Event);
 
 impl std::fmt::Display for SendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "event channel closed")
+        write!(f, "event channel closed while sending {:?}", self.0)
     }
 }
 
@@ -198,7 +198,6 @@ impl Sender {
     /// Non-blocking send, primarily for call sites that are themselves
     /// synchronous (e.g. inside a blocking stdin reader thread). Returns
     /// the event back on backpressure so the caller can drop or retry.
-    #[allow(dead_code)]
     pub fn try_send(&self, event: Event) -> Result<(), Event> {
         let mut q = self.shared.queue.lock().unwrap();
         if is_closed(&self.shared) {
@@ -307,13 +306,6 @@ impl Receiver {
             PopOutcome::Empty
         }
     }
-
-    /// Current number of queued events. Useful for diagnostics and the
-    /// app's drain loop tuning.
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.shared.queue.lock().unwrap().len()
-    }
 }
 
 enum PopOutcome {
@@ -357,6 +349,10 @@ fn content_size(event: &Event) -> usize {
     match event {
         Event::Token(s) | Event::Thinking(s) => s.len(),
         Event::ToolInput { chunk, .. } | Event::ToolOutput { chunk, .. } => chunk.len(),
+        Event::ToolArtifact { artifact, .. } => {
+            artifact.raw_input.as_ref().map_or(0, String::len)
+                + artifact.error.as_ref().map_or(0, String::len)
+        }
         _ => 0,
     }
 }

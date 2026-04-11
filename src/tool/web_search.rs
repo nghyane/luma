@@ -2,7 +2,7 @@
 ///
 /// Used as fallback when the provider has no built-in search.
 /// Supports Exa, Tavily, and SearXNG backends.
-use crate::core::tool::Tool;
+use crate::core::tool::{Tool, ToolExecution};
 use crate::core::types::ToolSchema;
 use anyhow::{Result, bail};
 use std::future::Future;
@@ -70,7 +70,7 @@ impl Tool for WebSearchTool {
         args: serde_json::Value,
         output_tx: mpsc::Sender<String>,
         cancel: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let query = args["query"].as_str().unwrap_or("");
             if query.is_empty() {
@@ -89,7 +89,10 @@ impl Tool for WebSearchTool {
             };
 
             if results.is_empty() {
-                return Ok("No results found.".into());
+                return Ok(ToolExecution {
+                    result: "No results found.".into(),
+                    artifact: None,
+                });
             }
 
             // Stream structured output for UI
@@ -112,7 +115,10 @@ impl Tool for WebSearchTool {
                 }
                 output.push('\n');
             }
-            Ok(output)
+            Ok(ToolExecution {
+                result: output,
+                artifact: None,
+            })
         })
     }
 }

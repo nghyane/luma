@@ -3,7 +3,7 @@ mod bm25;
 mod html;
 mod ranking;
 
-use crate::core::tool::Tool;
+use crate::core::tool::{Tool, ToolExecution};
 use crate::core::types::ToolSchema;
 use anyhow::{Result, bail};
 use std::future::Future;
@@ -58,7 +58,7 @@ impl Tool for WebFetchTool {
         args: serde_json::Value,
         _output_tx: mpsc::Sender<String>,
         cancel: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let url = args["url"].as_str().unwrap_or("");
             if url.is_empty() {
@@ -98,9 +98,15 @@ impl Tool for WebFetchTool {
             let markdown = html::convert_to_markdown(&body, &content_type);
 
             if !objective.is_empty() {
-                Ok(ranking::rank_excerpts(&markdown, objective))
+                Ok(ToolExecution {
+                    result: ranking::rank_excerpts(&markdown, objective),
+                    artifact: None,
+                })
             } else {
-                Ok(clip_text(&markdown, MAX_OUTPUT_BYTES))
+                Ok(ToolExecution {
+                    result: clip_text(&markdown, MAX_OUTPUT_BYTES),
+                    artifact: None,
+                })
             }
         })
     }

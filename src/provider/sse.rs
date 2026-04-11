@@ -23,7 +23,6 @@ pub struct StreamInterrupted(pub String);
 /// A parsed SSE event with type and JSON data.
 #[derive(Debug, Clone)]
 pub struct SseEvent {
-    #[allow(dead_code)]
     pub event_type: String,
     pub data: serde_json::Value,
 }
@@ -153,13 +152,17 @@ impl SseEventStream {
 
 /// Build and POST an SSE request, returning a pull-based event stream.
 ///
-/// The HTTP handshake (and any transient-failure retries) happen before
-/// return; by the time the caller gets a stream the response headers have
-/// been received and streaming has begun. Events are parsed and forwarded
-/// on a background task that honors both consumer backpressure and the
-/// cancellation token.
+/// `account_label` identifies which pooled account the request is bound to;
+/// the retry layer reports rate-limit events (429) and usage snapshots back
+/// to the pool under that label so the /accounts screen and failover logic
+/// stay in sync. The HTTP handshake (and any transient-failure retries)
+/// happen before return; by the time the caller gets a stream the response
+/// headers have been received and streaming has begun. Events are parsed
+/// and forwarded on a background task that honors both consumer
+/// backpressure and the cancellation token.
 pub async fn post_sse(
     provider: &str,
+    account_label: &str,
     url: &str,
     headers: &[(&str, &str)],
     body: &serde_json::Value,
@@ -169,18 +172,21 @@ pub async fn post_sse(
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
         .build()?;
-    let response = crate::provider::retry::send_with_retry(provider, tx, cancel, || {
-        let mut req = client
-            .post(url)
-            .header("Content-Type", "application/json")
-            .json(body);
+    let response =
+        crate::provider::retry::send_with_retry(provider, account_label, tx, cancel, || {
+            let mut req = client
+                .post(url)
+                .header("Accept", "text/event-stream")
+                .header("Cache-Control", "no-cache")
+                .header("Content-Type", "application/json")
+                .json(body);
 
-        for (k, v) in headers {
-            req = req.header(*k, *v);
-        }
-        req.send()
-    })
-    .await?;
+            for (k, v) in headers {
+                req = req.header(*k, *v);
+            }
+            req.send()
+        })
+        .await?;
 
     let (event_tx, event_rx) = mpsc::channel::<Result<SseEvent>>(SSE_EVENT_CHANNEL_CAPACITY);
     let saw_done = Arc::new(AtomicBool::new(false));

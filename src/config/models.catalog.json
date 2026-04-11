@@ -1,0 +1,93 @@
+[
+  {
+    "id": "claude-haiku-4-5-20251001",
+    "display_name": "Claude Haiku 4.5",
+    "source": "anthropic",
+    "context_window": 200000,
+    "max_output_tokens": 64000
+  },
+  {
+    "id": "claude-sonnet-4-6",
+    "display_name": "Claude Sonnet 4.6",
+    "source": "anthropic",
+    "context_window": 1000000,
+    "max_output_tokens": 64000
+  },
+  {
+    "id": "claude-opus-4-6",
+    "display_name": "Claude Opus 4.6",
+    "source": "anthropic",
+    "context_window": 1000000,
+    "max_output_tokens": 128000
+  },
+  {
+    "id": "claude-sonnet-4-5-20250929",
+    "display_name": "Claude Sonnet 4.5",
+    "source": "anthropic",
+    "context_window": 200000,
+    "max_output_tokens": 64000
+  },
+  {
+    "id": "claude-opus-4-5-20251101",
+    "display_name": "Claude Opus 4.5",
+    "source": "anthropic",
+    "context_window": 200000,
+    "max_output_tokens": 64000
+  },
+  {
+    "id": "claude-opus-4-1-20250805",
+    "display_name": "Claude Opus 4.1",
+    "source": "anthropic",
+    "context_window": 200000,
+    "max_output_tokens": 32000
+  },
+  {
+    "id": "claude-opus-4-20250514",
+    "display_name": "Claude Opus 4",
+    "source": "anthropic",
+    "context_window": 200000,
+    "max_output_tokens": 32000
+  },
+  {
+    "id": "claude-sonnet-4-20250514",
+    "display_name": "Claude Sonnet 4",
+    "source": "anthropic",
+    "context_window": 200000,
+    "max_output_tokens": 64000
+  },
+  {
+    "id": "claude-3-haiku-20240307",
+    "display_name": "Claude 3 Haiku",
+    "source": "anthropic",
+    "context_window": 200000,
+    "max_output_tokens": 4096
+  },
+  {
+    "id": "gpt-5.4",
+    "display_name": "GPT-5.4",
+    "source": "codex",
+    "context_window": 1000000,
+    "max_output_tokens": 128000
+  },
+  {
+    "id": "gpt-5.4-mini",
+    "display_name": "GPT-5.4 mini",
+    "source": "codex",
+    "context_window": 400000,
+    "max_output_tokens": 128000
+  },
+  {
+    "id": "gpt-5-mini",
+    "display_name": "GPT-5 mini",
+    "source": "codex",
+    "context_window": 400000,
+    "max_output_tokens": 128000
+  },
+  {
+    "id": "codex-mini-latest",
+    "display_name": "Codex mini",
+    "source": "codex",
+    "context_window": 200000,
+    "max_output_tokens": 100000
+  }
+]

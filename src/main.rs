@@ -87,6 +87,51 @@ async fn main() {
                 }
             }
         }
+        Some("login") => {
+            let provider = match args.get(2).map(|s| s.as_str()) {
+                Some("anthropic") | Some("claude") | None => config::auth::AuthProvider::Anthropic,
+                Some("openai") | Some("codex") => config::auth::AuthProvider::OpenAI,
+                Some(other) => {
+                    eprintln!("unknown provider: {other}\nusage: luma login [anthropic|openai]");
+                    std::process::exit(1);
+                }
+            };
+            match config::auth::login(provider).await {
+                Ok(outcome) => {
+                    let who = outcome.email.as_deref().unwrap_or(outcome.label.as_str());
+                    println!(
+                        "signed in as {who} ({}) · provider: {}",
+                        outcome.label,
+                        outcome.provider.as_str()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("login failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some("accounts") => {
+            let accounts = config::auth::list_accounts();
+            if accounts.is_empty() {
+                println!("no accounts · run 'luma login' to add one");
+            } else {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                for a in accounts {
+                    let status = match a.health {
+                        config::auth::AccountHealth::Ok => "ok",
+                        config::auth::AccountHealth::Cooldown { .. } => "cooling",
+                        config::auth::AccountHealth::NeedsRelogin => "re-login",
+                    };
+                    let email = a.email.as_deref().unwrap_or("-");
+                    println!("  {}  {}  {}", a.label, status, email);
+                }
+                let _ = now; // used above via Cooldown pattern if needed later
+            }
+        }
         Some("update") => {
             if let Err(e) = self_update() {
                 eprintln!("update failed: {e}");
@@ -96,7 +141,7 @@ async fn main() {
         Some("version" | "--version" | "-v") => println!("luma {}", env!("CARGO_PKG_VERSION")),
         Some("help" | "--help" | "-h") => {
             println!(
-                "luma - lightweight coding agent\n\nusage:\n  luma              start TUI\n  luma sync         sync models\n  luma auth         show auth\n  luma update       update to latest\n  luma version      version"
+                "luma - lightweight coding agent\n\nusage:\n  luma                     start TUI\n  luma sync                sync models\n  luma auth                show resolved auth per provider\n  luma login [provider]    add an account to the pool (anthropic|openai)\n  luma accounts            list accounts in the pool\n  luma update              update to latest\n  luma version             show version"
             );
         }
         Some(unknown) => {

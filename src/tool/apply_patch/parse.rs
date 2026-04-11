@@ -2,6 +2,8 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
+use crate::core::types::FileOp;
+
 #[derive(Debug, Clone)]
 pub enum Hunk {
     Add {
@@ -16,6 +18,29 @@ pub enum Hunk {
         move_to: Option<PathBuf>,
         chunks: Vec<Chunk>,
     },
+}
+
+impl Hunk {
+    pub fn path(&self) -> &PathBuf {
+        match self {
+            Hunk::Add { path, .. } | Hunk::Delete { path } | Hunk::Update { path, .. } => path,
+        }
+    }
+
+    pub fn operation(&self) -> FileOp {
+        match self {
+            Hunk::Add { .. } => FileOp::Add,
+            Hunk::Delete { .. } => FileOp::Delete,
+            Hunk::Update {
+                path,
+                move_to: Some(_),
+                ..
+            } => FileOp::Move {
+                from: path.display().to_string(),
+            },
+            Hunk::Update { .. } => FileOp::Update,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +215,15 @@ pub fn seek_context(lines: &[String], context: &str, start: usize) -> Option<usi
             return Some(i);
         }
     }
+    // Collapse internal whitespace so wrapped / padded context like
+    // `fn                  lines_rendering() {` can still match
+    // `fn lines_rendering() {` in the file.
+    let collapsed_ctx = collapse_ws(&norm_ctx);
+    for (i, line) in lines.iter().enumerate().skip(start) {
+        if collapse_ws(&normalise(line)).contains(&collapsed_ctx) {
+            return Some(i);
+        }
+    }
     None
 }
 
@@ -259,6 +293,10 @@ fn normalise(s: &str) -> String {
             other => other,
         })
         .collect()
+}
+
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -366,6 +404,18 @@ mod tests {
         assert_eq!(seek_context(&lines, "fn second()", 0), Some(4));
         assert_eq!(seek_context(&lines, "fn first()", 0), Some(0));
         assert_eq!(seek_context(&lines, "fn nonexistent()", 0), None);
+    }
+
+    #[test]
+    fn seek_context_collapses_internal_whitespace() {
+        let lines: Vec<String> = vec!["fn lines_rendering() {", "}"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            seek_context(&lines, "fn                  lines_rendering() {", 0),
+            Some(0)
+        );
     }
 
     #[test]

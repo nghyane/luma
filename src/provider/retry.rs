@@ -1,3 +1,4 @@
+use crate::config::auth::{self, UsageSnapshot};
 use crate::event::Event;
 use crate::event_bus::Sender as EventSender;
 use anyhow::{Result, bail};
@@ -7,6 +8,24 @@ use tokio_util::sync::CancellationToken;
 const MAX_RETRIES: u8 = 4;
 const MAX_RETRY_DELAY_SECS: u64 = 30;
 const OPENAI_RESET_HEADERS: &[&str] = &["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"];
+
+/// Typed error for provider-side rate limiting (HTTP 429).
+///
+/// Unlike transient 5xx failures which are retried in place, a 429 means
+/// the backend has flagged this specific account. We bubble this up as a
+/// typed error so the turn-level failover loop can mark the account on
+/// cooldown and route the next request to another account in the pool.
+#[derive(Debug, thiserror::Error)]
+#[error("{provider} rate limited (429): retry after {retry_after_secs}s")]
+pub struct ProviderRateLimited {
+    pub provider: String,
+    pub label: String,
+    pub retry_after_secs: u64,
+    /// `true` when the backend returned a hard quota / billing error —
+    /// switching accounts may still help (different account), but retrying
+    /// the *same* account won't.
+    pub hard_quota: bool,
+}
 
 /// Format provider HTTP errors with clearer guidance for TUI.
 pub fn format_http_error(provider: &str, status: reqwest::StatusCode, msg: &str) -> String {
@@ -197,9 +216,90 @@ fn extract_error_message(body: &str) -> String {
         .unwrap_or_else(|| body[..body.len().min(200)].to_owned())
 }
 
+/// Parse provider rate-limit headers into a normalized `UsageSnapshot`.
+///
+/// Supports Anthropic (`anthropic-ratelimit-*`) and OpenAI/Codex
+/// (`x-ratelimit-*`). Unknown providers return an empty snapshot. Reset
+/// values are normalized to a Unix timestamp (seconds).
+pub fn parse_rate_limit_headers(
+    provider: &str,
+    headers: &reqwest::header::HeaderMap,
+) -> UsageSnapshot {
+    let mut snap = UsageSnapshot::default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    snap.updated_at = now;
+
+    let get_u64 = |name: &str| -> Option<u64> {
+        headers.get(name)?.to_str().ok()?.trim().parse::<u64>().ok()
+    };
+
+    match provider {
+        "claude" | "anthropic" => {
+            snap.requests_limit = get_u64("anthropic-ratelimit-requests-limit");
+            snap.requests_remaining = get_u64("anthropic-ratelimit-requests-remaining");
+            snap.tokens_limit = get_u64("anthropic-ratelimit-tokens-limit");
+            snap.tokens_remaining = get_u64("anthropic-ratelimit-tokens-remaining");
+            // Anthropic uses HTTP-date on reset headers. Prefer the soonest
+            // of the two so display and cooldown reflect the earliest wakeup.
+            let requests_reset = headers
+                .get("anthropic-ratelimit-requests-reset")
+                .and_then(|v| v.to_str().ok())
+                .and_then(retry_after_http_date_secs)
+                .map(|secs| now + secs);
+            let tokens_reset = headers
+                .get("anthropic-ratelimit-tokens-reset")
+                .and_then(|v| v.to_str().ok())
+                .and_then(retry_after_http_date_secs)
+                .map(|secs| now + secs);
+            snap.reset_at = match (requests_reset, tokens_reset) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+        }
+        "openai" | "codex" => {
+            snap.requests_limit = get_u64("x-ratelimit-limit-requests");
+            snap.requests_remaining = get_u64("x-ratelimit-remaining-requests");
+            snap.tokens_limit = get_u64("x-ratelimit-limit-tokens");
+            snap.tokens_remaining = get_u64("x-ratelimit-remaining-tokens");
+            let requests_reset = headers
+                .get("x-ratelimit-reset-requests")
+                .and_then(|v| v.to_str().ok())
+                .and_then(parse_openai_reset_value)
+                .map(|secs| now + secs);
+            let tokens_reset = headers
+                .get("x-ratelimit-reset-tokens")
+                .and_then(|v| v.to_str().ok())
+                .and_then(parse_openai_reset_value)
+                .map(|secs| now + secs);
+            snap.reset_at = match (requests_reset, tokens_reset) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+        }
+        _ => {}
+    }
+
+    snap
+}
+
 /// Send an HTTP request with retry/backoff for transient provider errors.
+///
+/// 5xx / 529 responses are retried in place with exponential backoff. 429
+/// responses are *not* retried — instead they surface as the typed
+/// [`ProviderRateLimited`] error so the turn-level loop can fail over to
+/// another account in the pool. On a successful response, rate-limit
+/// headers are parsed and reported back to the pool via
+/// `auth::record_usage` for display on the /accounts screen.
 pub async fn send_with_retry<F, Fut>(
     provider: &str,
+    account_label: &str,
     tx: &EventSender,
     cancel: &CancellationToken,
     mut send: F,
@@ -211,29 +311,47 @@ where
     for attempt in 1..=MAX_RETRIES {
         let resp = match send().await {
             Ok(r) => r,
-            Err(e) => {
-                bail!(format_network_error(&e));
-            }
+            Err(e) => bail!(format_network_error(&e)),
         };
+
         if resp.status().is_success() {
+            // Record usage so the /accounts screen stays fresh. We do this
+            // before returning the response because headers are still
+            // available; the body is consumed later by the SSE stream.
+            let snapshot = parse_rate_limit_headers(provider, resp.headers());
+            if !snapshot_is_empty(&snapshot) {
+                auth::record_usage(account_label, snapshot);
+            }
             return Ok(resp);
         }
 
         let status = resp.status();
         let retry_after = retry_after_secs(resp.headers())
             .or_else(|| provider_reset_secs(provider, resp.headers()));
+
+        // 429: always bubble as a typed error so the pool can route around
+        // this account. No in-place retry — sleeping on a single account
+        // when the pool has other accounts available is wasteful.
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let body = resp.text().await.unwrap_or_default();
+            let msg = extract_error_message(&body);
+            return Err(ProviderRateLimited {
+                provider: provider.to_owned(),
+                label: account_label.to_owned(),
+                retry_after_secs: retry_after.unwrap_or(60),
+                hard_quota: is_hard_quota_error(&msg),
+            }
+            .into());
+        }
+
         let body = resp.text().await.unwrap_or_default();
         let msg = extract_error_message(&body);
-        let retryable = status == reqwest::StatusCode::TOO_MANY_REQUESTS
-            || status == reqwest::StatusCode::BAD_GATEWAY
+        let retryable = status == reqwest::StatusCode::BAD_GATEWAY
             || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
             || status == reqwest::StatusCode::GATEWAY_TIMEOUT
             || status.as_u16() == 529;
 
-        if !retryable
-            || attempt == MAX_RETRIES
-            || (status == reqwest::StatusCode::TOO_MANY_REQUESTS && is_hard_quota_error(&msg))
-        {
+        if !retryable || attempt == MAX_RETRIES {
             bail!(format_http_error(provider, status, &msg));
         }
 
@@ -247,6 +365,14 @@ where
         }
     }
     bail!("request failed before stream start")
+}
+
+fn snapshot_is_empty(s: &UsageSnapshot) -> bool {
+    s.requests_remaining.is_none()
+        && s.requests_limit.is_none()
+        && s.tokens_remaining.is_none()
+        && s.tokens_limit.is_none()
+        && s.reset_at.is_none()
 }
 
 #[cfg(test)]
@@ -319,6 +445,76 @@ mod tests {
         assert_eq!(provider_reset_secs("openai", &headers), Some(9));
         assert_eq!(provider_reset_secs("codex", &headers), Some(9));
         assert_eq!(provider_reset_secs("claude", &headers), None);
+    }
+
+    #[test]
+    fn parses_anthropic_rate_limit_headers_into_snapshot() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "anthropic-ratelimit-requests-limit",
+            "1000".parse().unwrap(),
+        );
+        headers.insert(
+            "anthropic-ratelimit-requests-remaining",
+            "847".parse().unwrap(),
+        );
+        headers.insert("anthropic-ratelimit-tokens-limit", "50000".parse().unwrap());
+        headers.insert(
+            "anthropic-ratelimit-tokens-remaining",
+            "42000".parse().unwrap(),
+        );
+        let snap = parse_rate_limit_headers("claude", &headers);
+        assert_eq!(snap.requests_limit, Some(1000));
+        assert_eq!(snap.requests_remaining, Some(847));
+        assert_eq!(snap.tokens_limit, Some(50000));
+        assert_eq!(snap.tokens_remaining, Some(42000));
+        assert!(snap.updated_at > 0);
+    }
+
+    #[test]
+    fn parses_openai_rate_limit_headers_into_snapshot() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-limit-requests", "5000".parse().unwrap());
+        headers.insert("x-ratelimit-remaining-requests", "4200".parse().unwrap());
+        headers.insert("x-ratelimit-limit-tokens", "200000".parse().unwrap());
+        headers.insert("x-ratelimit-remaining-tokens", "180000".parse().unwrap());
+        headers.insert("x-ratelimit-reset-requests", "30s".parse().unwrap());
+        let snap = parse_rate_limit_headers("openai", &headers);
+        assert_eq!(snap.requests_limit, Some(5000));
+        assert_eq!(snap.requests_remaining, Some(4200));
+        assert_eq!(snap.tokens_limit, Some(200000));
+        assert_eq!(snap.tokens_remaining, Some(180000));
+        // reset_at is now + 30s; assert it's within a reasonable band.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let reset = snap.reset_at.expect("reset_at parsed");
+        assert!(reset >= now + 28 && reset <= now + 32);
+    }
+
+    #[test]
+    fn unknown_provider_returns_empty_snapshot() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-remaining-requests", "100".parse().unwrap());
+        let snap = parse_rate_limit_headers("mystery", &headers);
+        assert!(snap.requests_remaining.is_none());
+        assert!(snap.tokens_remaining.is_none());
+    }
+
+    #[test]
+    fn provider_rate_limited_error_carries_label_and_retry_after() {
+        let err = ProviderRateLimited {
+            provider: "claude".into(),
+            label: "nghia@gmail".into(),
+            retry_after_secs: 42,
+            hard_quota: false,
+        };
+        assert_eq!(err.label, "nghia@gmail");
+        assert_eq!(err.retry_after_secs, 42);
+        let display = err.to_string();
+        assert!(display.contains("claude"));
+        assert!(display.contains("42s"));
     }
 
     fn format_http_date(secs: i64) -> String {

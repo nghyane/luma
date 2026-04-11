@@ -16,16 +16,18 @@ pub struct OpenAIProvider {
     max_tokens: u32,
     base_url: String,
     api_key: String,
+    account_label: String,
 }
 
 impl OpenAIProvider {
-    /// Create from model name and API key.
-    pub fn new(model: &str, api_key: &str) -> Self {
+    /// Create from model name, API key, and pool account label.
+    pub fn new(model: &str, api_key: &str, account_label: &str) -> Self {
         Self {
             model: model.to_owned(),
             max_tokens: crate::provider::claude::DEFAULT_MAX_TOKENS,
             base_url: BASE_URL.to_owned(),
             api_key: api_key.to_owned(),
+            account_label: account_label.to_owned(),
         }
     }
 }
@@ -90,6 +92,7 @@ impl Provider for OpenAIProvider {
 
             let mut stream = post_sse(
                 "openai",
+                &self.account_label,
                 &format!("{}/chat/completions", self.base_url),
                 &headers,
                 &body,
