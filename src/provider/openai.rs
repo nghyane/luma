@@ -1,7 +1,7 @@
 /// OpenAI-compatible chat completions provider with SSE streaming.
 use crate::core::provider::{Provider, StopReason, StreamRequest, StreamResponse};
 use crate::core::types::{
-    ContentBlock, Message, Role, ThinkingLevel, ToolCall, ToolCallFunction, ToolSchema, Usage,
+    ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage,
 };
 use crate::event::Event;
 use crate::provider::sse::post_sse;
@@ -176,24 +176,32 @@ impl Provider for OpenAIProvider {
                 .into());
             }
 
-            let tool_calls: Vec<ToolCall> = tool_map
-                .into_values()
-                .map(|(id, name, args)| ToolCall {
-                    id,
-                    r#type: "function".into(),
-                    function: ToolCallFunction {
-                        name,
-                        arguments: args,
-                    },
-                })
-                .collect();
-
-            let mut msg = Message::assistant(text);
-            if !tool_calls.is_empty() {
-                msg.tool_calls = Some(tool_calls);
+            // Build the assistant message content in a single ordered array:
+            // leading text (if any), then tool_use blocks by ascending index.
+            // OpenAI Chat Completions streams text and tool_calls in parallel,
+            // but the unified `Vec<ContentBlock>` model only stores document
+            // order — we don't have per-token interleaving info, so text
+            // first then tools is the closest faithful reconstruction.
+            let mut content: Vec<ContentBlock> = Vec::new();
+            if !text.is_empty() {
+                content.push(ContentBlock::Text { text });
             }
+            let mut sorted_tools: Vec<_> = tool_map.into_iter().collect();
+            sorted_tools.sort_by_key(|(idx, _)| *idx);
+            for (_, (id, name, args)) in sorted_tools {
+                let input: serde_json::Value = if args.is_empty() {
+                    serde_json::json!({})
+                } else {
+                    serde_json::from_str(&args).unwrap_or_else(|_| serde_json::json!({}))
+                };
+                content.push(ContentBlock::ToolUse { id, name, input });
+            }
+
             Ok(StreamResponse {
-                message: msg,
+                message: Message {
+                    role: Role::Assistant,
+                    content,
+                },
                 usage,
                 stop_reason: parse_finish_reason(&finish_reason),
             })
@@ -215,11 +223,36 @@ fn to_api_messages(
     messages: &[Message],
     resolve: &crate::core::provider::ImageResolver,
 ) -> Vec<serde_json::Value> {
-    messages
-        .iter()
-        .map(|msg| match msg.role {
-            Role::System => serde_json::json!({"role": "system", "content": msg.text()}),
+    let mut out = Vec::new();
+    for msg in messages {
+        match msg.role {
+            Role::System => {
+                out.push(serde_json::json!({"role": "system", "content": msg.text()}));
+            }
             Role::User => {
+                // Tool results on user messages → one `{role:"tool"}` entry
+                // per block (OpenAI wire format — no nesting).
+                let mut had_tool_result = false;
+                for block in &msg.content {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } = block
+                    {
+                        out.push(serde_json::json!({
+                            "role": "tool",
+                            "content": content,
+                            "tool_call_id": tool_use_id,
+                        }));
+                        had_tool_result = true;
+                    }
+                }
+                if had_tool_result {
+                    continue;
+                }
+
+                // Plain user message — text + images.
                 if msg.has_images() {
                     let content: Vec<serde_json::Value> = msg
                         .content
@@ -237,35 +270,50 @@ fn to_api_messages(
                                 }
                                 Some(serde_json::json!({
                                     "type": "image_url",
-                                    "image_url": {"url": format!("data:{media_type};base64,{data}")}
+                                    "image_url": {
+                                        "url": format!("data:{media_type};base64,{data}")
+                                    }
                                 }))
                             }
                             _ => None,
                         })
                         .collect();
-                    serde_json::json!({"role": "user", "content": content})
+                    out.push(serde_json::json!({"role": "user", "content": content}));
                 } else {
-                    serde_json::json!({"role": "user", "content": msg.text()})
+                    out.push(serde_json::json!({"role": "user", "content": msg.text()}));
                 }
             }
             Role::Assistant => {
-                let mut v = serde_json::json!({"role": "assistant", "content": msg.text()});
-                if let Some(tcs) = &msg.tool_calls {
-                    let api_tcs: Vec<_> = tcs.iter().map(|tc| serde_json::json!({
-                        "id": tc.id, "type": "function",
-                        "function": {"name": tc.function.name, "arguments": tc.function.arguments}
-                    })).collect();
-                    v["tool_calls"] = api_tcs.into();
+                // Flatten: text blocks concatenated, tool_use blocks mapped
+                // to the OpenAI `tool_calls` array. Thinking / redacted
+                // thinking are intentionally dropped — OpenAI chat
+                // completions doesn't understand them.
+                let text = msg.text();
+                let tool_calls: Vec<serde_json::Value> = msg
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolUse { id, name, input } => Some(serde_json::json!({
+                            "id": id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": serde_json::to_string(input).unwrap_or_default(),
+                            }
+                        })),
+                        _ => None,
+                    })
+                    .collect();
+
+                let mut v = serde_json::json!({"role": "assistant", "content": text});
+                if !tool_calls.is_empty() {
+                    v["tool_calls"] = tool_calls.into();
                 }
-                v
+                out.push(v);
             }
-            Role::Tool => serde_json::json!({
-                "role": "tool",
-                "content": msg.text(),
-                "tool_call_id": msg.tool_call_id.as_deref().unwrap_or("")
-            }),
-        })
-        .collect()
+        }
+    }
+    out
 }
 
 fn to_api_tools(tools: &[ToolSchema]) -> Vec<serde_json::Value> {

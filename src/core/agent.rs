@@ -90,8 +90,6 @@ async fn agent_loop(
                 session.messages.push(Message {
                     role: Role::User,
                     content: blocks,
-                    tool_call_id: None,
-                    tool_calls: None,
                 });
 
                 let turn_start = std::time::Instant::now();
@@ -167,41 +165,44 @@ async fn agent_loop(
 
 /// Ensure every `tool_use` in assistant messages has a matching `tool_result`.
 ///
-/// When a turn is aborted mid-execution, the assistant message with `tool_calls`
-/// may already be in the history but the corresponding `Tool` result messages
-/// may be missing (partially or fully). This violates the Claude API contract
-/// which requires a `tool_result` for every `tool_use` in the immediately
-/// following user/tool message(s).
+/// When a turn is aborted mid-execution, the assistant message with tool_use
+/// blocks may already be in the history but the corresponding tool_result
+/// blocks may be missing. This violates the Anthropic contract which
+/// requires a matching `tool_result` for every `tool_use` in the
+/// immediately following user message.
 ///
-/// This function scans from the end of the message list and fills in any
-/// missing tool_result messages with an "[aborted]" placeholder.
+/// Walks backwards to find the last assistant message with tool_use blocks
+/// and appends placeholder "[aborted]" tool_result blocks for any missing
+/// ids to a new (or existing) user message.
 fn fix_orphaned_tool_uses(messages: &mut Vec<Message>) {
-    // Walk backwards to find the last assistant message with tool_calls.
-    let Some(asst_idx) = messages.iter().rposition(|m| {
-        m.role == Role::Assistant && m.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty())
-    }) else {
+    use crate::core::types::ContentBlock;
+
+    let Some(asst_idx) = messages
+        .iter()
+        .rposition(|m| m.role == Role::Assistant && m.has_tool_use())
+    else {
         return;
     };
 
     let expected_ids: Vec<String> = messages[asst_idx]
-        .tool_calls
-        .as_ref()
-        .unwrap()
-        .iter()
-        .map(|tc| tc.id.clone())
+        .tool_uses()
+        .map(|(id, _, _)| id.to_owned())
         .collect();
 
-    // Collect tool_result ids that already exist after this assistant message.
+    // Collect tool_result ids from user messages after this assistant.
     let existing_ids: std::collections::HashSet<String> = messages[asst_idx + 1..]
         .iter()
-        .filter(|m| m.role == Role::Tool)
-        .filter_map(|m| m.tool_call_id.clone())
+        .filter(|m| m.role == Role::User)
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+            _ => None,
+        })
         .collect();
 
-    // Add placeholder results for any missing tool_use ids.
     for id in &expected_ids {
         if !existing_ids.contains(id) {
-            messages.push(Message::tool(id.clone(), "[aborted]"));
+            messages.push(Message::tool_result(id.clone(), "[aborted]"));
         }
     }
 }

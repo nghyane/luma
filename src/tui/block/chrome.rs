@@ -95,7 +95,9 @@ fn ensure_thinking_cache(state: &mut RenderState) -> &mut ThinkingCache {
 }
 
 /// Render content blocks into lines. Shared by prompt input and user bubble.
-/// Text → spans, Image → inline chip, Paste → inline chip.
+/// Text → spans, Image → inline chip, Paste → inline chip. The non-text
+/// variants (ToolUse / ToolResult / Thinking / RedactedThinking) never
+/// appear in prompt input or user bubbles and are ignored here.
 pub fn content_lines(content: &[crate::core::types::ContentBlock]) -> Vec<Line> {
     use crate::core::types::ContentBlock;
     let mut lines = Vec::new();
@@ -131,6 +133,12 @@ pub fn content_lines(content: &[crate::core::types::ContentBlock]) -> Vec<Line> 
                     palette::WARN,
                 ));
                 cur.push(Span::new(" ".to_owned(), palette::FG));
+            }
+            ContentBlock::ToolUse { .. }
+            | ContentBlock::ToolResult { .. }
+            | ContentBlock::Thinking { .. }
+            | ContentBlock::RedactedThinking { .. } => {
+                // Not a user-facing prompt block — skip.
             }
         }
     }

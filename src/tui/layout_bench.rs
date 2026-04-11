@@ -151,6 +151,8 @@ mod bench {
                             crate::core::types::ContentBlock::Text { text }
                             | crate::core::types::ContentBlock::Paste { text } => text.len(),
                             crate::core::types::ContentBlock::Image { .. } => 32,
+                            // Non-user variants never appear in a User block.
+                            _ => 0,
                         })
                         .sum::<usize>()
                         + 24
@@ -388,7 +390,7 @@ mod bench {
 
     // ── session save ──
     fn bench_session_save() {
-        use crate::core::types::{ContentBlock, Message, Role, ToolCall, ToolCallFunction};
+        use crate::core::types::{ContentBlock, Message, Role};
 
         println!("\n── session JSON save ──");
 
@@ -401,25 +403,21 @@ mod bench {
                     content: vec![ContentBlock::Text {
                         text: format!("Turn {i}: please help me debug this issue with my Rust code. I'm seeing a borrow checker error when I try to mutate a field while holding a reference to another field."),
                     }],
-                    tool_call_id: None,
-                    tool_calls: None,
                 });
                 msgs.push(Message {
                     role: Role::Assistant,
-                    content: vec![ContentBlock::Text {
-                        text: "Here's the analysis. The issue is that Rust's borrow checker doesn't allow you to have both a mutable and immutable reference simultaneously. You can split the struct or use interior mutability.".repeat(3),
-                    }],
-                    tool_call_id: None,
-                    tool_calls: Some(vec![ToolCall {
-                        id: format!("tc_{i}"),
-                        r#type: "function".into(),
-                        function: ToolCallFunction {
-                            name: "Read".into(),
-                            arguments: r#"{"path":"src/foo.rs"}"#.into(),
+                    content: vec![
+                        ContentBlock::Text {
+                            text: "Here's the analysis. The issue is that Rust's borrow checker doesn't allow you to have both a mutable and immutable reference simultaneously. You can split the struct or use interior mutability.".repeat(3),
                         },
-                    }]),
+                        ContentBlock::ToolUse {
+                            id: format!("tc_{i}"),
+                            name: "Read".into(),
+                            input: serde_json::json!({"path": "src/foo.rs"}),
+                        },
+                    ],
                 });
-                msgs.push(Message::tool(
+                msgs.push(Message::tool_result(
                     format!("tc_{i}"),
                     "file contents here\n".repeat(20),
                 ));

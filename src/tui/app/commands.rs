@@ -324,18 +324,11 @@ impl super::App {
                     if msg.has_text() {
                         self.doc.assistant_message(&msg.text());
                     }
-                    if let Some(tcs) = &msg.tool_calls {
-                        for tc in tcs {
-                            let args: serde_json::Value =
-                                serde_json::from_str(&tc.function.arguments)
-                                    .unwrap_or(serde_json::Value::Null);
-                            let summary =
-                                crate::core::agent::format_tool_summary(&tc.function.name, &args);
-                            self.doc.tool_history(&tc.function.name, &summary);
-                        }
+                    for (_, name, input) in msg.tool_uses() {
+                        let summary = crate::core::agent::format_tool_summary(name, input);
+                        self.doc.tool_history(name, &summary);
                     }
                 }
-                Role::Tool => {}
             }
         }
         if seen_user {

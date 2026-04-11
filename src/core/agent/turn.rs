@@ -3,7 +3,7 @@ use super::AgentConfig;
 use crate::core::provider::{Provider, StopReason, StreamResponse};
 use crate::core::registry::Registry;
 use crate::core::session::Session;
-use crate::core::types::{Message, ToolCall};
+use crate::core::types::{ContentBlock, Message, Role};
 use crate::event::Event;
 use crate::event_bus::Sender as EventSender;
 use crate::provider::claude::ESCALATED_MAX_TOKENS;
@@ -311,23 +311,41 @@ async fn run_turn(
             );
         }
 
-        let tool_calls = match &response.tool_calls {
-            Some(tcs) if !tcs.is_empty() => tcs.clone(),
-            _ => return Ok(()),
-        };
+        // Collect tool_use blocks in document order — required so that
+        // tool_result blocks on the next user message line up 1:1.
+        let tool_uses: Vec<ToolUseRef> = response
+            .tool_uses()
+            .map(|(id, name, input)| ToolUseRef {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                input: input.clone(),
+            })
+            .collect();
+        if tool_uses.is_empty() {
+            return Ok(());
+        }
 
-        let tool_results = execute_tools(&tool_calls, registry, tx, cancel.clone()).await;
+        let tool_results = execute_tools(&tool_uses, registry, tx, cancel.clone()).await;
         let aborted = cancel.is_cancelled();
 
-        // Always push tool results — even on abort, so LLM sees what happened
-        for (tc_id, result) in tool_results {
-            let mut truncated = result;
-            if truncated.len() > MAX_RESULT_LEN {
-                truncated.truncate(MAX_RESULT_LEN);
-                truncated.push_str("\n[truncated]");
+        // Push all tool_result blocks as a single user message — even on
+        // abort, so the model sees what happened on replay.
+        let mut result_blocks: Vec<ContentBlock> = Vec::with_capacity(tool_results.len());
+        for (id, mut text) in tool_results {
+            if text.len() > MAX_RESULT_LEN {
+                text.truncate(MAX_RESULT_LEN);
+                text.push_str("\n[truncated]");
             }
-            session.messages.push(Message::tool(tc_id, truncated));
+            result_blocks.push(ContentBlock::ToolResult {
+                tool_use_id: id,
+                content: text,
+                is_error: false,
+            });
         }
+        session.messages.push(Message {
+            role: Role::User,
+            content: result_blocks,
+        });
         // Mid-turn save: persist after tool results.
         session.save();
 
@@ -354,35 +372,42 @@ fn skill_name_from_read(tool_name: &str, args: &serde_json::Value) -> Option<Str
         .map(|n| n.to_string_lossy().into_owned())
 }
 
+/// Owned reference to a single tool_use request being executed. Held across
+/// the async tool boundary so `execute_tools` can borrow nothing from the
+/// session while the tool runs.
+#[derive(Clone)]
+pub struct ToolUseRef {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
 /// Execute a single tool call, streaming output events.
 async fn execute_one(
-    tc: &ToolCall,
+    tu: &ToolUseRef,
     registry: &Registry,
     tx: &EventSender,
     cancel: tokio_util::sync::CancellationToken,
 ) -> (String, String) {
-    let args: serde_json::Value = serde_json::from_str(&tc.function.arguments)
-        .unwrap_or(serde_json::Value::Object(serde_json::Map::default()));
+    let skill = skill_name_from_read(&tu.name, &tu.input);
 
-    let skill = skill_name_from_read(&tc.function.name, &args);
-
-    let result = match registry.get(&tc.function.name) {
+    let result = match registry.get(&tu.name) {
         Some(tool) => {
             if let Some(name) = &skill {
                 let _ = tx.send(Event::SkillStart(name.clone())).await;
             }
 
-            let summary = format_tool_summary(&tc.function.name, &args);
+            let summary = format_tool_summary(&tu.name, &tu.input);
             let _ = tx
                 .send(Event::ToolStart {
-                    name: tc.function.name.clone(),
+                    name: tu.name.clone(),
                     summary,
                 })
                 .await;
 
             let (output_tx, mut output_rx) = mpsc::channel::<String>(256);
             let tx_fwd = tx.clone();
-            let tool_name = tc.function.name.clone();
+            let tool_name = tu.name.clone();
             let fwd_handle = tokio::spawn(async move {
                 while let Some(chunk) = output_rx.recv().await {
                     let _ = tx_fwd
@@ -394,7 +419,7 @@ async fn execute_one(
                 }
             });
 
-            let res = tool.execute(args, output_tx, cancel).await;
+            let res = tool.execute(tu.input.clone(), output_tx, cancel).await;
             fwd_handle.await.ok();
 
             match res {
@@ -402,15 +427,15 @@ async fn execute_one(
                     if let Some(artifact) = exec.artifact {
                         let _ = tx
                             .send(Event::ToolArtifact {
-                                name: tc.function.name.clone(),
+                                name: tu.name.clone(),
                                 artifact: Box::new(artifact),
                             })
                             .await;
                     }
-                    let end_summary = format_tool_result(&tc.function.name, &exec.result);
+                    let end_summary = format_tool_result(&tu.name, &exec.result);
                     let _ = tx
                         .send(Event::ToolEnd {
-                            name: tc.function.name.clone(),
+                            name: tu.name.clone(),
                             summary: end_summary,
                         })
                         .await;
@@ -423,7 +448,7 @@ async fn execute_one(
                     let msg = format!("Error: {e}");
                     let _ = tx
                         .send(Event::ToolEnd {
-                            name: tc.function.name.clone(),
+                            name: tu.name.clone(),
                             summary: msg.clone(),
                         })
                         .await;
@@ -436,24 +461,24 @@ async fn execute_one(
                 }
             }
         }
-        None => format!("Unknown tool: {}", tc.function.name),
+        None => format!("Unknown tool: {}", tu.name),
     };
-    (tc.id.clone(), result)
+    (tu.id.clone(), result)
 }
 
 /// Execute tool calls — concurrent when multiple, preserving order.
 pub async fn execute_tools(
-    tool_calls: &[ToolCall],
+    tool_uses: &[ToolUseRef],
     registry: &Registry,
     tx: &EventSender,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Vec<(String, String)> {
-    if tool_calls.len() == 1 {
-        return vec![execute_one(&tool_calls[0], registry, tx, cancel).await];
+    if tool_uses.len() == 1 {
+        return vec![execute_one(&tool_uses[0], registry, tx, cancel).await];
     }
-    let futures: Vec<_> = tool_calls
+    let futures: Vec<_> = tool_uses
         .iter()
-        .map(|tc| execute_one(tc, registry, tx, cancel.clone()))
+        .map(|tu| execute_one(tu, registry, tx, cancel.clone()))
         .collect();
     futures::future::join_all(futures).await
 }
@@ -516,21 +541,15 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let calls = vec![
-            ToolCall {
+            ToolUseRef {
                 id: "tc_1".into(),
-                r#type: "function".into(),
-                function: crate::core::types::ToolCallFunction {
-                    name: "slow".into(),
-                    arguments: "{}".into(),
-                },
+                name: "slow".into(),
+                input: serde_json::json!({}),
             },
-            ToolCall {
+            ToolUseRef {
                 id: "tc_2".into(),
-                r#type: "function".into(),
-                function: crate::core::types::ToolCallFunction {
-                    name: "slow".into(),
-                    arguments: "{}".into(),
-                },
+                name: "slow".into(),
+                input: serde_json::json!({}),
             },
         ];
 

@@ -2,12 +2,48 @@
 use serde::{Deserialize, Serialize};
 
 /// A content block within a message.
+///
+/// Single heterogeneous array that matches Anthropic's wire format
+/// byte-for-byte (`text | image | tool_use | tool_result | thinking |
+/// redacted_thinking`). Order is preserved — required for interleaved
+/// thinking signature validation. Providers that speak a different wire
+/// shape (OpenAI, Codex) reconstruct their format from this one source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
+    /// Model-generated or user-provided text.
     Text { text: String },
-    Image { media_type: String, id: String },
+    /// Pasted text — rendered like `Text` but kept distinct so the TUI
+    /// can collapse long pastes without rewriting the original bytes.
     Paste { text: String },
+    /// Image attachment. `id` resolves to base64 data at send time via
+    /// the provider's `ImageResolver`.
+    Image { media_type: String, id: String },
+    /// Tool invocation requested by the model.
+    ToolUse {
+        id: String,
+        name: String,
+        #[serde(default)]
+        input: serde_json::Value,
+    },
+    /// Tool execution result sent back to the model.
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        is_error: bool,
+    },
+    /// Extended-thinking block with signature. Both fields must round-trip
+    /// verbatim on subsequent turns or the Anthropic backend rejects the
+    /// request with a signature-mismatch 400.
+    Thinking {
+        thinking: String,
+        #[serde(default)]
+        signature: String,
+    },
+    /// Opaque thinking block redacted by the backend's safety layer.
+    /// Must still be echoed back on later turns.
+    RedactedThinking { data: String },
 }
 
 /// A chat message in the conversation history.
@@ -15,20 +51,18 @@ pub enum ContentBlock {
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 impl Message {
     /// Concatenate all text + paste blocks into a single string.
+    ///
+    /// Used for display previews, token counting, and legacy consumers
+    /// that want a flat string view. Non-text blocks are skipped.
     pub fn text(&self) -> String {
         let mut out = String::new();
         for block in &self.content {
             let t = match block {
-                ContentBlock::Text { text } => text.as_str(),
-                ContentBlock::Paste { text } => text.as_str(),
+                ContentBlock::Text { text } | ContentBlock::Paste { text } => text.as_str(),
                 _ => continue,
             };
             if !out.is_empty() && !t.is_empty() {
@@ -44,8 +78,7 @@ impl Message {
         let mut out = String::new();
         for b in blocks {
             let t = match b {
-                ContentBlock::Text { text } => text.as_str(),
-                ContentBlock::Paste { text } => text.as_str(),
+                ContentBlock::Text { text } | ContentBlock::Paste { text } => text.as_str(),
                 _ => continue,
             };
             if !out.is_empty() && !t.is_empty() {
@@ -67,7 +100,7 @@ impl Message {
             .unwrap_or("")
     }
 
-    /// Whether there is any text content.
+    /// Whether any text block is non-empty.
     pub fn has_text(&self) -> bool {
         self.content.iter().any(|b| match b {
             ContentBlock::Text { text } | ContentBlock::Paste { text } => !text.is_empty(),
@@ -82,13 +115,28 @@ impl Message {
             .any(|b| matches!(b, ContentBlock::Image { .. }))
     }
 
+    /// Whether the message contains at least one `ToolUse` block.
+    pub fn has_tool_use(&self) -> bool {
+        self.content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+    }
+
+    /// Iterate over `ToolUse` blocks.
+    pub fn tool_uses(&self) -> impl Iterator<Item = (&str, &str, &serde_json::Value)> {
+        self.content.iter().filter_map(|b| match b {
+            ContentBlock::ToolUse { id, name, input } => {
+                Some((id.as_str(), name.as_str(), input))
+            }
+            _ => None,
+        })
+    }
+
     /// Create a text-only message.
     fn text_msg(role: Role, text: impl Into<String>) -> Self {
         Self {
             role,
             content: vec![ContentBlock::Text { text: text.into() }],
-            tool_call_id: None,
-            tool_calls: None,
         }
     }
 
@@ -103,45 +151,37 @@ impl Message {
         Self::text_msg(Role::System, text)
     }
 
-    /// Create an assistant message from text.
+    /// Create an assistant message from text. Test-only — the stream
+    /// layer builds assistant messages from `ContentBlock` vecs directly.
+    #[cfg(test)]
     pub fn assistant(text: impl Into<String>) -> Self {
         Self::text_msg(Role::Assistant, text)
     }
 
-    /// Create a tool result message.
-    pub fn tool(id: impl Into<String>, text: impl Into<String>) -> Self {
+    /// Create a user message carrying a single tool_result block.
+    ///
+    /// Tool results always ride on user messages in the Anthropic wire
+    /// format; `Role::Tool` is gone from the unified schema.
+    pub fn tool_result(id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
-            role: Role::Tool,
-            content: vec![ContentBlock::Text { text: text.into() }],
-            tool_call_id: Some(id.into()),
-            tool_calls: None,
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: id.into(),
+                content: content.into(),
+                is_error: false,
+            }],
         }
     }
 }
 
-/// Message role.
+/// Message role. `Tool` is gone — tool results are user messages carrying
+/// `ContentBlock::ToolResult` blocks, matching Anthropic's wire format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     System,
     User,
     Assistant,
-    Tool,
-}
-
-/// A tool invocation requested by the model.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall {
-    pub id: String,
-    pub r#type: String,
-    pub function: ToolCallFunction,
-}
-
-/// The function name and arguments of a tool call.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCallFunction {
-    pub name: String,
-    pub arguments: String,
 }
 
 /// JSON schema for tool parameters.
@@ -272,6 +312,7 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"role\":\"user\""));
         assert!(!json.contains("tool_call_id"));
+        assert!(!json.contains("tool_calls"));
     }
 
     #[test]
@@ -296,8 +337,6 @@ mod tests {
                     text: "world".into(),
                 },
             ],
-            tool_call_id: None,
-            tool_calls: None,
         };
         assert_eq!(msg.text(), "hello\nworld");
         assert!(msg.has_images());
@@ -325,9 +364,78 @@ mod tests {
         let a = Message::assistant("reply");
         assert_eq!(a.role, Role::Assistant);
 
-        let t = Message::tool("tc_1", "result");
-        assert_eq!(t.role, Role::Tool);
-        assert_eq!(t.tool_call_id.as_deref(), Some("tc_1"));
+        let t = Message::tool_result("tc_1", "result");
+        assert_eq!(t.role, Role::User);
+        match &t.content[0] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "tc_1");
+                assert_eq!(content, "result");
+                assert!(!is_error);
+            }
+            _ => panic!("expected ToolResult"),
+        }
+    }
+
+    #[test]
+    fn tool_use_blocks_roundtrip() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "calling tool".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "tc_1".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path": "/tmp/x"}),
+                },
+            ],
+        };
+        assert!(msg.has_tool_use());
+        let uses: Vec<_> = msg.tool_uses().collect();
+        assert_eq!(uses.len(), 1);
+        assert_eq!(uses[0].0, "tc_1");
+        assert_eq!(uses[0].1, "read");
+
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.content.len(), 2);
+        assert!(back.has_tool_use());
+    }
+
+    #[test]
+    fn thinking_block_roundtrip() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "reasoning...".into(),
+                    signature: "sig_abc".into(),
+                },
+                ContentBlock::Text {
+                    text: "answer".into(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"thinking\":\"reasoning...\""));
+        assert!(json.contains("\"signature\":\"sig_abc\""));
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.content.len(), 2);
+        match &back.content[0] {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                assert_eq!(thinking, "reasoning...");
+                assert_eq!(signature, "sig_abc");
+            }
+            _ => panic!("expected Thinking"),
+        }
     }
 
     #[test]

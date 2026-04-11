@@ -1,9 +1,7 @@
 /// Codex provider — OpenAI Responses API at chatgpt.com/backend-api/codex.
 use crate::config::auth::{CODEX_ORIGINATOR, codex_user_agent, resolve_installation_id};
 use crate::core::provider::{Provider, StopReason, StreamRequest, StreamResponse};
-use crate::core::types::{
-    Message, Role, ThinkingLevel, ToolCall, ToolCallFunction, ToolSchema, Usage,
-};
+use crate::core::types::{ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage};
 use crate::event::Event;
 use crate::event_bus::Sender as EventSender;
 use crate::provider::json_stream::{JsonStringExtractor, streamable_arg_for};
@@ -11,6 +9,16 @@ use anyhow::Result;
 use std::collections::BTreeMap;
 
 const CODEX_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
+
+/// Per-output-index tool-call accumulator used while the Codex Responses
+/// stream is in flight. Converted to `ContentBlock::ToolUse` at commit time.
+#[derive(Default, Clone, Debug)]
+struct PendingTool {
+    id: String,
+    name: String,
+    /// Raw accumulated argument bytes — parsed once on commit.
+    arguments: String,
+}
 
 /// Codex provider using the Responses API.
 pub struct CodexProvider {
@@ -168,7 +176,7 @@ impl Provider for CodexProvider {
 
 struct CodexStreamState {
     text: String,
-    tool_calls: BTreeMap<u64, ToolCall>,
+    tool_calls: BTreeMap<u64, PendingTool>,
     arg_extractors: BTreeMap<u64, JsonStringExtractor>,
     extractor_probed: std::collections::BTreeSet<u64>,
     usage: Usage,
@@ -248,26 +256,19 @@ async fn run_codex_stream_loop(
                 if let Some(idx) = event["output_index"].as_u64()
                     && let Some(delta) = event["delta"].as_str()
                 {
-                    let entry = state.tool_calls.entry(idx).or_insert_with(|| ToolCall {
-                        id: String::new(),
-                        r#type: "function".into(),
-                        function: ToolCallFunction {
-                            name: String::new(),
-                            arguments: String::new(),
-                        },
-                    });
-                    entry.function.arguments.push_str(delta);
+                    let entry = state.tool_calls.entry(idx).or_default();
+                    entry.arguments.push_str(delta);
 
-                    if !state.extractor_probed.contains(&idx) && !entry.function.name.is_empty() {
+                    if !state.extractor_probed.contains(&idx) && !entry.name.is_empty() {
                         state.extractor_probed.insert(idx);
-                        if let Some(field) = streamable_arg_for(tools, &entry.function.name) {
+                        if let Some(field) = streamable_arg_for(tools, &entry.name) {
                             state
                                 .arg_extractors
                                 .insert(idx, JsonStringExtractor::new(field));
                         }
                     }
 
-                    let tool_name = entry.function.name.clone();
+                    let tool_name = entry.name.clone();
                     if let Some(ex) = state.arg_extractors.get_mut(&idx) {
                         let chunk = ex.feed(delta);
                         if !chunk.is_empty() {
@@ -367,14 +368,29 @@ async fn run_codex_stream_loop(
         .into());
     }
 
-    let mut msg = Message::assistant(state.text);
-    let tool_calls: Vec<_> = state
-        .tool_calls
-        .into_values()
-        .filter(|tc| !tc.id.is_empty() && !tc.function.name.is_empty())
-        .collect();
-    if !tool_calls.is_empty() {
-        msg.tool_calls = Some(tool_calls);
+    // Build ordered content: text first, then tool_use blocks by ascending
+    // output_index. Codex Responses streams text via `output_text.delta`
+    // and tool calls via `output_item.added` / function_call_arguments —
+    // per-token interleave isn't exposed, so this text-then-tools order
+    // is the closest faithful reconstruction.
+    let mut content: Vec<ContentBlock> = Vec::new();
+    if !state.text.is_empty() {
+        content.push(ContentBlock::Text { text: state.text });
+    }
+    for (_, tool) in state.tool_calls {
+        if tool.id.is_empty() || tool.name.is_empty() {
+            continue;
+        }
+        let input: serde_json::Value = if tool.arguments.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&tool.arguments).unwrap_or_else(|_| serde_json::json!({}))
+        };
+        content.push(ContentBlock::ToolUse {
+            id: tool.id,
+            name: tool.name,
+            input,
+        });
     }
 
     let stop_reason = if state.incomplete_reason.is_empty() {
@@ -389,7 +405,10 @@ async fn run_codex_stream_loop(
     };
 
     Ok(StreamResponse {
-        message: msg,
+        message: Message {
+            role: Role::Assistant,
+            content,
+        },
         usage: state.usage,
         stop_reason,
     })
@@ -418,7 +437,7 @@ async fn record_usage(usage_val: &serde_json::Value, usage: &mut Usage, tx: &Eve
 }
 
 fn maybe_store_tool_call(
-    tool_calls: &mut BTreeMap<u64, ToolCall>,
+    tool_calls: &mut BTreeMap<u64, PendingTool>,
     output_index: Option<u64>,
     item: &serde_json::Value,
 ) {
@@ -426,14 +445,7 @@ fn maybe_store_tool_call(
         return;
     }
     let Some(idx) = output_index else { return };
-    let entry = tool_calls.entry(idx).or_insert_with(|| ToolCall {
-        id: String::new(),
-        r#type: "function".into(),
-        function: ToolCallFunction {
-            name: String::new(),
-            arguments: String::new(),
-        },
-    });
+    let entry = tool_calls.entry(idx).or_default();
     if let Some(call_id) = item["call_id"].as_str()
         && !call_id.is_empty()
     {
@@ -442,13 +454,13 @@ fn maybe_store_tool_call(
     if let Some(name) = item["name"].as_str()
         && !name.is_empty()
     {
-        entry.function.name = name.to_owned();
+        entry.name = name.to_owned();
     }
     if let Some(arguments) = item["arguments"].as_str()
         && !arguments.is_empty()
-        && entry.function.arguments.is_empty()
+        && entry.arguments.is_empty()
     {
-        entry.function.arguments = arguments.to_owned();
+        entry.arguments = arguments.to_owned();
     }
 }
 
@@ -469,31 +481,61 @@ fn build_input(messages: &[Message]) -> Vec<serde_json::Value> {
         }
         match msg.role {
             Role::User => {
-                input.push(serde_json::json!({"role": "user", "content": msg.text()}));
-            }
-            Role::Assistant => {
-                if let Some(tcs) = &msg.tool_calls {
-                    for tc in tcs {
+                // Tool results on a user message become `function_call_output`
+                // items — one per result block, unnested.
+                let mut had_result = false;
+                for block in &msg.content {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } = block
+                    {
                         input.push(serde_json::json!({
-                            "type": "function_call",
-                            "name": tc.function.name,
-                            "call_id": tc.id,
-                            "arguments": tc.function.arguments,
+                            "type": "function_call_output",
+                            "call_id": tool_use_id,
+                            "output": content,
                         }));
+                        had_result = true;
                     }
                 }
-                if msg.has_text() {
-                    input.push(serde_json::json!({"role": "assistant", "content": msg.text()}));
+                if had_result {
+                    continue;
                 }
-            }
-            Role::Tool => {
+                // Plain user message — Codex Responses API wants a flat string
+                // body, images are delivered via a different path.
                 input.push(serde_json::json!({
-                    "type": "function_call_output",
-                    "call_id": msg.tool_call_id.as_deref().unwrap_or(""),
-                    "output": msg.text(),
+                    "role": "user",
+                    "content": msg.text(),
                 }));
             }
-            _ => {}
+            Role::Assistant => {
+                // Walk content blocks in order: ToolUse → function_call
+                // item; Text → assistant content. Thinking blocks aren't
+                // representable on the Codex wire and are dropped.
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::ToolUse { id, name, input: args } => {
+                            input.push(serde_json::json!({
+                                "type": "function_call",
+                                "name": name,
+                                "call_id": id,
+                                "arguments": serde_json::to_string(args).unwrap_or_default(),
+                            }));
+                        }
+                        ContentBlock::Text { text } | ContentBlock::Paste { text }
+                            if !text.is_empty() =>
+                        {
+                            input.push(serde_json::json!({
+                                "role": "assistant",
+                                "content": text,
+                            }));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Role::System => unreachable!(),
         }
     }
     input
@@ -533,14 +575,11 @@ mod tests {
 
         maybe_store_tool_call(&mut tool_calls, Some(0), &item);
         let entry = tool_calls.get_mut(&0).unwrap();
-        entry
-            .function
-            .arguments
-            .push_str("{\"command\":\"git status\"}");
+        entry.arguments.push_str("{\"command\":\"git status\"}");
 
         assert_eq!(entry.id, "call_1");
-        assert_eq!(entry.function.name, "exec_command");
-        assert_eq!(entry.function.arguments, "{\"command\":\"git status\"}");
+        assert_eq!(entry.name, "exec_command");
+        assert_eq!(entry.arguments, "{\"command\":\"git status\"}");
     }
 
     #[test]
@@ -559,7 +598,7 @@ mod tests {
 
         let entry = tool_calls.get(&1).unwrap();
         assert_eq!(entry.id, "call_2");
-        assert_eq!(entry.function.arguments, "{\"command\":\"pwd\"}");
+        assert_eq!(entry.arguments, "{\"command\":\"pwd\"}");
     }
 
     #[tokio::test]
@@ -658,9 +697,9 @@ mod tests {
             .await
             .unwrap();
 
-        let tool_calls = result.message.tool_calls.unwrap();
-        assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].function.name, "exec_command");
+        let tool_uses: Vec<_> = result.message.tool_uses().collect();
+        assert_eq!(tool_uses.len(), 1);
+        assert_eq!(tool_uses[0].1, "exec_command");
 
         let mut saw_selected = false;
         let mut saw_input = false;
