@@ -60,13 +60,20 @@ impl super::App {
 
         let cancel = CancellationToken::new();
         self.agent.cancel = Some(cancel.clone());
-        if let Some(agent_tx) = &self.agent.tx {
-            let _ = agent_tx.try_send(AgentCommand::Chat {
-                content,
-                files,
-                images,
-                cancel,
-            });
+        if let Some(agent_tx) = &self.agent.tx
+            && agent_tx
+                .try_send(AgentCommand::Chat {
+                    content,
+                    files,
+                    images,
+                    cancel,
+                })
+                .is_err()
+        {
+            self.agent.state = RunState::Idle;
+            self.agent.cancel = None;
+            self.ui.status.set_state(StatusState::Ready);
+            self.doc.error("internal: agent queue is busy");
         }
     }
 

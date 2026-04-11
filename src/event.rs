@@ -69,6 +69,10 @@ pub enum Event {
         max_attempts: u8,
     },
     Usage(Usage),
+    SessionLoaded {
+        session: Box<crate::core::session::Session>,
+        is_new: bool,
+    },
     AgentDone,
     AgentError(String),
 
@@ -112,13 +116,11 @@ pub enum AgentCommand {
         files: Vec<FileAttach>,
         cancel: tokio_util::sync::CancellationToken,
     },
-    /// Reset conversation (new thread). Clears all non-system messages.
-    Reset,
     /// Switch model (agent rebuilds provider with auth on next turn).
     SetModel { model_id: String, source: String },
     /// Update thinking level on current provider.
     SetThinking(crate::core::types::ThinkingLevel),
-    /// Load a saved session (replace current messages, usage, and session ID).
+    /// Replace the current thread with a specific session.
     LoadSession {
         session: crate::core::session::Session,
     },

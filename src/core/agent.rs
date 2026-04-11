@@ -125,17 +125,9 @@ async fn agent_loop(
                     }
                 }
             }
-            AgentCommand::Reset => {
-                session.save();
-                session = Session::new();
-                if !config.system_prompt.is_empty() {
-                    session
-                        .messages
-                        .push(Message::system(config.system_prompt.clone()));
-                }
-            }
             AgentCommand::LoadSession { session: loaded } => {
                 session.save();
+                let is_new = loaded.messages.is_empty();
                 session = loaded;
                 if !config.system_prompt.is_empty()
                     && !session
@@ -149,6 +141,12 @@ async fn agent_loop(
                 }
                 // Repair any orphaned tool_use blocks from a crash or forced exit.
                 fix_orphaned_tool_uses(&mut session.messages);
+                let _ = event_tx
+                    .send(Event::SessionLoaded {
+                        session: Box::new(session.clone()),
+                        is_new,
+                    })
+                    .await;
             }
             AgentCommand::SetModel { model_id, source } => {
                 config.model_id = model_id;

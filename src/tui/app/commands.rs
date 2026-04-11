@@ -9,20 +9,37 @@ use crate::tui::status::PoolHealth;
 use crate::tui::theme::palette;
 
 impl super::App {
+    fn request_session_load(
+        &mut self,
+        session: crate::core::session::Session,
+        busy_message: &str,
+    ) -> bool {
+        self.ensure_agent_loop();
+        if let Some(cancel) = self.agent.cancel.take() {
+            cancel.cancel();
+        }
+        self.agent.pending_content = None;
+        self.agent.pending_images = None;
+        self.agent.turn_start = None;
+        if let Some(tx) = &self.agent.tx
+            && tx.try_send(AgentCommand::LoadSession { session }).is_err()
+        {
+            self.doc.warn(busy_message);
+            return false;
+        }
+        self.ui
+            .status
+            .set_state(crate::tui::status::StatusState::Thinking);
+        true
+    }
+
     pub(super) fn handle_command(&mut self, cmd: &str) -> Action {
         match cmd {
             "new" => {
-                if let Some(tx) = &self.agent.tx {
-                    let _ = tx.try_send(AgentCommand::Reset);
-                }
-                self.enter_chat();
-                self.doc.clear();
-                self.view.clear();
-                self.doc.divider();
-                self.doc.info("new thread started");
-                self.doc.divider();
-                self.ui.status.reset_usage();
-                self.sync_prompt_commands();
+                let _ = self.request_session_load(
+                    crate::core::session::Session::new(),
+                    "agent is busy; could not start a new thread right now",
+                );
                 Action::Render
             }
             "model" => {
@@ -185,11 +202,16 @@ impl super::App {
         if let Some(m) = all.iter().find(|m| m.id == model_id) {
             self.config.model = Some(m.clone());
             crate::config::prefs::save_mode_model(self.config.mode, model_id);
-            if let Some(tx) = &self.agent.tx {
-                let _ = tx.try_send(AgentCommand::SetModel {
-                    model_id: m.id.clone(),
-                    source: m.source.clone(),
-                });
+            if let Some(tx) = &self.agent.tx
+                && tx
+                    .try_send(AgentCommand::SetModel {
+                        model_id: m.id.clone(),
+                        source: m.source.clone(),
+                    })
+                    .is_err()
+            {
+                self.doc
+                    .warn("agent is busy; model switch will apply next turn");
             }
             self.update_status();
         }
@@ -230,46 +252,8 @@ impl super::App {
             return;
         };
 
-        self.ensure_agent_loop();
-        if let Some(tx) = &self.agent.tx {
-            let _ = tx.try_send(AgentCommand::LoadSession {
-                session: session.clone(),
-            });
-        }
-        self.enter_chat();
-        self.doc.clear();
-        self.view.clear();
-        self.doc.divider();
-        let title = if session.title.is_empty() {
-            "(untitled)"
-        } else {
-            &session.title
-        };
-        self.doc.info(&format!("resumed: {title}"));
-        self.doc.divider();
-        self.render_history(&session.messages, &session.turn_durations);
-
-        let u = &session.usage;
-        self.ui.status.set_cache(u.cache_read, u.cache_write);
-        let total = if u.input_tokens + u.output_tokens + u.cache_read + u.cache_write > 0 {
-            u.input_tokens + u.cache_read + u.cache_write + u.output_tokens
-        } else {
-            session
-                .messages
-                .iter()
-                .map(|m| m.text().len())
-                .sum::<usize>() as u64
-                / 4
-        };
-        let ctx = self
-            .config
-            .model
-            .as_ref()
-            .map(|m| models::context_window(&m.id))
-            .unwrap_or(200_000);
-        let pct = ((total as f64 / ctx as f64) * 100.0).min(100.0) as u8;
-        self.ui.status.set_context(total, pct);
-        self.sync_prompt_commands();
+        let _ =
+            self.request_session_load(session, "agent is busy; could not load session right now");
     }
 
     pub(super) fn render_history(
@@ -354,8 +338,13 @@ impl super::App {
 
     pub(super) fn cycle_thinking(&mut self) {
         self.config.thinking = self.config.thinking.next();
-        if let Some(tx) = &self.agent.tx {
-            let _ = tx.try_send(AgentCommand::SetThinking(self.config.thinking));
+        if let Some(tx) = &self.agent.tx
+            && tx
+                .try_send(AgentCommand::SetThinking(self.config.thinking))
+                .is_err()
+        {
+            self.doc
+                .warn("agent is busy; thinking change will apply next turn");
         }
         crate::config::prefs::save_thinking(self.config.thinking);
         self.update_status();

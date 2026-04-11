@@ -6,10 +6,57 @@ use crate::config::models;
 use crate::event::Event;
 use crate::tui::picker::PickerAction;
 use crate::tui::prompt::PromptAction;
+use crate::tui::status::StatusState;
 use termina::Event as TermEvent;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 impl super::App {
+    fn apply_loaded_session(&mut self, session: &crate::core::session::Session, is_new: bool) {
+        self.enter_chat();
+        self.doc.clear();
+        self.view.clear();
+        self.ui.status.reset_usage();
+        self.ui.status.set_state(StatusState::Ready);
+
+        self.doc.divider();
+        if is_new {
+            self.doc.info("new thread started");
+            self.doc.divider();
+        } else {
+            let title = if session.title.is_empty() {
+                "(untitled)"
+            } else {
+                &session.title
+            };
+            self.doc.info(&format!("resumed: {title}"));
+            self.doc.divider();
+            self.render_history(&session.messages, &session.turn_durations);
+
+            let u = &session.usage;
+            self.ui.status.set_cache(u.cache_read, u.cache_write);
+            let total = if u.input_tokens + u.output_tokens + u.cache_read + u.cache_write > 0 {
+                u.input_tokens + u.cache_read + u.cache_write + u.output_tokens
+            } else {
+                session
+                    .messages
+                    .iter()
+                    .map(|m| m.text().len())
+                    .sum::<usize>() as u64
+                    / 4
+            };
+            let ctx_window = self
+                .config
+                .model
+                .as_ref()
+                .map(|m| models::context_window(&m.id))
+                .unwrap_or(200_000);
+            let pct = ((total as f64 / ctx_window as f64) * 100.0).min(100.0) as u8;
+            self.ui.status.set_context(total, pct);
+        }
+
+        self.sync_prompt_commands();
+    }
+
     pub(super) fn handle(&mut self, event: Event) -> Action {
         let aborting = self.agent.state == RunState::Aborting;
 
@@ -198,6 +245,10 @@ impl super::App {
                     .unwrap_or(200_000);
                 let pct = ((total as f64 / ctx_window as f64) * 100.0).min(100.0) as u8;
                 self.ui.status.set_context(total, pct);
+                Action::Render
+            }
+            Event::SessionLoaded { session, is_new } => {
+                self.apply_loaded_session(&session, is_new);
                 Action::Render
             }
         }
