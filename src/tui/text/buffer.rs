@@ -176,14 +176,14 @@ impl ScreenBuffer {
             // Pack cell fields into a single u64 chunk per cell, then fold.
             // char is 21-bit, Rgb/Rgb/flags fit in 56 bits.
             let packed = (cell.ch as u64)
-                ^ ((cell.fg.0 as u64) << 24)
-                ^ ((cell.fg.1 as u64) << 32)
-                ^ ((cell.fg.2 as u64) << 40)
-                ^ ((cell.bg.0 as u64) << 48)
-                ^ ((cell.bg.1 as u64) << 56);
+                ^ (u64::from(cell.fg.0) << 24)
+                ^ (u64::from(cell.fg.1) << 32)
+                ^ (u64::from(cell.fg.2) << 40)
+                ^ (u64::from(cell.bg.0) << 48)
+                ^ (u64::from(cell.bg.1) << 56);
             h = (h ^ packed).wrapping_mul(K);
             // Second round to absorb bg.2 and flags without collision.
-            let tail = (cell.bg.2 as u64) | ((cell.flags.0 as u64) << 8);
+            let tail = u64::from(cell.bg.2) | (u64::from(cell.flags.0) << 8);
             h = (h ^ tail).wrapping_mul(K);
         }
         h

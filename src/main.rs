@@ -1,3 +1,5 @@
+#![warn(clippy::cast_lossless)]
+
 /// Debug log to temp dir — enabled by LUMA_DEBUG=1.
 #[macro_export]
 macro_rules! dbg_log {

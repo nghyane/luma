@@ -158,9 +158,9 @@ fn retry_after_http_date_secs(value: &str) -> Option<u64> {
     let days = days_from_civil(year, month, day)?;
     let target = days
         .checked_mul(86_400)?
-        .checked_add(hour as i64 * 3600)?
-        .checked_add(minute as i64 * 60)?
-        .checked_add(second as i64)?;
+        .checked_add(i64::from(hour) * 3600)?
+        .checked_add(i64::from(minute) * 60)?
+        .checked_add(i64::from(second))?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
@@ -178,16 +178,16 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
     let mp = month as i32 + if month > 2 { -3 } else { 9 };
     let doy = (153 * mp + 2) / 5 + day as i32 - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some((era * 146097 + doe - 719468) as i64)
+    Some(i64::from(era * 146097 + doe - 719468))
 }
 
 fn jittered_backoff_secs(attempt: u8) -> u64 {
     let exp = 1u64 << attempt.saturating_sub(1);
     let base = exp.min(MAX_RETRY_DELAY_SECS);
-    let nanos = std::time::SystemTime::now()
+    let nanos = u64::from(std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .subsec_nanos() as u64;
+        .subsec_nanos());
     let jitter = nanos % (base + 1);
     jitter.max(1)
 }

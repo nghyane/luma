@@ -53,12 +53,12 @@ impl super::App {
                 }) if has_sb => {
                     let start_row = *start_row;
                     let start_offset = *start_offset;
-                    let delta = row as i32 - start_row as i32;
+                    let delta = i32::from(row) - i32::from(start_row);
                     let max_off = total.saturating_sub(visible);
                     let thumb_h = (visible * visible / total).max(1);
                     let track_h = visible.saturating_sub(thumb_h);
                     if track_h > 0 {
-                        let sd = (delta as f64 / track_h as f64 * max_off as f64).round() as isize;
+                        let sd = (f64::from(delta) / track_h as f64 * max_off as f64).round() as isize;
                         self.view
                             .scroll_to((start_offset as isize + sd).max(0) as usize);
                     }

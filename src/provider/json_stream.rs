@@ -369,9 +369,9 @@ fn hex_to_u32(bytes: &[u8; 4]) -> u32 {
     for &b in bytes {
         n = n * 16
             + match b {
-                b'0'..=b'9' => (b - b'0') as u32,
-                b'a'..=b'f' => (b - b'a' + 10) as u32,
-                b'A'..=b'F' => (b - b'A' + 10) as u32,
+                b'0'..=b'9' => u32::from(b - b'0'),
+                b'a'..=b'f' => u32::from(b - b'a' + 10),
+                b'A'..=b'F' => u32::from(b - b'A' + 10),
                 _ => 0,
             };
     }

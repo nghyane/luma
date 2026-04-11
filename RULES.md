@@ -44,3 +44,8 @@
 26. **Owned ở boundary, borrowed ở hot path.** Public API nhận/trả owned type khi hợp lý; internal path ưu tiên borrow để tránh clone không cần thiết.
 27. **Đo trước khi optimize.** Chỉ thêm pre-allocation, `SmallVec`, caching, hoặc tối ưu phức tạp khi có evidence hoặc bottleneck rõ ràng.
 28. **Commit sạch và có mục đích.** Dùng Conventional Commits (`type(scope): summary`). Một commit nên giải quyết một mục đích rõ ràng; nếu hai thay đổi độc lập thì tách, nếu cùng sửa một bug thì gộp.
+
+## VI. Numeric casts
+
+29. **Widening cast (smaller → larger) phải dùng `From`.** `u64::from(byte)` thay vì `byte as u64`. Lint `clippy::cast_lossless` enforce điều này.
+30. **Narrowing cast (larger → smaller) chỉ dùng `as` khi bound rõ ràng và có comment giải thích.** Nếu bound không hiển nhiên hoặc có thể overflow, dùng `try_from` thay vì im lặng truncate.
