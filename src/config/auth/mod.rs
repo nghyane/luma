@@ -11,7 +11,7 @@
 //! First-run bootstrap imports whatever it can from the upstream CLIs
 //! (`~/.claude/.credentials.json` / macOS keychain for Claude Code,
 //! `~/.codex/auth.json` for Codex). After that the pool owns the token
-//! lifecycle; refresh is done with our own refresh_token against the provider's
+//! lifecycle; refresh is done with our own `refresh_token` against the provider's
 //! OAuth endpoint. If refresh fails (upstream CLI rotated the token, revoked,
 //! etc.), we attempt one auto-recovery pass by re-reading the local source and
 //! retrying; if that also fails, the account is flagged `needs_relogin` and
@@ -26,7 +26,9 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod pkce;
+mod policy;
 pub use pkce::{login, login_with_reporter};
+pub(crate) use policy::AuthFailureKind;
 
 // --- provider-specific OAuth config ---
 
@@ -54,7 +56,7 @@ const CLAUDE_REFRESH_SCOPES: &[&str] = &[
 const OPENAI_OAUTH_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
-/// Refresh the access_token this many seconds before its expiry.
+/// Refresh the `access_token` this many seconds before its expiry.
 const EXPIRY_GRACE_SECS: u64 = 300;
 
 /// On-disk store format. Bumped when the schema breaks compatibility.
@@ -78,7 +80,7 @@ impl AuthProvider {
         }
     }
 
-    fn from_str(s: &str) -> Option<Self> {
+    pub(crate) fn from_str(s: &str) -> Option<Self> {
         match s {
             "anthropic" => Some(Self::Anthropic),
             "openai" | "codex" => Some(Self::OpenAI),
@@ -163,7 +165,7 @@ struct AccountEntry {
     account_id: Option<String>,
     #[serde(default = "default_true")]
     is_oauth: bool,
-    /// Unix seconds when the access_token expires.
+    /// Unix seconds when the `access_token` expires.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     expires_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -343,11 +345,17 @@ fn account_view(a: &AccountEntry) -> AccountView {
 async fn resolve_inner(provider: AuthProvider, force: bool) -> Result<Credential> {
     // Bootstrap the pool if it has no account for this provider.
     ensure_bootstrapped(provider);
+    crate::dbg_log!(
+        "auth resolve start provider={} force={}",
+        provider.as_str(),
+        force
+    );
 
     // Walk candidates until one works. Each iteration may mark an account
     // as unhealthy and try the next.
     loop {
         let Some(entry) = pick_candidate(provider) else {
+            crate::dbg_log!("auth resolve no candidate provider={}", provider.as_str());
             let have_any = pool()
                 .accounts
                 .iter()
@@ -365,23 +373,54 @@ async fn resolve_inner(provider: AuthProvider, force: bool) -> Result<Credential
             );
         };
 
+        crate::dbg_log!(
+            "auth resolve candidate provider={} label={} oauth={} expires_at={:?} has_refresh={} force={}",
+            provider.as_str(),
+            entry.label,
+            entry.is_oauth,
+            entry.expires_at,
+            entry.refresh_token.is_some(),
+            force
+        );
+
         // Fast path: cached token still valid and not forced.
         if !force && !is_expired(entry.expires_at) {
+            crate::dbg_log!(
+                "auth resolve fast-path provider={} label={}",
+                provider.as_str(),
+                entry.label
+            );
             return Ok(credential_from(&entry));
         }
 
         if entry.refresh_token.is_none() {
             // Nothing to refresh with. Try one last auto-recovery from the
             // local source for this account's provider, otherwise retire it.
+            crate::dbg_log!(
+                "auth resolve missing refresh_token provider={} label={} attempting auto-recover",
+                provider.as_str(),
+                entry.label
+            );
             if attempt_auto_recover(provider, &entry.label).await {
                 continue;
             }
+            crate::dbg_log!(
+                "auth resolve mark needs_relogin provider={} label={} reason=no_refresh_token",
+                provider.as_str(),
+                entry.label
+            );
             with_pool_mut(|p| set_needs_relogin(p, &entry.label));
             continue;
         }
 
         match try_refresh(&entry, provider).await {
             Ok(refreshed) => {
+                crate::dbg_log!(
+                    "auth resolve refresh ok provider={} label={} new_expires_at={:?}",
+                    provider.as_str(),
+                    refreshed.label,
+                    refreshed.expires_at
+                );
                 with_pool_mut(|p| upsert_by_label(p, refreshed.clone()));
                 return Ok(credential_from(&refreshed));
             }
@@ -392,9 +431,19 @@ async fn resolve_inner(provider: AuthProvider, force: bool) -> Result<Credential
                     provider.as_str(),
                     err
                 );
+                crate::dbg_log!(
+                    "auth resolve attempting auto-recover provider={} label={}",
+                    provider.as_str(),
+                    entry.label
+                );
                 if attempt_auto_recover(provider, &entry.label).await {
                     continue;
                 }
+                crate::dbg_log!(
+                    "auth resolve mark needs_relogin provider={} label={} reason=refresh_failed",
+                    provider.as_str(),
+                    entry.label
+                );
                 with_pool_mut(|p| set_needs_relogin(p, &entry.label));
                 continue;
             }
@@ -409,13 +458,23 @@ fn pick_candidate(provider: AuthProvider) -> Option<AccountEntry> {
     let pool = pool();
     pool.accounts
         .iter()
-        .find(|a| {
+        .filter(|a| {
             a.provider == provider.as_str()
                 && !a.needs_relogin
                 && !a.disabled
-                && a.cooldown_until.map(|t| t <= now).unwrap_or(true)
+                && a.cooldown_until.is_none_or(|t| t <= now)
         })
+        .max_by_key(|a| candidate_rank(a))
         .cloned()
+}
+
+fn candidate_rank(a: &AccountEntry) -> (u8, u8, u8, u64) {
+    (
+        u8::from(a.email.is_some()),
+        u8::from(a.account_id.is_some()),
+        u8::from(a.refresh_token.is_some()),
+        a.expires_at.unwrap_or(0),
+    )
 }
 
 fn credential_from(e: &AccountEntry) -> Credential {
@@ -433,9 +492,64 @@ fn set_needs_relogin(pool: &mut PoolStore, label: &str) {
     }
 }
 
+fn identity_key(entry: &AccountEntry) -> Option<String> {
+    if let Some(account_id) = entry.account_id.as_ref().filter(|s| !s.is_empty()) {
+        return Some(format!("{}:account:{}", entry.provider, account_id));
+    }
+    if let Some(email) = entry.email.as_ref().filter(|s| !s.is_empty()) {
+        return Some(format!(
+            "{}:email:{}",
+            entry.provider,
+            email.to_ascii_lowercase()
+        ));
+    }
+    None
+}
+
+fn merge_account(existing: &AccountEntry, mut incoming: AccountEntry) -> AccountEntry {
+    if incoming.email.is_none() {
+        incoming.email = existing.email.clone();
+    }
+    if incoming.account_id.is_none() {
+        incoming.account_id = existing.account_id.clone();
+    }
+    if incoming.cooldown_until.is_none() {
+        incoming.cooldown_until = existing.cooldown_until;
+    }
+    if incoming.usage.is_empty() {
+        incoming.usage = existing.usage.clone();
+    }
+    incoming.needs_relogin = false;
+    incoming.disabled = existing.disabled;
+
+    // Provider string in pool entries is always one of the known providers
+    // (set by parse_*_json or PKCE login). A bad value here is an invariant
+    // violation, not a fallback case.
+    let provider = AuthProvider::from_str(&incoming.provider)
+        .expect("pool entry has invalid provider string");
+    let current_label = derive_label(provider, incoming.email.as_deref());
+    if !current_label.ends_with("-1") {
+        incoming.label = current_label;
+    } else if !existing.label.ends_with("-1") {
+        incoming.label = existing.label.clone();
+    }
+    incoming
+}
+
 /// Insert or replace an entry by label, preserving cooldown/usage from the
 /// existing entry unless the new one carries fresh values.
 fn upsert_by_label(pool: &mut PoolStore, mut entry: AccountEntry) {
+    if let Some(key) = identity_key(&entry)
+        && let Some(existing_idx) = pool
+            .accounts
+            .iter()
+            .position(|a| identity_key(a).as_deref() == Some(key.as_str()))
+    {
+        let merged = merge_account(&pool.accounts[existing_idx], entry);
+        pool.accounts[existing_idx] = merged;
+        return;
+    }
+
     if let Some(existing) = pool.accounts.iter_mut().find(|a| a.label == entry.label) {
         // Preserve usage + cooldown across refreshes (refresh response
         // doesn't carry rate-limit info).
@@ -462,24 +576,22 @@ fn upsert_by_label(pool: &mut PoolStore, mut entry: AccountEntry) {
 /// If the pool has no account for this provider, try to seed one from the
 /// upstream CLI's local credential store.
 fn ensure_bootstrapped(provider: AuthProvider) {
-    let has_provider = pool()
-        .accounts
-        .iter()
-        .any(|a| a.provider == provider.as_str());
-    if has_provider {
-        return;
-    }
     if let Some(seed) = load_local(provider) {
         with_pool_mut(|p| upsert_by_label(p, seed));
     }
 }
 
 /// Try to recover a failed refresh by re-reading the local source. If local
-/// has a materially different entry (different refresh_token or still-valid
-/// access_token), save it into the pool and return `true` so the caller
+/// has a materially different entry (different `refresh_token` or still-valid
+/// `access_token`), save it into the pool and return `true` so the caller
 /// retries. Returns `false` if no recovery is possible.
 async fn attempt_auto_recover(provider: AuthProvider, label: &str) -> bool {
     let Some(fresh) = load_local(provider) else {
+        crate::dbg_log!(
+            "auth auto-recover no local credential provider={} label={}",
+            provider.as_str(),
+            label
+        );
         return false;
     };
     let current = pool().accounts.iter().find(|a| a.label == label).cloned();
@@ -489,6 +601,12 @@ async fn attempt_auto_recover(provider: AuthProvider, label: &str) -> bool {
     // "anthropic-1"), remove the stale anonymous entry and upsert the fresh
     // one — the fresh token is what matters, not preserving the old label.
     if fresh.label != label {
+        crate::dbg_log!(
+            "auth auto-recover replacing label provider={} old_label={} new_label={}",
+            provider.as_str(),
+            label,
+            fresh.label
+        );
         with_pool_mut(|p| {
             p.accounts.retain(|a| a.label != label);
             upsert_by_label(p, fresh);
@@ -501,10 +619,21 @@ async fn attempt_auto_recover(provider: AuthProvider, label: &str) -> bool {
         let same_refresh = cur.refresh_token == fresh.refresh_token && cur.refresh_token.is_some();
         let fresh_still_valid = !is_expired(fresh.expires_at);
         if same_refresh && !fresh_still_valid {
+            crate::dbg_log!(
+                "auth auto-recover rejected provider={} label={} same_refresh=true fresh_still_valid=false",
+                provider.as_str(),
+                label
+            );
             return false;
         }
     }
 
+    crate::dbg_log!(
+        "auth auto-recover accepted provider={} label={} fresh_label={}",
+        provider.as_str(),
+        label,
+        fresh.label
+    );
     with_pool_mut(|p| upsert_by_label(p, fresh));
     true
 }
@@ -576,12 +705,12 @@ fn load_claude_profile() -> Option<ClaudeProfile> {
             .get("emailAddress")
             .or_else(|| oa.get("email"))
             .and_then(|v| v.as_str())
-            .map(|s| s.to_owned()),
+            .map(std::borrow::ToOwned::to_owned),
         account_uuid: oa
             .get("accountUuid")
             .or_else(|| oa.get("account_uuid"))
             .and_then(|v| v.as_str())
-            .map(|s| s.to_owned()),
+            .map(std::borrow::ToOwned::to_owned),
     })
 }
 
@@ -669,10 +798,10 @@ fn parse_claude_json(raw: &str) -> Option<AccountEntry> {
     let refresh_token = oauth
         .get("refreshToken")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_owned());
+        .map(std::borrow::ToOwned::to_owned);
     let scopes = oauth.get("scopes").and_then(|v| v.as_array()).map(|arr| {
         arr.iter()
-            .filter_map(|s| s.as_str().map(|s| s.to_owned()))
+            .filter_map(|s| s.as_str().map(std::borrow::ToOwned::to_owned))
             .collect()
     });
     // `expiresAt` can be a number (ms) or a string. Normalize to Unix seconds.
@@ -757,7 +886,7 @@ fn parse_codex_json(raw: &str) -> Option<AccountEntry> {
     let refresh_token = tokens
         .get("refresh_token")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_owned());
+        .map(std::borrow::ToOwned::to_owned);
 
     // access_token is a JWT; extract exp and account id directly so we don't
     // depend on `last_refresh` in the file (which is just an upstream hint).
@@ -776,19 +905,19 @@ fn parse_codex_json(raw: &str) -> Option<AccountEntry> {
         });
     let expires_at = access_claims
         .as_ref()
-        .and_then(|c| c.get("exp").and_then(|v| v.as_u64()));
+        .and_then(|c| c.get("exp").and_then(serde_json::Value::as_u64));
     let email = id_claims
         .as_ref()
         .and_then(|c| {
             c.get("email")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_owned())
+                .map(std::borrow::ToOwned::to_owned)
         })
         .or_else(|| {
             access_claims.as_ref().and_then(|c| {
                 c.get("email")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.to_owned())
+                    .map(std::borrow::ToOwned::to_owned)
             })
         });
 
@@ -818,50 +947,42 @@ async fn try_refresh(
     entry: &AccountEntry,
     provider: AuthProvider,
 ) -> std::result::Result<AccountEntry, String> {
+    crate::dbg_log!(
+        "auth refresh start provider={} label={} expires_at={:?}",
+        provider.as_str(),
+        entry.label,
+        entry.expires_at
+    );
     let refresh_token = entry
         .refresh_token
         .as_ref()
         .ok_or_else(|| "no refresh_token on entry".to_owned())?;
     let client = reqwest::Client::new();
 
-    let (url, body, content_type) = match provider {
-        AuthProvider::Anthropic => {
-            let mut body = serde_json::json!({
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "client_id": CLAUDE_CLIENT_ID,
-            });
-            if should_use_claude_ai_auth(entry.scopes.as_deref()) {
-                // Match Claude Code: Claude.ai / Max refresh omits `scope` so
-                // the backend applies the current default Claude.ai scope set
-                // and can expand scopes without forcing a re-login.
-            } else if let Some(scopes) = entry.scopes.as_ref().filter(|s| !s.is_empty()) {
-                body["scope"] = serde_json::Value::String(scopes.join(" "));
-            } else {
-                body["scope"] = serde_json::Value::String(CLAUDE_REFRESH_SCOPES.join(" "));
-            }
-            (CLAUDE_OAUTH_ENDPOINT, body.to_string(), "application/json")
-        }
-        AuthProvider::OpenAI => (
-            OPENAI_OAUTH_ENDPOINT,
-            format!(
-                "grant_type=refresh_token&refresh_token={refresh_token}&client_id={OPENAI_CLIENT_ID}"
-            ),
-            "application/x-www-form-urlencoded",
-        ),
-    };
+    let refresh = provider.build_refresh_request(refresh_token, entry.scopes.as_deref());
 
-    let res = client
-        .post(url)
-        .header("Content-Type", content_type)
-        .header("Accept", "application/json")
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| format!("network error: {e}"))?;
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        client
+            .post(refresh.url)
+            .header("Content-Type", refresh.content_type)
+            .header("Accept", "application/json")
+            .body(refresh.body)
+            .send(),
+    )
+    .await
+    .map_err(|_| "refresh timeout".to_owned())?
+    .map_err(|e| format!("network error: {e}"))?;
 
     let status = res.status();
     let text = res.text().await.map_err(|e| format!("read body: {e}"))?;
+    crate::dbg_log!(
+        "auth refresh response provider={} label={} status={} body={}",
+        provider.as_str(),
+        entry.label,
+        status,
+        text.chars().take(200).collect::<String>()
+    );
     if !status.is_success() {
         let snippet: String = text.chars().take(200).collect();
         return Err(format!("HTTP {status}: {snippet}"));
@@ -877,22 +998,22 @@ async fn try_refresh(
     let new_refresh = json
         .get("refresh_token")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_owned())
+        .map(std::borrow::ToOwned::to_owned)
         .or_else(|| entry.refresh_token.clone());
     let expires_at = json
         .get("expires_in")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .map(|secs| now_unix().saturating_add(secs))
         .or_else(|| {
             // Some providers omit expires_in; fall back to JWT `exp` claim.
             decode_jwt_payload(&new_access)
                 .as_ref()
-                .and_then(|c| c.get("exp").and_then(|v| v.as_u64()))
+                .and_then(|c| c.get("exp").and_then(serde_json::Value::as_u64))
         });
     let scopes = json
         .get("scope")
         .and_then(|v| v.as_str())
-        .map(|s| s.split_whitespace().map(|w| w.to_owned()).collect())
+        .map(|s| s.split_whitespace().map(std::borrow::ToOwned::to_owned).collect())
         .or_else(|| entry.scopes.clone());
 
     Ok(AccountEntry {
@@ -957,7 +1078,7 @@ fn load_pool_from_disk() -> PoolStore {
     PoolStore::default()
 }
 
-/// Deduplicate accounts by access_token, keeping the entry with the most
+/// Deduplicate accounts by `access_token`, keeping the entry with the most
 /// data (email preferred over blank). Called on load so stale keychain
 /// re-imports don't accumulate hundreds of identical entries.
 fn dedup_accounts(accounts: &mut Vec<AccountEntry>) {
@@ -987,6 +1108,23 @@ fn dedup_accounts(accounts: &mut Vec<AccountEntry>) {
     }
     let mut iter = keep.iter();
     accounts.retain(|_| *iter.next().unwrap_or(&true));
+
+    // Drop anonymous provider placeholders once we have a richer account for
+    // the same provider. This prevents legacy labels like `anthropic-1` from
+    // winning candidate selection over accounts that carry real identity.
+    let provider_has_identity: std::collections::HashSet<String> = accounts
+        .iter()
+        .filter(|a| a.email.is_some() || a.account_id.is_some())
+        .map(|a| a.provider.clone())
+        .collect();
+    accounts.retain(|a| {
+        let anonymous_legacy = a.email.is_none()
+            && a.account_id.is_none()
+            && a.label
+                .strip_prefix(a.provider.as_str())
+                .is_some_and(|rest| rest.starts_with('-'));
+        !(anonymous_legacy && provider_has_identity.contains(&a.provider))
+    });
 }
 
 fn save_pool_locked(pool: &PoolStore) {
@@ -1088,7 +1226,7 @@ fn extract_email_from_jwt(token: &str) -> Option<String> {
     claims
         .get("email")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_owned())
+        .map(std::borrow::ToOwned::to_owned)
 }
 
 // =============================================================================
@@ -1127,7 +1265,7 @@ fn extract_account_id_from_claims(payload: &serde_json::Value) -> Option<String>
     auth.get("chatgpt_account_id")
         .or_else(|| auth.get("account_id"))
         .and_then(|v| v.as_str())
-        .map(|s| s.to_owned())
+        .map(std::borrow::ToOwned::to_owned)
 }
 
 /// Decode the payload of an unverified JWT. Claims are used only as hints
@@ -1172,90 +1310,6 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 // =============================================================================
 // background refresher
 // =============================================================================
-
-/// Refresh the access_token this many seconds *before* the background task
-/// would otherwise let it expire. Wider than the synchronous
-/// [`EXPIRY_GRACE_SECS`] so we rotate tokens well before a user turn ever
-/// has to wait on them.
-const PROACTIVE_REFRESH_WINDOW_SECS: u64 = 600;
-/// How often the background task walks the pool. A minute is plenty — token
-/// lifetimes are ~1h, so even if we miss one tick we still have 9 minutes
-/// of slack before `PROACTIVE_REFRESH_WINDOW_SECS` runs out.
-const BACKGROUND_REFRESH_INTERVAL_SECS: u64 = 60;
-
-/// Spawn a background task that walks the pool every
-/// [`BACKGROUND_REFRESH_INTERVAL_SECS`] and refreshes any account whose
-/// access_token is within [`PROACTIVE_REFRESH_WINDOW_SECS`] of expiry. The
-/// task terminates when `cancel` is fired or the process exits.
-///
-/// Errors are intentionally swallowed: a background refresh failure will
-/// resurface on the next synchronous `resolve` call (which has its own
-/// auto-recovery path), and the user should never see a refresh failure
-/// reported from a task they didn't initiate.
-pub fn spawn_background_refresher(cancel: tokio_util::sync::CancellationToken) {
-    tokio::spawn(async move {
-        let interval = std::time::Duration::from_secs(BACKGROUND_REFRESH_INTERVAL_SECS);
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                _ = tokio::time::sleep(interval) => {}
-            }
-            refresh_near_expiry_once().await;
-        }
-    });
-}
-
-/// Walk the pool once and refresh every account whose access_token is
-/// within [`PROACTIVE_REFRESH_WINDOW_SECS`] of expiring. Intended to be
-/// called from the background task; also useful for tests.
-async fn refresh_near_expiry_once() {
-    let candidates = collect_near_expiry();
-    for (entry, provider) in candidates {
-        // Swallow errors — see `spawn_background_refresher` doc.
-        if let Ok(refreshed) = try_refresh(&entry, provider).await {
-            with_pool_mut(|p| upsert_by_label(p, refreshed));
-        }
-    }
-}
-
-/// Snapshot every account that is eligible for proactive refresh.
-fn collect_near_expiry() -> Vec<(AccountEntry, AuthProvider)> {
-    let now = now_unix();
-    let pool = pool();
-    pool.accounts
-        .iter()
-        .filter_map(|a| {
-            if !is_eligible_for_proactive_refresh(a, now) {
-                return None;
-            }
-            let provider = AuthProvider::from_str(&a.provider)?;
-            Some((a.clone(), provider))
-        })
-        .collect()
-}
-
-/// Pure predicate driving the background refresher. Extracted from
-/// [`collect_near_expiry`] so it can be unit-tested without touching the
-/// global pool. An account is eligible when:
-///
-/// * it has a refresh_token,
-/// * it isn't flagged `needs_relogin`,
-/// * it isn't currently on rate-limit cooldown,
-/// * and its access_token expires within [`PROACTIVE_REFRESH_WINDOW_SECS`].
-fn is_eligible_for_proactive_refresh(a: &AccountEntry, now: u64) -> bool {
-    if a.refresh_token.is_none() || a.needs_relogin {
-        return false;
-    }
-    if let Some(cd) = a.cooldown_until
-        && cd > now
-    {
-        return false;
-    }
-    match a.expires_at {
-        Some(ts) => ts.saturating_sub(now) < PROACTIVE_REFRESH_WINDOW_SECS,
-        None => false, // no known expiry → leave it alone
-    }
-}
 
 // =============================================================================
 // tests
@@ -1492,75 +1546,95 @@ mod tests {
         assert!(!a.needs_relogin);
     }
 
-    fn account_for(expires_at: Option<u64>) -> AccountEntry {
-        AccountEntry {
-            label: "test@x".into(),
+    #[test]
+    fn upsert_by_identity_merges_anonymous_placeholder() {
+        let mut pool = PoolStore::default();
+        pool.accounts.push(AccountEntry {
+            label: "anthropic-1".into(),
             provider: "anthropic".into(),
-            email: Some("test@x.com".into()),
-            access_token: "at".into(),
-            refresh_token: Some("rt".into()),
-            account_id: None,
+            email: None,
+            access_token: "old-token".into(),
+            refresh_token: Some("same-refresh".into()),
+            account_id: Some("acc-123".into()),
             is_oauth: true,
-            expires_at,
+            expires_at: Some(100),
             scopes: None,
-            cooldown_until: None,
-            usage: UsageRec::default(),
+            cooldown_until: Some(999),
+            usage: UsageRec {
+                requests_remaining: Some(7),
+                ..Default::default()
+            },
             needs_relogin: false,
             disabled: false,
-        }
+        });
+
+        upsert_by_label(
+            &mut pool,
+            AccountEntry {
+                label: "anthropic-1".into(),
+                provider: "anthropic".into(),
+                email: Some("real@example.com".into()),
+                access_token: "new-token".into(),
+                refresh_token: Some("same-refresh".into()),
+                account_id: Some("acc-123".into()),
+                is_oauth: true,
+                expires_at: Some(200),
+                scopes: None,
+                cooldown_until: None,
+                usage: UsageRec::default(),
+                needs_relogin: false,
+                disabled: false,
+            },
+        );
+
+        assert_eq!(pool.accounts.len(), 1);
+        let a = &pool.accounts[0];
+        assert_eq!(a.label, "real@example");
+        assert_eq!(a.email.as_deref(), Some("real@example.com"));
+        assert_eq!(a.account_id.as_deref(), Some("acc-123"));
+        assert_eq!(a.cooldown_until, Some(999));
+        assert_eq!(a.usage.requests_remaining, Some(7));
     }
 
     #[test]
-    fn proactive_refresh_triggers_near_expiry() {
-        let now = now_unix();
-        let a = account_for(Some(now + 100));
-        assert!(is_eligible_for_proactive_refresh(&a, now));
-    }
+    fn dedup_drops_anthropic_placeholder_when_real_identity_exists() {
+        let mut accounts = vec![
+            AccountEntry {
+                label: "anthropic-1".into(),
+                provider: "anthropic".into(),
+                email: None,
+                access_token: "tok-a".into(),
+                refresh_token: Some("rt-a".into()),
+                account_id: None,
+                is_oauth: true,
+                expires_at: Some(100),
+                scopes: None,
+                cooldown_until: None,
+                usage: UsageRec::default(),
+                needs_relogin: false,
+                disabled: false,
+            },
+            AccountEntry {
+                label: "real@example".into(),
+                provider: "anthropic".into(),
+                email: Some("real@example.com".into()),
+                access_token: "tok-b".into(),
+                refresh_token: Some("rt-b".into()),
+                account_id: Some("acc-123".into()),
+                is_oauth: true,
+                expires_at: Some(200),
+                scopes: None,
+                cooldown_until: None,
+                usage: UsageRec::default(),
+                needs_relogin: false,
+                disabled: false,
+            },
+        ];
 
-    #[test]
-    fn proactive_refresh_skips_when_far_from_expiry() {
-        let now = now_unix();
-        let a = account_for(Some(now + 3600));
-        assert!(!is_eligible_for_proactive_refresh(&a, now));
-    }
+        dedup_accounts(&mut accounts);
 
-    #[test]
-    fn proactive_refresh_skips_accounts_without_expiry() {
-        let now = now_unix();
-        let a = account_for(None);
-        assert!(!is_eligible_for_proactive_refresh(&a, now));
-    }
-
-    #[test]
-    fn proactive_refresh_skips_accounts_without_refresh_token() {
-        let now = now_unix();
-        let mut a = account_for(Some(now + 100));
-        a.refresh_token = None;
-        assert!(!is_eligible_for_proactive_refresh(&a, now));
-    }
-
-    #[test]
-    fn proactive_refresh_skips_needs_relogin() {
-        let now = now_unix();
-        let mut a = account_for(Some(now + 100));
-        a.needs_relogin = true;
-        assert!(!is_eligible_for_proactive_refresh(&a, now));
-    }
-
-    #[test]
-    fn proactive_refresh_skips_accounts_on_cooldown() {
-        let now = now_unix();
-        let mut a = account_for(Some(now + 100));
-        a.cooldown_until = Some(now + 60);
-        assert!(!is_eligible_for_proactive_refresh(&a, now));
-    }
-
-    #[test]
-    fn proactive_refresh_resumes_after_cooldown_expires() {
-        let now = now_unix();
-        let mut a = account_for(Some(now + 100));
-        a.cooldown_until = Some(now.saturating_sub(10));
-        assert!(is_eligible_for_proactive_refresh(&a, now));
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].label, "real@example");
     }
 
     #[test]

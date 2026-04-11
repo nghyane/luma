@@ -78,7 +78,7 @@ pub async fn run_chat_turn(
         }
 
         // 401 — stale / revoked token. Force a refresh and retry once.
-        if is_auth_error(&err) {
+        if is_auth_error(provider_kind.as_str(), &err) {
             let _ = tx
                 .send(Event::ToolOutput {
                     name: String::new(),
@@ -94,9 +94,13 @@ pub async fn run_chat_turn(
     anyhow::bail!("exhausted auth retries")
 }
 
-fn is_auth_error(err: &anyhow::Error) -> bool {
+fn is_auth_error(provider: &str, err: &anyhow::Error) -> bool {
     let msg = err.to_string();
-    msg.contains("401") || msg.contains("Unauthorized") || msg.contains("unauthorized")
+    crate::provider::retry::classify_auth_failure(provider, reqwest::StatusCode::UNAUTHORIZED, &msg)
+        .is_some()
+        || msg.contains("401")
+        || msg.contains("Unauthorized")
+        || msg.contains("unauthorized")
 }
 
 fn build_provider(
@@ -162,9 +166,9 @@ struct TurnCtx<'a> {
 
 /// Stream with automatic retry on transient network failures.
 ///
-/// On a retryable failure, notifies the UI via ProviderRetry event and
+/// On a retryable failure, notifies the UI via `ProviderRetry` event and
 /// re-sends the request. The caller's messages are immutable here —
-/// only the caller (run_turn) mutates session state.
+/// only the caller (`run_turn`) mutates session state.
 async fn stream_with_retry(
     ctx: &TurnCtx<'_>,
     messages: &[Message],
@@ -300,12 +304,11 @@ async fn run_turn(
                     "output token limit hit even at {ESCALATED_MAX_TOKENS} tokens. \
                      Try /compact or switch model."
                 );
-            } else {
-                anyhow::bail!(
-                    "{} hit its output token limit. Try /compact or switch model.",
-                    provider.name()
-                );
             }
+            anyhow::bail!(
+                "{} hit its output token limit. Try /compact or switch model.",
+                provider.name()
+            );
         }
 
         let tool_calls = match &response.tool_calls {
@@ -359,7 +362,7 @@ async fn execute_one(
     cancel: tokio_util::sync::CancellationToken,
 ) -> (String, String) {
     let args: serde_json::Value = serde_json::from_str(&tc.function.arguments)
-        .unwrap_or(serde_json::Value::Object(Default::default()));
+        .unwrap_or(serde_json::Value::Object(serde_json::Map::default()));
 
     let skill = skill_name_from_read(&tc.function.name, &args);
 

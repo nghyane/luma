@@ -1,4 +1,4 @@
-use crate::config::auth::{self, UsageSnapshot};
+use crate::config::auth::{self, AuthFailureKind, UsageSnapshot};
 use crate::event::Event;
 use crate::event_bus::Sender as EventSender;
 use anyhow::{Result, bail};
@@ -44,7 +44,7 @@ pub fn format_http_error(provider: &str, status: reqwest::StatusCode, msg: &str)
             }
         }
         401 => format!(
-            "{provider} auth failed (401): {detail}. Check your API key or run 'luma sync' to refresh credentials."
+            "{provider} auth failed (401): {detail}. Your login may have expired; run '/login' again if refresh does not recover automatically."
         ),
         403 => format!(
             "{provider} access denied (403): {detail}. Verify your API key has the required permissions."
@@ -172,7 +172,7 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
-    let y = year - if month <= 2 { 1 } else { 0 };
+    let y = year - i32::from(month <= 2);
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
     let mp = month as i32 + if month > 2 { -3 } else { 9 };
@@ -211,9 +211,18 @@ fn extract_error_message(body: &str) -> String {
                 .as_str()
                 .or_else(|| v["message"].as_str())
                 .or_else(|| v["error"].as_str())
-                .map(|s| s.to_owned())
+                .map(std::borrow::ToOwned::to_owned)
         })
         .unwrap_or_else(|| body[..body.len().min(200)].to_owned())
+}
+
+pub fn classify_auth_failure(
+    provider: &str,
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Option<AuthFailureKind> {
+    let provider = crate::config::auth::AuthProvider::from_str(provider)?;
+    provider.classify_auth_failure(status.as_u16(), &extract_error_message(body))
 }
 
 /// Parse provider rate-limit headers into a normalized `UsageSnapshot`.
@@ -552,7 +561,7 @@ mod tests {
     fn formats_401_with_auth_guidance() {
         let msg = format_http_error("claude", reqwest::StatusCode::UNAUTHORIZED, "invalid token");
         assert!(msg.contains("auth failed (401)"));
-        assert!(msg.contains("luma sync"));
+        assert!(msg.contains("/login"));
     }
 
     #[test]

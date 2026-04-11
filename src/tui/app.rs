@@ -283,11 +283,6 @@ impl App {
         let (tx, mut rx) = crate::event_bus::channel();
         self.tx = Some(tx.clone());
 
-        // Keep pooled OAuth tokens warm so user turns never wait on a
-        // refresh. Cancelled implicitly when the process exits.
-        let refresher_cancel = tokio_util::sync::CancellationToken::new();
-        crate::config::auth::spawn_background_refresher(refresher_cancel.clone());
-
         let mut term = self
             .term
             .take()
