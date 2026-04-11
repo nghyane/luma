@@ -85,10 +85,8 @@ impl AuthProvider {
                 }
             }
             Self::OpenAI => {
-                // Upstream codex-rs refresh body is JSON with exactly these
-                // three fields — no scope echo. Matching byte-for-byte keeps
-                // luma classified as a first-party client during refresh.
-                // See `codex-rs/login/src/auth/manager.rs::RefreshRequest`.
+                // Matches `codex-rs/login/src/auth/manager.rs::RefreshRequest` —
+                // JSON body with exactly these three fields (no scope echo).
                 let body = serde_json::json!({
                     "client_id": OPENAI_CLIENT_ID,
                     "grant_type": "refresh_token",

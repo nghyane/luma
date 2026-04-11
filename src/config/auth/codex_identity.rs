@@ -1,43 +1,26 @@
-//! Codex upstream identity — originator, user-agent, and installation id.
+//! Upstream `codex_cli_rs` identity — originator, user-agent, install id.
 //!
-//! Mirrors the values the official `codex_cli_rs` CLI sets on every request
-//! to `chatgpt.com/backend-api/codex/responses`:
-//!
-//! * `originator` header — fixed literal `codex_cli_rs`, enforced by the
-//!   backend as a "first-party" client check.
-//! * `User-Agent` header — `codex_cli_rs/<version>`.
-//! * `session_id` header — per-conversation stable id (we pass the luma
-//!   session id directly; upstream uses a UUID string but the backend
-//!   accepts any stable opaque identifier).
-//! * `client_metadata.x-codex-installation-id` body field — persisted UUID
-//!   shared with the official CLI at `~/.codex/installation_id` so luma
-//!   and codex-cli correlate to the same install. Generated on first use.
+//! Values mirror the official Codex CLI so the ChatGPT backend accepts luma
+//! as a first-party client. See `codex-rs/login/src/auth/default_client.rs`
+//! and `codex-rs/core/src/installation_id.rs`.
 
 use super::home_dir;
 use crate::util::{is_uuid, uuid_v4};
 use std::fs;
 use std::path::PathBuf;
 
-/// Originator value sent both as a PKCE `&originator=...` query param and
-/// as an `originator` request header. Must exactly match upstream or the
-/// backend's first-party check fails.
+/// Originator literal sent as a PKCE query param and request header.
 pub(crate) const CODEX_ORIGINATOR: &str = "codex_cli_rs";
 
-/// Filename under `~/.codex/` holding the persistent installation UUID.
 const INSTALLATION_ID_FILENAME: &str = "installation_id";
 
-/// Returns the `User-Agent` string upstream sends.
-///
-/// Format matches `get_codex_user_agent()` in
-/// `codex-rs/login/src/auth/default_client.rs`: `{originator}/{version}`.
+/// `{originator}/{cargo-version}` — matches `get_codex_user_agent()` upstream.
 pub(crate) fn codex_user_agent() -> String {
     format!("{CODEX_ORIGINATOR}/{}", env!("CARGO_PKG_VERSION"))
 }
 
-/// Resolve the persistent installation id, reusing the existing file when
-/// present (so codex-cli and luma see the same id) and creating one on
-/// first run. Returns `None` only when both read and write fail; callers
-/// should degrade gracefully by omitting the `client_metadata` field.
+/// Read `~/.codex/installation_id` if present, otherwise generate a UUID
+/// and persist it. Returns `None` only if both read and write fail.
 pub(crate) fn resolve_installation_id() -> Option<String> {
     let path = installation_id_path();
     if let Some(parent) = path.parent() {

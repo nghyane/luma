@@ -1,16 +1,14 @@
-//! Small cross-cutting utilities used by more than one module.
+//! Cross-cutting helpers shared by more than one module.
 
-/// Generate a random UUIDv4-format string without pulling in the `uuid`
-/// crate. 16 bytes of OS entropy with RFC 4122 version/variant bits set.
+/// Generate a UUIDv4 canonical string (RFC 4122) using OS entropy.
 ///
-/// Returns `None` when the OS entropy source is unavailable (practically
-/// never on modern targets). Callers should degrade gracefully in that
-/// case rather than panic.
+/// Returns `None` if the OS entropy source is unavailable; callers should
+/// degrade gracefully rather than panic.
 pub fn uuid_v4() -> Option<String> {
     let mut bytes = [0u8; 16];
     getrandom::getrandom(&mut bytes).ok()?;
-    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
-    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant
     Some(format!(
         "{:02x}{:02x}{:02x}{:02x}-\
          {:02x}{:02x}-\
@@ -36,8 +34,7 @@ pub fn uuid_v4() -> Option<String> {
     ))
 }
 
-/// Loose UUID check — 8-4-4-4-12 hex groups, case-insensitive. Matches
-/// `uuid::Uuid::parse_str` acceptance for canonical form.
+/// Loose UUID canonical-form check (8-4-4-4-12 hex, case-insensitive).
 pub fn is_uuid(s: &str) -> bool {
     let bytes = s.as_bytes();
     if bytes.len() != 36 {

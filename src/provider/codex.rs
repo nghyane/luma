@@ -51,11 +51,9 @@ impl Provider for CodexProvider {
         self.thinking = level;
     }
 
-    /// Codex Responses API at `chatgpt.com/backend-api/codex/responses` does
-    /// not accept a `max_output_tokens` field — codex-rs itself omits it
-    /// (see `codex-rs/codex-api/src/common.rs:ResponsesApiRequest`). An
-    /// escalation retry would re-run the same request and hit the same
-    /// limit, so we opt out of escalation entirely.
+    /// The Responses API rejects `max_output_tokens`; codex-rs omits it too
+    /// (`codex-rs/codex-api/src/common.rs:ResponsesApiRequest`). Escalation
+    /// retries would just repeat the same failure.
     fn supports_max_tokens_override(&self) -> bool {
         false
     }
@@ -114,10 +112,8 @@ impl Provider for CodexProvider {
             if let Some(key) = &self.session_id {
                 body["prompt_cache_key"] = serde_json::json!(key);
             }
-            // Upstream always inlines the installation id in `client_metadata`
-            // so the backend can correlate traffic to a persistent install.
-            // Match that exactly — see `codex-rs/core/src/client.rs`
-            // `build_responses_request`.
+            // `client_metadata.x-codex-installation-id` matches
+            // codex-rs/core/src/client.rs::build_responses_request.
             if let Some(installation_id) = resolve_installation_id() {
                 body["client_metadata"] = serde_json::json!({
                     "x-codex-installation-id": installation_id,
@@ -138,10 +134,9 @@ impl Provider for CodexProvider {
                 });
             }
 
-            // Upstream always attaches `originator`, `User-Agent`, and a
-            // per-conversation `session_id` header on every Responses API
-            // call. Matching this exactly is what keeps luma classified as a
-            // first-party `codex_cli_rs` client by the backend.
+            // Headers match `codex-rs/core/src/client.rs` +
+            // `codex-rs/login/src/auth/default_client.rs::default_headers`.
+            // Any drift breaks the backend's first-party client check.
             let auth_header = format!("Bearer {}", self.api_key);
             let user_agent = codex_user_agent();
             let mut header_vec: Vec<(&str, &str)> = vec![

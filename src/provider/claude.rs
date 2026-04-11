@@ -1,13 +1,10 @@
 /// Claude provider — Anthropic Messages API with SSE streaming.
 ///
-/// Wire-level parity with the official Claude Code CLI: this module sends the
-/// same `User-Agent`, session/request ids, beta headers, and system prompt
-/// block shape so luma's traffic is indistinguishable from the upstream CLI
-/// from the backend's perspective. The constants and formats are mirrored
-/// directly from the Claude Code source — see `yasasbanukaofficial/claude-code`
-/// in `src/utils/http.ts`, `src/services/api/client.ts`,
-/// `src/services/api/claude.ts`, `src/utils/fingerprint.ts`,
-/// `src/constants/system.ts`, and `src/utils/betas.ts`.
+/// Wire-level parity with the official Claude Code CLI (headers, betas,
+/// system block shape). Sources: `src/utils/http.ts`,
+/// `src/services/api/client.ts`, `src/services/api/claude.ts`,
+/// `src/utils/fingerprint.ts`, `src/constants/system.ts`, `src/utils/betas.ts`
+/// in `yasasbanukaofficial/claude-code`.
 use crate::core::provider::{Provider, StopReason, StreamRequest, StreamResponse};
 use crate::core::types::{
     ContentBlock, Message, Role, ThinkingLevel, ToolCall, ToolCallFunction, ToolSchema, Usage,
@@ -138,10 +135,8 @@ impl Provider for ClaudeProvider {
                 "x-api-key"
             };
 
-            // Match Claude Code CLI default headers exactly — see
-            // `src/services/api/client.ts::getAnthropicClient` and
-            // `src/utils/http.ts::getUserAgent`. Order is stable so the
-            // captured byte sequence matches across builds.
+            // Default headers — matches `src/services/api/client.ts::getAnthropicClient`
+            // and `src/utils/http.ts::getUserAgent`.
             let user_agent = claude_cli_user_agent();
             let session_id = claude_session_id();
             let request_id = uuid_v4().unwrap_or_default();
@@ -389,27 +384,20 @@ fn parse_stop_reason(s: &str) -> StopReason {
     }
 }
 
-/// Current upstream Claude Code CLI version. Used for `User-Agent`, the
-/// billing attribution header `cc_version`, and the fingerprint hash input.
-/// These three consumers MUST agree, because the backend validates the
-/// fingerprint against the cc_version string — a mismatched version would
-/// change the expected hash and fail attribution.
+/// Upstream CLI version. Used for `User-Agent`, `cc_version`, and as input
+/// to [`compute_fingerprint`]. Must match across the three so the backend's
+/// attribution validator accepts the fingerprint.
 const CLI_VERSION: &str = "2.1.101";
 
 const IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
-/// Salt for the attribution fingerprint. Hardcoded in both the backend
-/// validator and the upstream CLI — see `src/utils/fingerprint.ts` line 8.
+/// Hardcoded fingerprint salt — `src/utils/fingerprint.ts:8`.
 const FINGERPRINT_SALT: &str = "59cf53e54c78";
 
-/// Character positions sampled from the first user message to feed the
-/// fingerprint hash. Must match `computeFingerprint` in the upstream CLI.
+/// First-user-message character indices sampled for the fingerprint hash.
 const FINGERPRINT_POSITIONS: [usize; 3] = [4, 7, 20];
 
-/// Process-lifetime stable session id for the `X-Claude-Code-Session-Id`
-/// header. Upstream generates one per CLI invocation; matching that by
-/// caching a UUID for the lifetime of the luma process gives the backend
-/// the same correlation signal.
+/// Stable per-process session id for the `X-Claude-Code-Session-Id` header.
 fn claude_session_id() -> String {
     use std::sync::OnceLock;
     static SESSION_ID: OnceLock<String> = OnceLock::new();
@@ -418,37 +406,28 @@ fn claude_session_id() -> String {
         .clone()
 }
 
-/// Build the CLI User-Agent string upstream sends.
-///
-/// Format (see `src/utils/http.ts::getUserAgent`):
-/// `claude-cli/<version> (external, cli)` for plain external CLI users.
+/// `claude-cli/{CLI_VERSION} (external, cli)` — `src/utils/http.ts::getUserAgent`.
 fn claude_cli_user_agent() -> String {
     format!("claude-cli/{CLI_VERSION} (external, cli)")
 }
 
-/// Build the OAuth-mode `system` array as Claude Code ships it.
+/// Build the OAuth-mode `system` array (`src/utils/api.ts::splitSysPromptPrefix`
+/// + `src/services/api/claude.ts::buildSystemPromptBlocks`).
 ///
-/// Wire shape (mirrored from `src/services/api/claude.ts::buildSystemPromptBlocks`
-/// + `src/utils/api.ts::splitSysPromptPrefix`):
-///
-///   1. attribution header block — `cacheScope: null`, no `cache_control`
-///   2. CLI sysprompt prefix (identity) — `cacheScope: 'org'`,
-///      `cache_control: { type: 'ephemeral' }`
-///   3. any additional user system text — joined, same `cache_control`
+/// Wire shape:
+/// 1. attribution header (no `cache_control`, `cacheScope: null`)
+/// 2. CLI sysprompt prefix / identity (`cache_control: { type: 'ephemeral' }`)
+/// 3. optional user system text (same cache_control)
 fn build_oauth_system(user_system: &str, first_user_content: &str) -> serde_json::Value {
     let fingerprint = compute_fingerprint(first_user_content);
-    // Upstream default (NATIVE_CLIENT_ATTESTATION off for external users):
-    // `cc_version={version}.{fingerprint}; cc_entrypoint=cli;` — no `cch`
-    // segment and no trailing `cc_workload`. Matches
-    // `src/constants/system.ts::getAttributionHeader`.
+    // Default shape — `cch` and `cc_workload` segments are only emitted
+    // under internal feature flags (`src/constants/system.ts:82`).
     let billing = format!(
         "x-anthropic-billing-header: cc_version={CLI_VERSION}.{fingerprint}; cc_entrypoint=cli;"
     );
     let cache_ephemeral = serde_json::json!({"type": "ephemeral"});
     let mut blocks = vec![
-        // Attribution header: cacheScope=null → no cache_control.
         serde_json::json!({"type": "text", "text": billing}),
-        // CLI sysprompt prefix: cacheScope='org' → plain ephemeral.
         serde_json::json!({"type": "text", "text": IDENTITY, "cache_control": cache_ephemeral}),
     ];
     if !user_system.is_empty() {
@@ -461,13 +440,9 @@ fn build_oauth_system(user_system: &str, first_user_content: &str) -> serde_json
     serde_json::Value::Array(blocks)
 }
 
-/// Compute the 3-character attribution fingerprint.
-///
-/// Algorithm (`src/utils/fingerprint.ts::computeFingerprint`):
-/// `SHA256(SALT + msg[4] + msg[7] + msg[20] + version)[:3]`.
-/// Missing positions in the first user message are substituted with `'0'`.
-/// The backend validates this value against `cc_version`, so any drift in
-/// salt, positions, version string, or slice length breaks attribution.
+/// 3-char attribution fingerprint — `src/utils/fingerprint.ts::computeFingerprint`.
+/// `SHA256(SALT + msg[4] + msg[7] + msg[20] + version)[:3]`, missing positions
+/// substituted with `'0'`. Backend-validated: any drift breaks attribution.
 fn compute_fingerprint(first_user_content: &str) -> String {
     use sha2::{Digest, Sha256};
     let chars: String = FINGERPRINT_POSITIONS
@@ -479,21 +454,13 @@ fn compute_fingerprint(first_user_content: &str) -> String {
     format!("{hash:x}")[..3].to_owned()
 }
 
-/// Assemble the `anthropic-beta` header value in the order upstream emits it.
-///
-/// Mirrors `getAllModelBetas` in `src/utils/betas.ts` for the common
-/// external Claude.ai subscriber path on Claude 4.x models:
-///
-///   * `claude-code-20250219` — non-Haiku
-///   * `oauth-2025-04-20` — Claude.ai subscriber
-///   * `interleaved-thinking-2025-05-14` — non-Haiku, not Claude 3.x
-///   * `context-management-2025-06-27` — Claude 4+ context management
-///   * `prompt-caching-scope-2026-01-05` — always sent on first-party
+/// `anthropic-beta` header value, in upstream emit order for the common
+/// Claude.ai subscriber + Claude 4.x path. See
+/// `src/utils/betas.ts::getAllModelBetas`.
 fn build_betas(model: &str) -> String {
     let m = model.to_lowercase();
     let is_haiku = m.contains("haiku");
     let is_claude_3 = m.contains("claude-3-");
-    let is_claude_4_plus = !is_claude_3; // we only target Claude 4+ OAuth
     let mut betas: Vec<&str> = Vec::new();
     if !is_haiku {
         betas.push("claude-code-20250219");
@@ -502,7 +469,7 @@ fn build_betas(model: &str) -> String {
     if !is_haiku && !is_claude_3 {
         betas.push("interleaved-thinking-2025-05-14");
     }
-    if is_claude_4_plus {
+    if !is_claude_3 {
         betas.push("context-management-2025-06-27");
     }
     betas.push("prompt-caching-scope-2026-01-05");
@@ -737,13 +704,11 @@ mod tests {
         assert!(msgs.is_empty());
     }
 
-    // --- Claude Code parity regression tests ---------------------------------
+    // --- Claude Code parity regression tests ---
 
     #[test]
     fn user_agent_matches_upstream_shape() {
         let ua = claude_cli_user_agent();
-        // Upstream: `claude-cli/<version> (external, cli)` — any drift here
-        // is a backend log filter break (see comment in src/utils/http.ts).
         assert!(ua.starts_with("claude-cli/"));
         assert!(ua.ends_with(" (external, cli)"));
         assert!(ua.contains(CLI_VERSION));
@@ -754,8 +719,6 @@ mod tests {
         let a = claude_session_id();
         let b = claude_session_id();
         assert_eq!(a, b);
-        // UUIDv4 canonical form or the "unknown" fallback when entropy is
-        // unavailable — both should be non-empty.
         assert!(!a.is_empty());
     }
 
@@ -768,17 +731,15 @@ mod tests {
 
     #[test]
     fn fingerprint_substitutes_zero_for_missing_positions() {
-        // All three positions are past the end → all '0' chars.
-        let short_fp = compute_fingerprint("abc");
-        let zeros_fp = compute_fingerprint("");
-        assert_eq!(short_fp, zeros_fp);
+        // All three sample positions fall past the end → all '0's.
+        assert_eq!(compute_fingerprint("abc"), compute_fingerprint(""));
     }
 
     #[test]
-    fn fingerprint_is_deterministic_and_version_dependent() {
-        let fp1 = compute_fingerprint("the quick brown fox jumps over lazy dog");
-        let fp2 = compute_fingerprint("the quick brown fox jumps over lazy dog");
-        assert_eq!(fp1, fp2);
+    fn fingerprint_is_deterministic() {
+        let a = compute_fingerprint("the quick brown fox jumps over lazy dog");
+        let b = compute_fingerprint("the quick brown fox jumps over lazy dog");
+        assert_eq!(a, b);
     }
 
     #[test]
@@ -787,7 +748,7 @@ mod tests {
         let arr = sys.as_array().expect("array");
         assert_eq!(arr.len(), 3);
 
-        // Block 0: attribution — no cache_control, format matches upstream.
+        // Block 0: attribution header — no cache_control.
         let billing = arr[0]["text"].as_str().unwrap();
         assert!(billing.starts_with("x-anthropic-billing-header: cc_version="));
         assert!(billing.contains(&format!("cc_version={CLI_VERSION}.")));
@@ -796,12 +757,12 @@ mod tests {
         assert!(!billing.contains("ttl"));
         assert!(arr[0].get("cache_control").is_none());
 
-        // Block 1: identity — plain ephemeral, no ttl.
+        // Block 1: identity — plain ephemeral.
         assert_eq!(arr[1]["text"], IDENTITY);
         assert_eq!(arr[1]["cache_control"]["type"], "ephemeral");
         assert!(arr[1]["cache_control"].get("ttl").is_none());
 
-        // Block 2: user system — plain ephemeral, no ttl.
+        // Block 2: user system — plain ephemeral.
         assert_eq!(arr[2]["text"], "my system");
         assert_eq!(arr[2]["cache_control"]["type"], "ephemeral");
     }
