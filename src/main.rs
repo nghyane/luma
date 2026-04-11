@@ -28,6 +28,7 @@ mod event_bus;
 mod provider;
 mod tool;
 mod tui;
+mod util;
 
 use std::process::Command;
 
