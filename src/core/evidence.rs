@@ -294,7 +294,26 @@ fn build_summary(tool_name: &str, args: &serde_json::Value, result: &str) -> Str
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("<unknown>");
-            format!("{path} ({lines} lines, stored as evidence)")
+            // `offset`/`limit` mean the agent asked for a slice — the
+            // blob is a partial view of the file. Surface that so the
+            // model does not mistake 300 stored lines for 300 total
+            // lines (ses §2.5 / issue 3).
+            let is_partial = args.get("offset").is_some() || args.get("limit").is_some();
+            if is_partial {
+                let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1);
+                let limit = args.get("limit").and_then(|v| v.as_u64());
+                let end = limit.map(|l| offset + l - 1);
+                match end {
+                    Some(e) => format!(
+                        "{path} (partial: lines {offset}-{e}, {lines} lines stored as evidence)"
+                    ),
+                    None => format!(
+                        "{path} (partial: from line {offset}, {lines} lines stored as evidence)"
+                    ),
+                }
+            } else {
+                format!("{path} ({lines} lines, stored as evidence)")
+            }
         }
         "Grep" | "GhSearch" => {
             let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
@@ -385,6 +404,31 @@ mod tests {
         assert_eq!(draft.related_files, vec!["/tmp/x.rs"]);
         assert!(draft.summary.contains("/tmp/x.rs"));
         assert!(draft.summary.contains("100 lines"));
+        assert!(
+            !draft.summary.contains("partial"),
+            "full read must not be tagged partial"
+        );
+    }
+
+    #[test]
+    fn classify_read_with_offset_limit_tags_partial_range() {
+        let args = serde_json::json!({"path": "/tmp/x.rs", "offset": 1, "limit": 300});
+        let draft = classify("Read", &args, "line\n".repeat(302).as_str()).unwrap();
+        assert!(draft.summary.contains("/tmp/x.rs"));
+        assert!(draft.summary.contains("partial"));
+        assert!(
+            draft.summary.contains("lines 1-300"),
+            "summary: {}",
+            draft.summary
+        );
+    }
+
+    #[test]
+    fn classify_read_with_offset_only_tags_partial_from_line() {
+        let args = serde_json::json!({"path": "/tmp/x.rs", "offset": 50});
+        let draft = classify("Read", &args, "line\n".repeat(80).as_str()).unwrap();
+        assert!(draft.summary.contains("partial"));
+        assert!(draft.summary.contains("from line 50"));
     }
 
     #[test]
