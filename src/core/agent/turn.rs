@@ -116,7 +116,7 @@ fn build_provider(
         "anthropic" => {
             let mut p =
                 ClaudeProvider::new(&config.model_id, &auth.token, auth.is_oauth, &auth.label);
-            p.set_thinking(config.thinking);
+            p.set_thinking(p.thinking_capabilities().coerce(config.thinking));
             Box::new(p)
         }
         "codex" => {
@@ -127,12 +127,12 @@ fn build_provider(
                 session_id,
                 &auth.label,
             );
-            p.set_thinking(config.thinking);
+            p.set_thinking(p.thinking_capabilities().coerce(config.thinking));
             Box::new(p)
         }
         _ => {
             let mut p = OpenAIProvider::new(&config.model_id, &auth.token, &auth.label);
-            p.set_thinking(config.thinking);
+            p.set_thinking(p.thinking_capabilities().coerce(config.thinking));
             Box::new(p)
         }
     }

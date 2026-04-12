@@ -243,6 +243,7 @@ pub enum ThinkingLevel {
     Low,
     Medium,
     High,
+    Max,
 }
 
 impl ThinkingLevel {
@@ -252,27 +253,18 @@ impl ThinkingLevel {
             Self::Off => 0,
             Self::Low => 1024,
             Self::Medium => 4096,
-            Self::High => 8192,
+            Self::High | Self::Max => 8192,
         }
     }
 
-    /// Cycle to next level.
-    pub const fn next(self) -> Self {
+    /// Ordering rank used when degrading unsupported levels.
+    pub const fn rank(self) -> u8 {
         match self {
-            Self::Off => Self::Low,
-            Self::Low => Self::Medium,
-            Self::Medium => Self::High,
-            Self::High => Self::Off,
-        }
-    }
-
-    /// Display label — consistent with `AgentMode::as_str` convention.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
+            Self::Off => 0,
+            Self::Low => 1,
+            Self::Medium => 2,
+            Self::High => 3,
+            Self::Max => 4,
         }
     }
 }
@@ -291,17 +283,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn thinking_level_cycle() {
-        assert_eq!(ThinkingLevel::Off.next(), ThinkingLevel::Low);
-        assert_eq!(ThinkingLevel::Low.next(), ThinkingLevel::Medium);
-        assert_eq!(ThinkingLevel::Medium.next(), ThinkingLevel::High);
-        assert_eq!(ThinkingLevel::High.next(), ThinkingLevel::Off);
+    fn thinking_level_rank_orders_levels() {
+        assert!(ThinkingLevel::Off.rank() < ThinkingLevel::Low.rank());
+        assert!(ThinkingLevel::Low.rank() < ThinkingLevel::Medium.rank());
+        assert!(ThinkingLevel::Medium.rank() < ThinkingLevel::High.rank());
+        assert!(ThinkingLevel::High.rank() < ThinkingLevel::Max.rank());
     }
 
     #[test]
     fn thinking_level_budget() {
         assert_eq!(ThinkingLevel::Off.budget(), 0);
         assert_eq!(ThinkingLevel::High.budget(), 8192);
+        assert_eq!(ThinkingLevel::Max.budget(), 8192);
     }
 
     #[test]

@@ -5,7 +5,9 @@
 /// `src/services/api/client.ts`, `src/services/api/claude.ts`,
 /// `src/utils/fingerprint.ts`, `src/constants/system.ts`, `src/utils/betas.ts`
 /// in `yasasbanukaofficial/claude-code`.
-use crate::core::provider::{Provider, StopReason, StreamRequest, StreamResponse};
+use crate::core::provider::{
+    Provider, StopReason, StreamRequest, StreamResponse, ThinkingCapabilities, ThinkingOption,
+};
 use crate::core::types::{ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage};
 use crate::event::Event;
 use crate::provider::json_stream::{JsonStringExtractor, streamable_arg_for};
@@ -52,6 +54,35 @@ impl ClaudeProvider {
 impl Provider for ClaudeProvider {
     fn name(&self) -> &str {
         "claude"
+    }
+
+    fn thinking_capabilities(&self) -> ThinkingCapabilities {
+        if is_adaptive_thinking_model(&self.model) {
+            ThinkingCapabilities::new(vec![
+                ThinkingOption {
+                    level: ThinkingLevel::Off,
+                    label: "off",
+                },
+                ThinkingOption {
+                    level: ThinkingLevel::Low,
+                    label: "low",
+                },
+                ThinkingOption {
+                    level: ThinkingLevel::Medium,
+                    label: "medium",
+                },
+                ThinkingOption {
+                    level: ThinkingLevel::High,
+                    label: "high",
+                },
+                ThinkingOption {
+                    level: ThinkingLevel::Max,
+                    label: "max",
+                },
+            ])
+        } else {
+            ThinkingCapabilities::standard()
+        }
     }
     fn set_thinking(&mut self, level: ThinkingLevel) {
         self.thinking = level;
@@ -718,7 +749,8 @@ fn build_thinking_config(
             ThinkingLevel::Off => return None,
             ThinkingLevel::Low => "low",
             ThinkingLevel::Medium => "medium",
-            ThinkingLevel::High => "max",
+            ThinkingLevel::High => "high",
+            ThinkingLevel::Max => "max",
         };
         return Some((
             serde_json::json!({"type": "adaptive"}),
@@ -790,6 +822,30 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_thinking_capabilities_include_max() {
+        let provider = ClaudeProvider::new("claude-sonnet-4-6", "key", false, "acc");
+        let labels: Vec<_> = provider
+            .thinking_capabilities()
+            .options()
+            .iter()
+            .map(|o| o.label)
+            .collect();
+        assert_eq!(labels, ["off", "low", "medium", "high", "max"]);
+    }
+
+    #[test]
+    fn non_adaptive_thinking_capabilities_stop_at_high() {
+        let provider = ClaudeProvider::new("claude-sonnet-4-5", "key", false, "acc");
+        let labels: Vec<_> = provider
+            .thinking_capabilities()
+            .options()
+            .iter()
+            .map(|o| o.label)
+            .collect();
+        assert_eq!(labels, ["off", "low", "medium", "high"]);
+    }
+
+    #[test]
     fn thinking_config_off_returns_none() {
         assert_eq!(
             build_thinking_config("claude-sonnet-4-5", ThinkingLevel::Off, 8192),
@@ -844,9 +900,17 @@ mod tests {
     }
 
     #[test]
-    fn thinking_config_adaptive_high_maps_to_max_effort() {
+    fn thinking_config_adaptive_high_maps_to_high_effort() {
         let (thinking, output_config) =
             build_thinking_config("claude-sonnet-4-6", ThinkingLevel::High, 8192).unwrap();
+        assert_eq!(thinking["type"], "adaptive");
+        assert_eq!(output_config.unwrap()["effort"], "high");
+    }
+
+    #[test]
+    fn thinking_config_adaptive_max_maps_to_max_effort() {
+        let (thinking, output_config) =
+            build_thinking_config("claude-sonnet-4-6", ThinkingLevel::Max, 8192).unwrap();
         assert_eq!(thinking["type"], "adaptive");
         assert_eq!(output_config.unwrap()["effort"], "max");
     }

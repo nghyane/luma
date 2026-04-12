@@ -8,6 +8,7 @@ mod state;
 use state::{AgentHandle, AppConfig, PickerMode, Screen, UiComponents};
 
 use crate::config::models;
+use crate::core::provider::{Provider, ThinkingCapabilities};
 use crate::core::types::ThinkingLevel;
 use crate::event::Event;
 use crate::tui::document::Document;
@@ -129,6 +130,20 @@ pub struct App {
 }
 
 impl App {
+    fn current_thinking_capabilities(&self) -> ThinkingCapabilities {
+        let Some(model) = &self.config.model else {
+            return ThinkingCapabilities::standard();
+        };
+        match model.source.as_str() {
+            "anthropic" => crate::provider::claude::ClaudeProvider::new(&model.id, "", false, "")
+                .thinking_capabilities(),
+            "codex" => crate::provider::codex::CodexProvider::new(&model.id, "", None, "", "")
+                .thinking_capabilities(),
+            _ => crate::provider::openai::OpenAIProvider::new(&model.id, "", "")
+                .thinking_capabilities(),
+        }
+    }
+
     pub fn new(env_context: String) -> Self {
         let term = termina::PlatformTerminal::new().ok();
         let (w, h) = term
@@ -195,14 +210,13 @@ impl App {
         };
         app.update_status();
         app.refresh_pool_health();
+        let thinking_caps = app.current_thinking_capabilities();
+        let thinking = thinking_caps.coerce(thinking);
+        app.config.thinking = thinking;
         if thinking != ThinkingLevel::Off {
-            let label = match thinking {
-                ThinkingLevel::Off => "off",
-                ThinkingLevel::Low => "low",
-                ThinkingLevel::Medium => "medium",
-                ThinkingLevel::High => "high",
-            };
-            app.ui.status.set_thinking_level(label);
+            app.ui
+                .status
+                .set_thinking_level(thinking_caps.label(thinking));
         }
         app
     }

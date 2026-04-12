@@ -61,6 +61,7 @@ pub fn load_thinking() -> ThinkingLevel {
         "low" => ThinkingLevel::Low,
         "medium" => ThinkingLevel::Medium,
         "high" => ThinkingLevel::High,
+        "max" => ThinkingLevel::Max,
         _ => ThinkingLevel::Off,
     }
 }
@@ -93,6 +94,7 @@ pub fn save_thinking(level: ThinkingLevel) {
         ThinkingLevel::Low => "low",
         ThinkingLevel::Medium => "medium",
         ThinkingLevel::High => "high",
+        ThinkingLevel::Max => "max",
     };
     update_prefs(|p| p.thinking = label.to_owned());
 }

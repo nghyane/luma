@@ -214,17 +214,23 @@ impl super::App {
         let all = models::all_models();
         if let Some(m) = all.iter().find(|m| m.id == model_id) {
             self.config.model = Some(m.clone());
+            let thinking_caps = self.current_thinking_capabilities();
+            self.config.thinking = thinking_caps.coerce(self.config.thinking);
+            crate::config::prefs::save_thinking(self.config.thinking);
             crate::config::prefs::save_mode_model(self.config.mode, model_id);
-            if let Some(tx) = &self.agent.tx
-                && tx
+            if let Some(tx) = &self.agent.tx {
+                if tx
                     .try_send(AgentCommand::SetModel {
                         model_id: m.id.clone(),
                         source: m.source.clone(),
                     })
                     .is_err()
-            {
-                self.doc
-                    .warn("agent is busy; model switch will apply next turn");
+                {
+                    self.doc
+                        .warn("agent is busy; model switch will apply next turn");
+                } else {
+                    let _ = tx.try_send(AgentCommand::SetThinking(self.config.thinking));
+                }
             }
             self.update_status();
         }
@@ -240,7 +246,10 @@ impl super::App {
         }
         self.config.mode = new_mode;
         self.config.model = models::resolve_default(self.config.mode);
+        let thinking_caps = self.current_thinking_capabilities();
+        self.config.thinking = thinking_caps.coerce(self.config.thinking);
         crate::config::prefs::save_mode(self.config.mode);
+        crate::config::prefs::save_thinking(self.config.thinking);
         // Cancel in-flight turn before shutting down — prevents orphan streaming.
         if let Some(c) = self.agent.cancel.take() {
             c.cancel();
@@ -347,7 +356,8 @@ impl super::App {
     }
 
     pub(super) fn cycle_thinking(&mut self) {
-        self.config.thinking = self.config.thinking.next();
+        let thinking_caps = self.current_thinking_capabilities();
+        self.config.thinking = thinking_caps.next(self.config.thinking);
         if let Some(tx) = &self.agent.tx
             && tx
                 .try_send(AgentCommand::SetThinking(self.config.thinking))
@@ -360,7 +370,7 @@ impl super::App {
         self.update_status();
         self.ui
             .status
-            .set_thinking_level(self.config.thinking.as_str());
+            .set_thinking_level(thinking_caps.label(self.config.thinking));
     }
 
     pub(super) fn update_status(&mut self) {
@@ -390,6 +400,12 @@ impl super::App {
             })
             .unwrap_or("");
         self.ui.status.set_provider(provider);
+        let thinking_caps = self.current_thinking_capabilities();
+        let thinking = thinking_caps.coerce(self.config.thinking);
+        self.config.thinking = thinking;
+        self.ui
+            .status
+            .set_thinking_level(thinking_caps.label(thinking));
     }
 
     /// Sync command visibility based on current document state.

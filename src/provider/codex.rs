@@ -1,6 +1,8 @@
 /// Codex provider — OpenAI Responses API at chatgpt.com/backend-api/codex.
 use crate::config::auth::{CODEX_ORIGINATOR, codex_user_agent, resolve_installation_id};
-use crate::core::provider::{Provider, StopReason, StreamRequest, StreamResponse};
+use crate::core::provider::{
+    Provider, StopReason, StreamRequest, StreamResponse, ThinkingCapabilities,
+};
 use crate::core::types::{ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage};
 use crate::event::Event;
 use crate::event_bus::Sender as EventSender;
@@ -54,6 +56,10 @@ impl CodexProvider {
 impl Provider for CodexProvider {
     fn name(&self) -> &str {
         "codex"
+    }
+
+    fn thinking_capabilities(&self) -> ThinkingCapabilities {
+        ThinkingCapabilities::standard()
     }
     fn set_thinking(&mut self, level: ThinkingLevel) {
         self.thinking = level;
@@ -133,7 +139,7 @@ impl Provider for CodexProvider {
                 ThinkingLevel::Off => None,
                 ThinkingLevel::Low => Some("low"),
                 ThinkingLevel::Medium => Some("medium"),
-                ThinkingLevel::High => Some("high"),
+                ThinkingLevel::High | ThinkingLevel::Max => Some("high"),
             };
             if let Some(effort) = effort {
                 body["reasoning"] = serde_json::json!({
