@@ -48,18 +48,11 @@ impl Block {
     }
 
     /// Whether two blocks belong to the same content group (no gap needed between them).
+    /// Only consecutive Tool blocks are grouped — every other content transition
+    /// gets an explicit `Block::Gap`.
     pub fn same_content_group(&self, other: &Block) -> bool {
         let a = self.kind();
-        let b = other.kind();
-        // Thinking → Text is one group (no gap).
-        if a == BlockKind::Thinking && b == BlockKind::Text {
-            return true;
-        }
-        if a == BlockKind::Text && b == BlockKind::Thinking {
-            return true;
-        }
-        // Same kind stays grouped only for Tool sequences.
-        a == b && a == BlockKind::Tool
+        a == other.kind() && a == BlockKind::Tool
     }
 
     /// Content-group discriminant.

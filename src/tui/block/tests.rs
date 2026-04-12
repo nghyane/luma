@@ -589,8 +589,8 @@ fn same_content_group_logic() {
     let tool1 = Block::Tool(ToolBlock::history("Bash", ""));
     let tool2 = Block::Tool(ToolBlock::history("Read", ""));
 
-    // Thinking → Text: same group (no gap)
-    assert!(thinking.same_content_group(&text));
+    // Thinking → Text: different group (explicit gap)
+    assert!(!thinking.same_content_group(&text));
     // Tool → Tool: same group (no gap)
     assert!(tool1.same_content_group(&tool2));
     // Text → Tool: different group

@@ -55,10 +55,6 @@ pub fn render_thinking(stream: &StreamBuf, state: &mut RenderState, width: usize
         result.extend(render_thinking_line(stream.partial(), is_first, width));
     }
 
-    // Trailing blank so following content (Text or Tool) has visual breathing
-    // room. auto_gap skips inserting an extra Gap after Thinking to avoid
-    // stacking two blank lines.
-    result.push(Line::empty());
     result
 }
 

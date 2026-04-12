@@ -393,11 +393,6 @@ impl Document {
             && new_block.is_content()
             && !last.same_content_group(new_block)
         {
-            // Thinking renders its own trailing blank line, so skip the
-            // explicit Gap to avoid stacking two empty rows.
-            if matches!(last, Block::Thinking(_)) {
-                return;
-            }
             self.blocks.push(Block::Gap);
         }
     }
@@ -542,21 +537,15 @@ mod tests {
         doc.append_thinking("hmm");
         doc.newline();
         doc.tool_start("Bash", "$ ls");
-        // Thinking renders its own trailing blank line, so no explicit Gap
-        // block is inserted before Tool — the separator is visual, not
-        // structural. Verify Tool directly follows Thinking.
-        let has_thinking_then_tool = doc
+        let has_gap = doc
             .blocks
             .windows(2)
-            .any(|w| matches!(&w[0], Block::Thinking(_)) && matches!(&w[1], Block::Tool(_)));
-        assert!(
-            has_thinking_then_tool,
-            "Tool should directly follow Thinking without an explicit Gap"
-        );
+            .any(|w| matches!(&w[0], Block::Gap) && matches!(&w[1], Block::Tool(_)));
+        assert!(has_gap, "missing gap between Thinking and Tool");
     }
 
     #[test]
-    fn no_gap_thinking_to_text() {
+    fn gap_thinking_to_text() {
         let mut doc = Document::new();
         doc.append_thinking("hmm\n");
         doc.append_token("answer");
@@ -564,7 +553,7 @@ mod tests {
             .blocks
             .windows(2)
             .any(|w| matches!(&w[0], Block::Gap) && matches!(&w[1], Block::Text(_)));
-        assert!(!has_gap, "should not have gap between Thinking and Text");
+        assert!(has_gap, "expected gap between Thinking and Text");
     }
 
     #[test]
