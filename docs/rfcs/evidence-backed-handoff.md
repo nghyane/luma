@@ -14,11 +14,15 @@ RFC này được ship theo milestone, không theo 6 phase tuần tự (§10):
   rename → append record). Image path scoped sang `images/`. Provider
   adapters không đổi (destructure thủ công, `evidence_id` không lên wire).
 - **M2 planner phase A — Evidence dedup injection (shipped).** Commits
-  `6508100`, `3aae889`. `core/context_plan.rs` chèn giữa `session.messages`
-  và `provider.stream()`. Một rule duy nhất: dedup latest-per-file trong
-  recent turn window, greedy-fit dưới budget 32K chars, inject in-place
-  vào user turn cuối (không tạo User message mới — phá alternation).
-  Trigger khi có bằng chứng duplicate read (ses_19d802b2734 §2.1).
+  `6508100`, `3aae889`, `d3b62ea`, `1f86532`. `core/context_plan.rs` chèn
+  giữa `session.messages` và `provider.stream()`. Một rule duy nhất:
+  dedup latest-per-file trong recent turn window, greedy-fit dưới budget
+  32K chars, inject in-place vào user turn cuối (không tạo User message
+  mới — phá alternation). Anchor bao phủ cả tool_result tail để fire
+  đúng lúc duplicate loop xảy ra (§9.1). Path normalize trước khi dedup
+  để `src/x.rs` / `./src/x.rs` / `{cwd}/src/x.rs` cùng key (§6.6).
+  Trigger từ ses_19d802b2734 (§2.2); post-ship fix từ ses_19d8049f736
+  (§2.3).
 - **M2 handoff + provider switch (deferred).** `core/handoff.rs` và
   `ProviderCacheHint` không implement cho tới khi có signal thực từ
   §16. Planner hiện dùng turn_index recency thay cho `files_in_play`
@@ -115,10 +119,43 @@ Session dev đầu tiên sau khi M1 ship, ~2 phút, 63 messages:
   Read lại. Signal #4 của §16 quan sát được ngay từ session đầu →
   trigger M2 planner phase A sớm hơn dự định.
 - **`related_files` populated đúng từ args.** Mọi record có path thực
-  — sẵn sàng cho planner dedup rule (§9.1).
+  — sẵn sàng cho planner dedup rule (§9.1). *Nhưng giá trị thô
+  không normalize* — xem §2.3 cho hệ quả.
 - **`EvidenceKind` distribution:** 13/13 là `read_excerpt` cho session
   dev read-heavy này; 0 BuildLog. Phase A ưu tiên case read-heavy —
   case verification cần session chạy test để validate.
+
+### 2.3. Bằng chứng từ Phase A post-ship (ses_19d8049f736)
+
+Session dev đầu tiên sau khi phase A ship, ~5.5 phút, 71 messages, 27
+tool call (trong một assistant turn duy nhất 26 tool + 1 user). Đo hai
+bug design trong phase A bản đầu:
+
+- **Anchor rule fire 0 lần.** `find_last_user_text_index` yêu cầu tail
+  là user+text. Trong session có 1 assistant turn chứa 26 tool call;
+  mọi stream iter giữa loop có tail = `tool_result` → guard skip →
+  store có record nhưng không inject lần nào. Phase A về mặt code
+  path **không chạy**.
+- **Duplicate cluster trong cùng turn, không cross-turn.** Giả định
+  gốc (duplicate xuất hiện giữa các user turn) sai — pattern thực là
+  agent loop `Read → reason → Read → reason …` trong **cùng một
+  assistant turn**. Injection point duy nhất thấy được bởi
+  `stream()` tiếp theo là message cuối = `tool_result` user message.
+- **Path spelling mismatch sẽ bypass dedup.** `extract_related_files`
+  lưu raw path từ args; agent gọi `Read src/x.rs` rồi `Read
+  /Users/.../src/x.rs` → 2 record, 2 key dedup, 2 injection cho cùng
+  file. Confirm bằng code inspect — chưa hit trong session này
+  nhưng risk rõ ràng.
+
+Ba fix shipped ngay sau session (§0):
+
+- `d3b62ea` `fix(context_plan): anchor on any user tail and dedup
+  injected evidence` — nới anchor để fire ở tool_result tail; thêm
+  dedup idempotent qua header `# Retrieved evidence: {id}` để không
+  double-inject khi cùng record đã có trong transcript.
+- `1f86532` `fix(evidence): normalize related_files for dedup across
+  path spellings` — `normalize_path` (strip `./`, rewrite cwd-prefix
+  sang relative) ở classify time, không đụng disk.
 
 Dự án này cần:
 
@@ -423,6 +460,34 @@ pub trait Tool {
 
 Dependency vẫn theo chiều `agent → tool` (RULES §4), không đảo.
 
+### 6.6. Path normalization cho dedup (shipped)
+
+`extract_related_files` (`core::evidence`) normalize path trước khi
+gắn vào `EvidenceRecord.related_files` để planner dedup hoạt động
+đúng khi agent dùng nhiều spelling cho cùng file.
+
+**Rule (`normalize_path`):**
+
+1. Strip leading `./`.
+2. Absolute path có prefix là cwd → rewrite sang relative từ cwd.
+3. Absolute path ngoài cwd → giữ nguyên (identity riêng).
+
+Không đụng disk — `Write` có thể classify path chưa tồn tại. Dùng
+`Path::strip_prefix` của std, không dùng `canonicalize()`.
+
+**Không xử lý (để sau):**
+
+- Symlink resolution — cần I/O, và path spelling thường không liên
+  quan tới symlink trong dev flow.
+- Windows drive letter case (`C:\` vs `c:\`) — OS-dependent handling
+  chưa cần ở scope hiện tại.
+- `../` collapse trong relative path — hiếm gặp trong agent arg.
+  Thêm khi có session reproduce.
+
+Test matrix trong `core::evidence::tests`: leading-dot-slash,
+cwd-prefix absolute, outside-cwd absolute, dedup-key equality qua
+`classify()` cho 3 spelling.
+
 ## 7. Cách hoạt động
 
 ### 7.1. Normal turn
@@ -523,12 +588,14 @@ Planner dùng bucket theo độ ưu tiên.
 ### Evidence loading (Phase A shipped)
 
 Phase A ship rule dedup độc lập handoff — đã chữa signal duplicate read
-từ ses_19d802b2734 (§2.2):
+từ ses_19d802b2734 (§2.2) và ba bug design phát hiện post-ship ở
+ses_19d8049f736 (§2.3):
 
-> Với mỗi user turn cuối (không giữa tool-loop), xét evidence có
-> `turn_index ≥ current_turn - RECENT_TURN_WINDOW`. Dedup latest-per-file.
+> Với trailing user message (bất kể chỉ chứa tool_result hay text), xét
+> evidence có `turn_index ≥ current_turn - RECENT_TURN_WINDOW`, chưa
+> injected trước đó. Dedup latest-per-file theo path đã normalize.
 > Sort recent-first, greedy-fit dưới `EVIDENCE_INJECTION_BUDGET_CHARS`.
-> Inject chronological order vào user turn cuối.
+> Inject chronological order — prepend content blocks vào user turn đó.
 
 Constants shipped:
 
@@ -548,10 +615,24 @@ Rule-set chỉ mở rộng khi có evidence thực từ §16 metrics.
 
 ### 9.1. Rule hiện tại (Phase A)
 
-**Anchor discovery.** Chỉ inject khi message cuối cùng của transcript là
-user turn có text/paste block. Nếu cuối là tool_result (giữa tool-loop)
-hoặc assistant message → passthrough. Rewrite user turn cũ giữa loop
-sẽ phá cache prefix và mis-align evidence với tool_use đã xử lý.
+**Anchor discovery.** `find_injection_anchor` accept tail là bất kỳ
+`Role::User` message — text, paste, hoặc tool_result only. Assistant
+tail và system-only → passthrough. Lý do nới guard: duplicate read
+thực tế cluster trong cùng assistant turn (ses_19d8049f736 §2.3);
+tail trong tool-loop iter là `tool_result` user message — không
+anchor vào đó thì phase A không fire. Chỉ anchor message **cuối
+cùng**, không scan ngược — user turn cũ giữ nguyên để cache prefix
+ổn định.
+
+**Idempotency qua header scan.** `collect_injected_ids` scan các Text
+block tìm prefix `# Retrieved evidence: {id}`; record đã có trong
+transcript bị filter khỏi selection set. Mỗi iter của cùng tool loop
+vẫn chạy planner nhưng không re-inject — tail message tăng monotonic
+theo số evidence unique, không phình theo iter count.
+
+**Path normalization cho dedup.** `related_files` đã normalize ở
+classify time (§6.6). Dedup key dùng path sau normalize → 3 spelling
+cùng file dedup đúng về 1 record.
 
 **Selection algorithm.**
 
@@ -560,7 +641,9 @@ sẽ phá cache prefix và mis-align evidence với tool_use đã xử lý.
 2. candidates   = records có blob_path.is_some()
                   ∧ turn_index ≥ window_start
                   ∧ related_files non-empty
+                  ∧ id ∉ already_injected
 3. latest[file] = max(turn_index) của record match file
+                  (file đã normalize)
 4. deduped      = record còn candidate nếu nó là latest[f]
                   cho ít nhất một f ∈ related_files
 5. sort deduped DESC by turn_index
@@ -571,7 +654,8 @@ sẽ phá cache prefix và mis-align evidence với tool_use đã xử lý.
 
 **Injection.** Prepend các evidence block (mỗi block = `ContentBlock::Text`
 có header `# Retrieved evidence: {id} ({summary})\n\n{body}`) vào
-`user_turn.content`. User text gốc vẫn cuối. Claude yêu cầu user/assistant
+`user_turn.content`. Original content (user text hoặc tool_result
+blocks) giữ nguyên sau evidence. Claude yêu cầu user/assistant
 alternation nghiêm — tạo User message mới sẽ phá wire format.
 
 **Fallback.** Blob missing on disk → skip record, log qua `dbg_log!`.
@@ -622,7 +706,7 @@ Ba item gốc thuộc "Phase 2" bị drop khỏi M1:
 
 ### M2 planner phase A — Evidence dedup (shipped)
 
-Hai commit, trigger sau khi quan sát duplicate read trong
+Hai commit ship ban đầu, trigger sau khi quan sát duplicate read trong
 ses_19d802b2734 (§2.2):
 
 1. **`feat(context_plan): scaffold planner with passthrough`** (`6508100`) —
@@ -630,18 +714,36 @@ ses_19d802b2734 (§2.2):
    wire vào `turn::run_turn` thay cho `&session.messages` trực tiếp.
    3 tests preserve order/count/tool_result+evidence_id.
 2. **`feat(context_plan): inject deduped evidence into pending user turn`**
-   (`3aae889`) — select + inject rule (§9.1). 10 tests: passthrough
-   paths, dedup latest-per-file, budget skip, window filter, mid-loop
-   passthrough, assistant-tail passthrough, missing blob graceful.
+   (`3aae889`) — select + inject rule sơ khai. 10 tests: passthrough
+   paths, dedup latest-per-file, budget skip, window filter, assistant
+   tail passthrough.
+
+Hai commit fix sau ses_19d8049f736 (§2.3) cho thấy 2 bug design:
+
+3. **`fix(context_plan): anchor on any user tail and dedup injected evidence`**
+   (`d3b62ea`) — nới anchor để fire ở tool_result tail (duplicate thực
+   sự cluster intra-turn, không cross-turn); `collect_injected_ids`
+   scan header `# Retrieved evidence: {id}` để skip record đã inject →
+   idempotent qua mỗi iter của cùng tool loop. Test pivot: cũ
+   `does_not_inject_mid_tool_loop` (semantic sai) thay bằng
+   `injects_into_tool_result_user_message` + `idempotent_across_tool_loop_iters`.
+4. **`fix(evidence): normalize related_files for dedup across path spellings`**
+   (`1f86532`) — `normalize_path` ở classify time: strip `./`,
+   rewrite cwd-prefix absolute → relative. Ba spelling cùng file dedup
+   đúng về 1 key. 4 tests thêm trong `core::evidence`.
 
 Deviation so với §9 gốc:
 
-- Dedup dựa `related_files` thuần, không cần `handoff.files_in_play`.
-  Handoff chưa ship; phase A đủ chữa signal #4 một mình.
+- Dedup dựa `related_files` thuần (đã normalize), không cần
+  `handoff.files_in_play`. Handoff chưa ship; phase A đủ chữa
+  signal #4 một mình.
 - Inject **in-place** vào user turn cuối (prepend content blocks) thay
   vì tạo Message mới. Wire-safe với Claude alternation requirement.
-- Chỉ anchor user turn **ở cuối** transcript; không scan ngược tìm user
-  text — giữ transcript immutable khi đang giữa tool-loop.
+- Anchor accept tool_result-only user message. Cache prefix vẫn ổn
+  vì planner chỉ chạm message cuối; user turn cũ giữ nguyên.
+- Chỉ anchor **message cuối cùng**, không scan ngược — rewrite user
+  turn mid-transcript sẽ phá cache và mis-align evidence với
+  tool_use đã xử lý.
 
 ### M2 phase B — Handoff + provider switch (deferred)
 
@@ -711,22 +813,33 @@ hoặc từ kinh nghiệm M1):
 - **`Session` sub-struct split:** không ở M1 hay Phase A. Flat thêm
   2 field (`evidence`, future `handoff`) không gây đau; tách khi
   `ProviderThreads` vào sẽ biết shape đúng.
-- **Planner anchor:** chỉ user turn **cuối cùng** của transcript, không
-  scan ngược. Rewrite user turn cũ giữa tool-loop sẽ phá cache prefix
-  và mis-align evidence với tool_use đã xử lý (§9.1).
+- **Planner anchor:** accept bất kỳ user message ở tail (text, paste,
+  hoặc tool_result). Không scan ngược — chỉ message cuối. Rewrite
+  user turn cũ giữa tool-loop sẽ phá cache prefix và mis-align
+  evidence với tool_use đã xử lý (§9.1). *Lưu ý:* bản phase A đầu
+  chỉ anchor user-text; fix ở `d3b62ea` sau khi quan sát 0 fire
+  trong ses_19d8049f736.
+- **Planner idempotency:** scan Text block trong transcript tìm header
+  `# Retrieved evidence: {id}`; record đã có thì không re-inject.
+  Giữ tail message stable qua mỗi iter của cùng tool loop (§9.1).
 - **Planner injection shape:** in-place prepend `ContentBlock::Text`,
   không tạo Message mới. Claude API reject hai user message liên tiếp.
   OpenAI/Codex reconstruct từ cùng `ContentBlock` sequence nên uniform.
 - **Planner recency window:** `RECENT_TURN_WINDOW = 15`. Từ duplicate-read
   cluster (~10-20 turn) trong ses_19d802b2734. Tune khi có session workload
   khác.
+- **Path normalization cho dedup:** `normalize_path` strip `./`,
+  rewrite cwd-prefix absolute → relative. Không dùng `canonicalize()`
+  (đụng disk, Write có path chưa tồn tại). Symlink, `../` collapse,
+  Windows drive letter case để sau khi reproduce (§6.6).
 
 ## 14. Rủi ro chính cần canh
 
 - **Planner heuristic drift.** Một khi chạy được, rất dễ thêm rule mà không
   test. Ép nguyên tắc "mỗi rule mới = 1 test regression". Phase A đã ship
-  với 13 test cover passthrough + dedup + budget + anchor — rule mới của
-  Phase B phải giữ gate này.
+  với 14 context_plan test + 4 evidence normalize test cover passthrough,
+  dedup, budget, anchor, idempotency, path spelling — rule mới của Phase B
+  phải giữ gate này.
 - **I/O overhead.** Mid-turn save hiện đã ghi session.json mỗi batch. M1
   thêm blob fsync + rename mỗi tool_result ≥ 8K. Phase A thêm đọc blob
   mỗi turn khi có evidence match. Chưa đo ở production; nếu metrics
@@ -738,6 +851,12 @@ hoặc từ kinh nghiệm M1):
 - **Planner chọn sai file.** Phase A dedup thuần theo recency; nếu user
   chuyển focus sang file ngoài window, evidence cũ không được load.
   Signal để cân nhắc Phase B ranking (§16.2).
+- **Evidence stale sau Edit.** Dedup theo record id: nếu `ev_100` đọc
+  file X, sau đó `Edit` X ở turn kế, blob `ev_100` vẫn ở disk và
+  planner vẫn inject nó (vì đã match dedup). Model thấy code cũ, có
+  thể commit nhầm. Phase B có thể invalidate khi Edit cùng file;
+  hiện tại agent vẫn có thể `Read` lại để force refresh và tạo
+  record mới.
 
 ## 15. Khuyến nghị
 
@@ -756,13 +875,24 @@ Không nên:
 
 ## 16. Gate — tiêu chí bật từng phase
 
-### 16.1. Phase A (planner dedup) — đã trigger
+### 16.1. Phase A (planner dedup) — đã trigger và đã fix post-ship
 
-**Signal đã quan sát:**
+**Signal đã quan sát (trigger ship):**
 - **Duplicate read loop** (signal #4 mở rộng). Ses_19d802b2734 cho thấy
   agent `Read` lại cùng file 3 lần trong cluster ~10-20 turn vì
   summary 85 chars không mang content. Agent stateless giữa các turn.
-  → Phase A shipped.
+  → Phase A shipped (`6508100`, `3aae889`).
+
+**Bug design quan sát ngay session sau (ses_19d8049f736, §2.3) → fix:**
+- **Anchor quá hẹp fire 0 lần.** Duplicate thực tế cluster intra-turn,
+  không cross-turn. → `d3b62ea` nới anchor + thêm dedup idempotent.
+- **Path spelling không normalize.** 3 spelling cùng file → 3 key
+  dedup → double-inject. → `1f86532` normalize_path.
+
+Bài học: gate M2 phase A ship được trên scan data (§2.1) + cross-turn
+hypothesis, nhưng intra-turn pattern chỉ lộ ra khi observe session
+thực (§2.3). RFC không dự đoán được; rollout qua commit nhỏ + observe
+là đúng approach.
 
 ### 16.2. Phase B (handoff + provider switch) — pending
 
@@ -783,6 +913,10 @@ Phase B chỉ triển khai khi có ít nhất một signal cụ thể từ produ
 - **Planner chọn sai evidence.** Phase A dedup theo recency; nếu user
   quay lại file cũ (ngoài window 15) thường xuyên → cần
   `unresolved hit > user-mentioned file > recency` ranking.
+- **Stale evidence sau Edit.** Model commit nhầm dựa trên blob cũ vì
+  planner inject blob của record trước Edit → cần invalidate record
+  khi Edit cùng file. Có thể làm standalone không cần handoff, nhưng
+  gộp vào Phase B để batch scope.
 
 Không signal nào kích hoạt → Phase A đã đủ. Phase B chỉ là complexity
 thừa.
