@@ -11,11 +11,21 @@
 //!
 //! ## Evidence selection
 //!
-//! Evidence injection targets one observed failure mode: the agent re-
-//! reads the same file across turns because the transcript only carries
-//! short summaries (e.g. `"src/parser.rs (520 lines, stored as
+//! Evidence injection targets the duplicate-tool-call loop: the agent
+//! calls `Read` on the same file repeatedly because the transcript only
+//! carries short summaries (e.g. `"src/parser.rs (520 lines, stored as
 //! evidence)"`). Without the planner, a session that `Read`s the same
-//! file 3 times creates 3 evidence blobs and 3 tool round-trips.
+//! file three times creates three evidence blobs and three tool
+//! round-trips.
+//!
+//! Observed distribution (ses_19d802b2734): duplicate reads cluster
+//! *inside a single assistant turn*, not across turns. The planner
+//! therefore anchors on the trailing user message of the transcript
+//! even when it only carries `tool_result` blocks — that is the sole
+//! insertion point visible to the provider on the very next
+//! `stream()` call within the same tool loop. Anchoring on a
+//! user-text message only (the original design) would miss this case
+//! entirely; phase A as initially shipped never fired in practice.
 //!
 //! The rule (RFC §9, one rule only):
 //!
@@ -26,10 +36,13 @@
 //! 3. Rank by `turn_index` descending (most recent first).
 //! 4. Greedy fit under [`EVIDENCE_INJECTION_BUDGET_CHARS`] — skip any
 //!    record that would overflow rather than truncating it.
+//! 5. Skip records already injected in the transcript (detected by
+//!    the stable header `# Retrieved evidence: {id}`). Idempotent
+//!    across tool-loop iterations.
 //!
-//! Injected evidence is wrapped in a `User` text message placed just
-//! before the final user turn, so the model sees it as retrieved
-//! context. The evidence store itself is unchanged.
+//! Injected evidence is prepended as `ContentBlock::Text` entries to
+//! the anchor message's content. The evidence store itself is
+//! unchanged.
 
 use crate::core::evidence::{EvidenceRecord, EvidenceStore};
 use crate::core::types::{ContentBlock, Message, Role};
@@ -66,27 +79,27 @@ pub struct PlanInput<'a> {
 /// Build the prepared message sequence for a single provider call.
 ///
 /// Passthrough semantics when no evidence can be injected (empty store,
-/// no assets dir, mid-tool-loop turn). See module doc for selection
-/// rules.
+/// no assets dir, no user anchor). See module doc for selection rules.
 ///
 /// Evidence text is prepended as additional `ContentBlock::Text` entries
-/// to the last user text message — not inserted as separate messages.
+/// to the trailing user message — not inserted as separate messages.
 /// Anthropic requires strict user/assistant alternation; inserting a
-/// second user message before the final user turn would produce two
-/// consecutive user messages and fail at the wire layer. OpenAI/Codex
-/// reconstruct their format from the same `ContentBlock` sequence so
-/// the in-place merge works uniformly.
+/// second user message would fail at the wire layer. The anchor may be
+/// a user-text turn *or* a `tool_result`-only user turn: the latter is
+/// the common case inside a multi-tool-call assistant turn, which is
+/// where duplicate reads actually happen.
 pub fn build_prepared_messages(input: PlanInput<'_>) -> Vec<Message> {
     let mut out: Vec<Message> = input.transcript.to_vec();
 
     let Some(assets_dir) = input.assets_dir else {
         return out;
     };
-    let Some(anchor) = find_last_user_text_index(&out) else {
+    let Some(anchor) = find_injection_anchor(&out) else {
         return out;
     };
+    let already = collect_injected_ids(&out);
     let current_turn = out.len();
-    let selected = select_evidence(&input.evidence.records, current_turn);
+    let selected = select_evidence(&input.evidence.records, current_turn, &already);
     if selected.is_empty() {
         return out;
     }
@@ -104,9 +117,8 @@ pub fn build_prepared_messages(input: PlanInput<'_>) -> Vec<Message> {
         return out;
     }
 
-    // Prepend evidence blocks into the anchor message so the anchor's
-    // final text remains last — model reads evidence, then the user's
-    // actual request.
+    // Prepend evidence blocks so the anchor's original content (user
+    // text or tool_result blocks) remains after the retrieved context.
     let original = std::mem::take(&mut out[anchor].content);
     let mut merged = Vec::with_capacity(blocks.len() + original.len());
     merged.extend(blocks);
@@ -115,44 +127,75 @@ pub fn build_prepared_messages(input: PlanInput<'_>) -> Vec<Message> {
     out
 }
 
-/// Return the index of the trailing user text message — but only when
-/// it is actually the last message.
+/// Return the index of the trailing user message — the injection point.
 ///
-/// Evidence is injected right into that message's content so the model
-/// sees it as retrieved context for the pending request. Two cases
-/// explicitly disable injection:
+/// Anchors on *any* user message at the tail (text, paste, or
+/// tool_result). Skips when the tail is an assistant message: a
+/// streamed-out assistant turn without pending tool calls is already
+/// the final wire payload; there is nothing to inject before. Also
+/// skips when the tail is system (boot state) or the transcript is
+/// empty.
 ///
-/// * transcript is empty, or
-/// * the final message is not a user-text turn (we're mid tool-loop:
-///   last message is either an assistant response or a tool_result).
-///
-/// Rewriting a user turn from earlier in the session would both break
-/// the cache prefix and mis-align evidence with a tool-use that has
-/// already been satisfied.
-fn find_last_user_text_index(msgs: &[Message]) -> Option<usize> {
+/// A user-text turn mid-transcript (e.g. the turn that started the
+/// current assistant work) is deliberately not anchored: rewriting it
+/// while the assistant is still executing tool calls would invalidate
+/// the cache prefix and mis-align evidence with tool_uses already
+/// satisfied.
+fn find_injection_anchor(msgs: &[Message]) -> Option<usize> {
     let last = msgs.len().checked_sub(1)?;
-    let m = &msgs[last];
-    if m.role != Role::User {
+    if msgs[last].role != Role::User {
         return None;
     }
-    let has_text = m
-        .content
-        .iter()
-        .any(|b| matches!(b, ContentBlock::Text { .. } | ContentBlock::Paste { .. }));
-    if has_text { Some(last) } else { None }
+    Some(last)
+}
+
+/// Collect evidence ids already materialised as text blocks in the
+/// transcript. Used to skip double-injection across tool-loop
+/// iterations — the header `# Retrieved evidence: {id}` is the stable
+/// marker [`load_evidence_block`] writes.
+fn collect_injected_ids(msgs: &[Message]) -> HashSet<String> {
+    const PREFIX: &str = "# Retrieved evidence: ";
+    let mut ids = HashSet::new();
+    for m in msgs {
+        for b in &m.content {
+            let ContentBlock::Text { text } = b else {
+                continue;
+            };
+            let Some(rest) = text.strip_prefix(PREFIX) else {
+                continue;
+            };
+            // Header format: "{id} ({summary})\n\n…". Id is everything
+            // up to the first space or '('.
+            let end = rest
+                .find(|c: char| c.is_whitespace() || c == '(')
+                .unwrap_or(rest.len());
+            if end > 0 {
+                ids.insert(rest[..end].to_owned());
+            }
+        }
+    }
+    ids
 }
 
 /// Select evidence records to inject, in chronological order.
 ///
 /// Dedups by file (latest record per file wins), filters by the recent
-/// turn window, ranks most-recent-first for budget decisions, then
-/// returns in chronological order so injection reads top-down.
-fn select_evidence(records: &[EvidenceRecord], current_turn: usize) -> Vec<&EvidenceRecord> {
+/// turn window, skips records already injected (idempotent across
+/// tool-loop iterations), ranks most-recent-first for budget decisions,
+/// then returns in chronological order so injection reads top-down.
+fn select_evidence<'a>(
+    records: &'a [EvidenceRecord],
+    current_turn: usize,
+    already_injected: &HashSet<String>,
+) -> Vec<&'a EvidenceRecord> {
     let window_start = current_turn.saturating_sub(RECENT_TURN_WINDOW);
     let candidates_vec: Vec<&EvidenceRecord> = records
         .iter()
         .filter(|r| {
-            r.blob_path.is_some() && r.turn_index >= window_start && !r.related_files.is_empty()
+            r.blob_path.is_some()
+                && r.turn_index >= window_start
+                && !r.related_files.is_empty()
+                && !already_injected.contains(&r.id)
         })
         .collect();
 
@@ -280,20 +323,12 @@ mod tests {
     }
 
     #[test]
-    fn passthrough_when_no_user_text_anchor() {
-        // Only tool-result messages — no text user turn to inject before.
+    fn passthrough_when_system_only() {
+        // Only a system message exists — no user anchor yet (first turn
+        // boot state).
         let tmp = tempfile::tempdir().unwrap();
         write_blob(tmp.path(), "ev_1", "body");
-        let msgs = vec![Message {
-            role: Role::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "tc_1".into(),
-                content: "summary".into(),
-                is_error: false,
-                evidence_id: Some("ev_1".into()),
-            }],
-            origin: None,
-        }];
+        let msgs = vec![Message::system("sys")];
         let store = EvidenceStore {
             records: vec![rec("ev_1", 0, &["a.rs"], 100, true)],
         };
@@ -302,11 +337,12 @@ mod tests {
             evidence: &store,
             assets_dir: Some(tmp.path()),
         });
-        assert_eq!(out.len(), 1, "nothing to inject before");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].content.len(), 1, "system unchanged");
     }
 
     #[test]
-    fn injects_one_evidence_before_last_user_text() {
+    fn injects_one_evidence_into_user_text_tail() {
         let tmp = tempfile::tempdir().unwrap();
         write_blob(tmp.path(), "ev_1", "fn main() {}");
         let msgs = vec![
@@ -511,13 +547,35 @@ mod tests {
     }
 
     #[test]
-    fn does_not_inject_mid_tool_loop() {
-        // After a tool call the last message is the tool_result — the
-        // pending user turn is already in history. Injecting into an
-        // earlier user turn would rewrite it mid-turn and invalidate
-        // the cache prefix.
+    fn passthrough_when_tail_is_assistant() {
+        // Assistant tail means the previous turn just finished; there
+        // is no pending user input to decorate.
         let tmp = tempfile::tempdir().unwrap();
         write_blob(tmp.path(), "ev_1", "body");
+        let msgs = vec![Message::user("q"), Message::assistant("answer")];
+        let store = EvidenceStore {
+            records: vec![rec("ev_1", 0, &["a.rs"], 100, true)],
+        };
+        let out = build_prepared_messages(PlanInput {
+            transcript: &msgs,
+            evidence: &store,
+            assets_dir: Some(tmp.path()),
+        });
+        assert_eq!(out.len(), 2);
+        match &out[1].content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "answer"),
+            _ => panic!("assistant tail must not be touched"),
+        }
+    }
+
+    #[test]
+    fn injects_into_tool_result_user_message() {
+        // Mid tool-loop: assistant just emitted a tool_use and the
+        // tool_result user message is the tail. This is the hot path
+        // for duplicate reads — the planner must decorate this user
+        // message so the next stream() call sees the evidence.
+        let tmp = tempfile::tempdir().unwrap();
+        write_blob(tmp.path(), "ev_1", "fn main() {}");
         let msgs = vec![
             Message::user("fix this"),
             Message {
@@ -541,7 +599,7 @@ mod tests {
             },
         ];
         let store = EvidenceStore {
-            records: vec![rec("ev_1", 1, &["a.rs"], 50, true)],
+            records: vec![rec("ev_1", 1, &["a.rs"], 12, true)],
         };
         let out = build_prepared_messages(PlanInput {
             transcript: &msgs,
@@ -549,34 +607,111 @@ mod tests {
             assets_dir: Some(tmp.path()),
         });
         assert_eq!(out.len(), 3);
-        // "fix this" user turn must be untouched.
+        // "fix this" user turn untouched — only the tool_result tail is
+        // decorated.
         assert_eq!(out[0].content.len(), 1);
         match &out[0].content[0] {
             ContentBlock::Text { text } => assert_eq!(text, "fix this"),
             _ => panic!(),
         }
+        // Tail user message: evidence block, then original tool_result.
+        let tail = &out[2];
+        assert_eq!(tail.role, Role::User);
+        assert_eq!(tail.content.len(), 2);
+        match &tail.content[0] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("Retrieved evidence: ev_1"));
+                assert!(text.contains("fn main()"));
+            }
+            _ => panic!("evidence must be prepended"),
+        }
+        match &tail.content[1] {
+            ContentBlock::ToolResult { tool_use_id, .. } => {
+                assert_eq!(tool_use_id, "tc_1")
+            }
+            _ => panic!("tool_result must survive"),
+        }
     }
 
     #[test]
-    fn does_not_inject_when_last_is_assistant() {
-        // Assistant streamed a pure-text response (no tool_use). Planner
-        // would next be called only if the turn continues — but to be
-        // safe, planner must not inject when the tail is an assistant
-        // message: rewriting a user turn before it would invalidate the
-        // prefix that produced the response.
+    fn idempotent_across_tool_loop_iters() {
+        // Simulate iter N → iter N+1 of the same tool loop. After iter
+        // N the transcript carries an injected header for ev_1; iter
+        // N+1 must not duplicate that injection.
         let tmp = tempfile::tempdir().unwrap();
         write_blob(tmp.path(), "ev_1", "body");
-        let msgs = vec![Message::user("q"), Message::assistant("answer")];
+        let msgs = vec![
+            Message::user("q"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "tc_1".into(),
+                    name: "Read".into(),
+                    input: serde_json::json!({"path": "a.rs"}),
+                }],
+                origin: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "tc_1".into(),
+                    content: "summary".into(),
+                    is_error: false,
+                    evidence_id: Some("ev_1".into()),
+                }],
+                origin: None,
+            },
+        ];
         let store = EvidenceStore {
-            records: vec![rec("ev_1", 0, &["a.rs"], 50, true)],
+            records: vec![rec("ev_1", 1, &["a.rs"], 50, true)],
         };
-        let out = build_prepared_messages(PlanInput {
+        let iter_n = build_prepared_messages(PlanInput {
             transcript: &msgs,
             evidence: &store,
             assets_dir: Some(tmp.path()),
         });
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].content.len(), 1);
+        // Iter N: evidence injected once.
+        let iter_n_tail = iter_n.last().unwrap();
+        assert_eq!(iter_n_tail.content.len(), 2);
+        let evidence_occurrences_n: usize = iter_n_tail
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => {
+                    Some(text.matches("Retrieved evidence: ev_1").count())
+                }
+                _ => None,
+            })
+            .sum();
+        assert_eq!(evidence_occurrences_n, 1);
+
+        // Iter N+1: feed the injected transcript back in, same store.
+        // Planner must recognise ev_1 is already present and skip.
+        let iter_np1 = build_prepared_messages(PlanInput {
+            transcript: &iter_n,
+            evidence: &store,
+            assets_dir: Some(tmp.path()),
+        });
+        let iter_np1_tail = iter_np1.last().unwrap();
+        assert_eq!(
+            iter_np1_tail.content.len(),
+            2,
+            "no new block — still [evidence, tool_result]"
+        );
+        let evidence_occurrences_np1: usize = iter_np1_tail
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => {
+                    Some(text.matches("Retrieved evidence: ev_1").count())
+                }
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            evidence_occurrences_np1, 1,
+            "injection is idempotent across iters"
+        );
     }
 
     #[test]
