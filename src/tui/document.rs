@@ -78,13 +78,6 @@ impl Document {
         }));
     }
 
-    pub fn tool_history(&mut self, name: &str, summary: &str) {
-        self.commit_last();
-        let block = Block::Tool(ToolBlock::history(name, summary));
-        self.auto_gap(&block);
-        self.blocks.push(block);
-    }
-
     /// Replay a saved message into the document — single entry point for
     /// history rendering.  Produces the same Block types that the live
     /// stream path creates, so resume and chat look identical.
@@ -112,14 +105,32 @@ impl Document {
                 if msg.has_text() {
                     self.assistant_message(&msg.text());
                 }
-                // Tools — collapsed history view.
+                // Tools — with diff reconstruction for write/edit tools.
                 for (_, name, input) in msg.tool_uses() {
                     let summary =
                         crate::core::agent::format_tool_summary(name, input);
-                    self.tool_history(name, &summary);
+                    let artifact = reconstruct_artifact(name, input);
+                    self.replay_tool(name, &summary, artifact);
                 }
             }
         }
+    }
+
+    /// Replay a completed tool — with artifact if reconstructable.
+    fn replay_tool(
+        &mut self,
+        name: &str,
+        summary: &str,
+        artifact: Option<crate::core::types::FileChangeArtifact>,
+    ) {
+        self.commit_last();
+        let mut tb = ToolBlock::history(name, summary);
+        if let Some(art) = artifact {
+            tb.artifact = Some(art);
+        }
+        let block = Block::Tool(tb);
+        self.auto_gap(&block);
+        self.blocks.push(block);
     }
 
     /// Push a finished thinking block (for history replay).
@@ -393,6 +404,80 @@ impl Document {
                 None
             }
         })
+    }
+}
+
+/// Reconstruct a `FileChangeArtifact` from a ToolUse's input args.
+///
+/// For Edit/Write tools the ToolUse block already carries `path`,
+/// `old_string`, `new_string` — enough to derive the diff without
+/// reading the filesystem or persisting extra data.
+fn reconstruct_artifact(
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> Option<crate::core::types::FileChangeArtifact> {
+    use crate::core::types::{FileArtifact, FileChangeArtifact, FileOp, ToolStatus};
+
+    let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if path.is_empty() {
+        return None;
+    }
+
+    match tool_name {
+        "Edit" => {
+            let old = input.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+            let new = input.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+            if old.is_empty() && new.is_empty() {
+                return None;
+            }
+            let (op, diff) = if old.is_empty() {
+                // Create new file — show all as added.
+                (FileOp::Add, crate::tool::diff::make_diff("", new))
+            } else {
+                // Edit — pure old→new diff (no file context, but shows the change).
+                (FileOp::Update, crate::tool::diff::make_diff(old, new))
+            };
+            Some(FileChangeArtifact {
+                files: vec![FileArtifact {
+                    path: path.to_owned(),
+                    operation: op,
+                    diff: Some(diff.join("\n")),
+                    preview: None,
+                }],
+                raw_input: None,
+                error: None,
+                status: ToolStatus::Done,
+            })
+        }
+        "Write" => {
+            let content = input
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if content.is_empty() {
+                return None;
+            }
+            // Write creates the full file — show first ~20 lines as preview.
+            let preview: String = content.lines().take(20).collect::<Vec<_>>().join("\n");
+            let truncated = content.lines().count() > 20;
+            let display = if truncated {
+                format!("{preview}\n... ({} more lines)", content.lines().count() - 20)
+            } else {
+                preview
+            };
+            Some(FileChangeArtifact {
+                files: vec![FileArtifact {
+                    path: path.to_owned(),
+                    operation: FileOp::Add,
+                    diff: None,
+                    preview: Some(display),
+                }],
+                raw_input: None,
+                error: None,
+                status: ToolStatus::Done,
+            })
+        }
+        _ => None,
     }
 }
 
