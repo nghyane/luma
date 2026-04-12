@@ -14,18 +14,17 @@ RFC này được ship theo milestone, không theo 6 phase tuần tự (§10):
   rename → append record). Image path scoped sang `images/`. Provider
   adapters không đổi (destructure thủ công, `evidence_id` không lên wire).
 - **M2 planner phase A — Evidence dedup injection (shipped).** Commits
-  `6508100`, `3aae889`, `d3b62ea`, `1f86532`, `c61e8e8`, `a49bad9`.
-  `core/context_plan.rs` chèn giữa `session.messages` và
-  `provider.stream()`. Một rule duy nhất: dedup latest-per-file trong
-  recent turn window, greedy-fit dưới budget 32K chars, smoosh
-  evidence (đã wrap `<system-reminder>`) vào `tool_result.content`
-  cuối khi anchor là tool_result user message; prepend Text block
-  khi anchor là plain user text. Anchor bao phủ cả tool_result tail
-  để fire đúng lúc duplicate loop xảy ra (§9.1). Path normalize
-  trước khi dedup để `src/x.rs` / `./src/x.rs` / `{cwd}/src/x.rs`
-  cùng key (§6.6). Trigger từ ses_19d802b2734 (§2.2); post-ship
-  fix từ ses_19d8049f736 (§2.3) và ses dùng phase A đầu tiên
-  (§2.4, prompt-injection defense + wire format).
+  `6508100`, `3aae889`, `d3b62ea`, `1f86532`, `c61e8e8`, `a49bad9`,
+  `2b6398c`, `235bfa5`. `core/context_plan.rs` chèn giữa
+  `session.messages` và `provider.stream()`. Hai lane:
+  file-based dedup latest-per-file (Read/Edit/Write/Grep) và
+  no-file recency (Bash/GhFile/WebFetch). Shared budget 32K chars.
+  Anchor bao phủ cả tool_result tail. Wrap `<system-reminder>` và
+  smoosh vào `tool_result.content` cuối. Path normalize trước khi
+  dedup. Partial Read summary tag `(partial: lines X-Y, …)`.
+  Trigger và post-ship fix progression: ses_19d802b2734 (§2.2),
+  ses_19d8049f736 (§2.3), ses dùng inject đầu (§2.4),
+  ses dùng inject với Bash/partial-read (§2.5).
 - **M2 handoff + provider switch (deferred).** `core/handoff.rs` và
   `ProviderCacheHint` không implement cho tới khi có signal thực từ
   §16. Planner hiện dùng turn_index recency thay cho `files_in_play`
@@ -63,6 +62,11 @@ invariant cần encode:
   `Human:` drift (Claude Code A/B 92% → 0%, §2.4). Pattern này có
   sẵn ở `src/utils/messages.ts` của Claude Code leak; RFC phase A
   đầu không biết và đã retrofit.
+- **Planner tách two-lane cho records không có `related_files`.**
+  Bash/GhFile/WebFetch evidence không có path dedup key. RFC gốc
+  assume mọi record có `related_files`; Phase A đầu silently drop
+  class này. Fix: no-file lane giữ theo recency, share window/
+  budget với file-based lane (§2.5).
 
 ## 1. Tóm tắt
 
@@ -215,6 +219,47 @@ Fix shipped ở `a49bad9`:
 **Lesson quan trọng:** injection shape không phải design choice —
 là invariant cứng từ Claude training. Phase B và các layer sau phải
 reuse hai primitive này, không được "prototype" shape khác.
+
+### 2.5. Bằng chứng từ session dùng inject (sau wrap-smoosh fix)
+
+Khi `<system-reminder>` + smoosh đã ship, agent thấy evidence đúng
+shape nhưng hai class tool vẫn bị mù:
+
+- **Bash/GhFile/WebFetch không bao giờ re-inject.** `select_evidence`
+  filter `!r.related_files.is_empty()` → mọi record có
+  `related_files = []` bị drop khỏi candidate set vĩnh viễn.
+  `extract_related_files` trả empty cho tool không phải
+  Read/Edit/Write/Grep. Trong session agent chạy `git status &&
+  git diff`, blob được promote thành evidence đúng quy trình, nhưng
+  iter kế tiếp planner vẫn không thấy → mù với diff mình vừa sinh ra.
+- **Partial Read không phân biệt với full Read.** `Read limit=300
+  offset=1` trả 302 dòng (300 thực + 2 metadata header). Summary
+  `({path} (302 lines, stored as evidence)` không có dấu hiệu
+  partial → model dễ tưởng 300 lines = entire file. File thật 831
+  dòng.
+
+Fix shipped:
+
+- `2b6398c` `fix(context_plan): inject evidence without related_files
+  via recency lane` — tách `select_evidence` thành hai lane cùng
+  share recent-window + idempotency + budget. File-based lane dedup
+  latest-per-file (Read/Edit/Write/Grep). No-file lane giữ theo
+  recency (Bash/GhFile/WebFetch, mỗi invocation là artifact riêng).
+- `235bfa5` `fix(evidence): tag partial Read summary with line range` —
+  khi args có `offset`/`limit`, summary tag `(partial: lines X-Y, …)`
+  hoặc `(partial: from line X, …)`. Full read không tag — giữ
+  format cũ.
+
+Non-issue (để ý rồi bỏ): chain `echo --- && cmd1 && cmd2` → blob
+single → không tách được. Design limit "promote whole blob"; agent
+phải tự chia thành nhiều Bash call nếu muốn tách artifact.
+
+Bug cấp phối thứ hai (chưa fix): iter N gọi Read, cùng iter chỉ
+thấy summary; blob đầy đủ phải chờ iter N+1 khi planner chạy
+pre-stream. Đây là hệ quả cấu trúc của planner-trước-stream, không
+phải bug. Cân nhắc Phase B: preview inline đoạn đầu blob khi promote,
+hoặc eager-load blob ngay trong tool_result của iter N — cả hai
+đều phá idempotency hiện tại nên defer.
 
 Dự án này cần:
 
@@ -694,21 +739,27 @@ evidence unique, không phình theo iter count.
 classify time (§6.6). Dedup key dùng path sau normalize → 3 spelling
 cùng file dedup đúng về 1 record.
 
-**Selection algorithm.**
+**Selection algorithm (two-lane).**
 
 ```text
 1. window_start = current_turn - RECENT_TURN_WINDOW
-2. candidates   = records có blob_path.is_some()
+2. in_window    = records có blob_path.is_some()
                   ∧ turn_index ≥ window_start
-                  ∧ related_files non-empty
                   ∧ id ∉ already_injected
-3. latest[file] = max(turn_index) của record match file
-                  (file đã normalize)
-4. deduped      = record còn candidate nếu nó là latest[f]
-                  cho ít nhất một f ∈ related_files
-5. sort deduped DESC by turn_index
+
+3a. file_lane (có related_files):
+      latest[f] = max(turn_index) cho mỗi file f
+      keep record nếu nó là latest[f] cho ≥ 1 file
+      dedup by id (khi hai record tie turn_index cho khác file)
+
+3b. no_file_lane (related_files rỗng):
+      giữ tất cả — mỗi record là artifact riêng (Bash run
+      khác nhau = output khác nhau, không có dedup key)
+
+4. merged      = file_lane ∪ no_file_lane
+5. sort merged DESC by turn_index
 6. greedy fit dưới EVIDENCE_INJECTION_BUDGET_CHARS (skip over-budget,
-   không partial load)
+   không partial load) — shared budget cross-lane
 7. sort ASC by turn_index để inject chronological
 ```
 
@@ -835,6 +886,22 @@ Hai commit fix sau session đầu thật sự fire phase A (§2.4):
    rule; idempotency test scan `tool_result.content` thay vì Text
    block.
 
+Hai commit fix sau session với Bash/partial-read (§2.5):
+
+7. **`fix(context_plan): inject evidence without related_files via recency lane`**
+   (`2b6398c`) — `select_evidence` tách thành hai lane share recent
+   window/idempotency/budget. File-based lane dedup latest-per-file;
+   no-file lane giữ theo recency. Fix class bug Bash/GhFile/WebFetch
+   evidence silently dropped. 3 tests thêm:
+   `injects_bash_evidence_without_related_files`,
+   `no_file_lane_keeps_every_record_by_recency`,
+   `merged_lanes_share_budget`.
+8. **`fix(evidence): tag partial Read summary with line range`**
+   (`235bfa5`) — `Read { offset, limit }` tag summary
+   `(partial: lines X-Y, …)` hoặc `(partial: from line X, …)`.
+   Model không còn nhầm 300-line slice với entire file. 2 tests thêm
+   trong `core::evidence`.
+
 Deviation so với §9 gốc:
 
 - Dedup dựa `related_files` thuần (đã normalize), không cần
@@ -851,6 +918,9 @@ Deviation so với §9 gốc:
   `<system-reminder>` + smoosh vào `tool_result.content`. Không
   tạo sibling Text block sau tool_result — không phải lựa chọn,
   là invariant cứng từ Claude training.
+- **Two-lane split** (§2.5): RFC gốc ngầm định mọi evidence có
+  `related_files`. Bash/GhFile/WebFetch thì không — tách lane riêng,
+  recency-only, share budget.
 
 ### M2 phase B — Handoff + provider switch (deferred)
 
@@ -944,14 +1014,24 @@ hoặc từ kinh nghiệm M1):
   rewrite cwd-prefix absolute → relative. Không dùng `canonicalize()`
   (đụng disk, Write có path chưa tồn tại). Symlink, `../` collapse,
   Windows drive letter case để sau khi reproduce (§6.6).
+- **Two-lane selection:** file-based (Read/Edit/Write/Grep) dedup
+  latest-per-file; no-file (Bash/GhFile/WebFetch) giữ theo recency.
+  Share recent window, idempotency check, char budget. Mỗi Bash
+  invocation là artifact riêng nên không có dedup key hợp lý (§9.1,
+  §2.5).
+- **Partial Read summary tag.** `Read` với `offset`/`limit` → summary
+  tag `(partial: lines X-Y, …)` hoặc `(partial: from line X, …)`;
+  full read giữ format cũ. Ngăn model nhầm slice với entire file
+  (§2.5).
 
 ## 14. Rủi ro chính cần canh
 
 - **Planner heuristic drift.** Một khi chạy được, rất dễ thêm rule mà không
   test. Ép nguyên tắc "mỗi rule mới = 1 test regression". Phase A đã ship
-  với 16 context_plan test + 4 evidence normalize test cover passthrough,
-  dedup, budget, anchor, idempotency, path spelling, wrapper shape,
-  smoosh target — rule mới của Phase B phải giữ gate này.
+  với 19 context_plan test + 6 evidence test cover passthrough, dedup,
+  budget, anchor, idempotency, path spelling, wrapper shape, smoosh
+  target, two-lane split, partial Read — rule mới của Phase B phải giữ
+  gate này.
 - **I/O overhead.** Mid-turn save hiện đã ghi session.json mỗi batch. M1
   thêm blob fsync + rename mỗi tool_result ≥ 8K. Phase A thêm đọc blob
   mỗi turn khi có evidence match. Chưa đo ở production; nếu metrics
@@ -975,6 +1055,13 @@ hoặc từ kinh nghiệm M1):
   content; nếu gặp provider reject hoặc parse lỗi, phải split theo
   provider (rule Claude ≠ rule khác) thay vì unify. Low-risk cho tới
   khi tương tác thực với OpenAI/Codex có evidence inject.
+- **One-iter blind window.** Tool output > 8K ở iter N chỉ có summary
+  inline; blob đầy đủ xuất hiện qua planner ở iter N+1. Iter N agent
+  không reason được ngay trên content. Không phải bug (hệ quả
+  planner-trước-stream), nhưng có thể lãng phí 1 iter nếu agent
+  cần content ngay. Phase B cân nhắc: inline preview đầu blob ở
+  promote time, hoặc eager-load blob ngay trong tool_result của iter
+  N — cả hai phá idempotency hiện tại nên defer (§2.5).
 
 ## 15. Khuyến nghị
 
@@ -1018,6 +1105,14 @@ Không nên:
   wrap `<system-reminder>` + smoosh vào `tool_result.content`. Pattern
   là invariant cứng từ training, không phải design choice.
 
+**Bug design với Bash/partial-read (§2.5) → fix:**
+- **Bash evidence silently dropped.** Filter
+  `!r.related_files.is_empty()` loại sạch Bash/GhFile/WebFetch
+  records vĩnh viễn. → `2b6398c` two-lane split.
+- **Partial Read nhầm với entire file.** Summary `(302 lines)` cho
+  slice 300 dòng của file 831 dòng không có dấu hiệu partial. →
+  `235bfa5` tag `(partial: lines X-Y, …)`.
+
 Bài học:
 - Gate M2 phase A ship được trên scan data (§2.1) + cross-turn
   hypothesis, nhưng intra-turn pattern chỉ lộ ra khi observe session
@@ -1026,6 +1121,9 @@ Bài học:
   Claude không document nhưng Claude Code source đã giải quyết —
   research source leak trước khi prototype injection shape mới
   (§2.4).
+- Filter silently-drop rất dễ bỏ sót khi RFC ngầm định mọi record
+  đồng dạng. Scan ngược design để tìm "class bị drop" khi thêm
+  filter mới (§2.5).
 - RFC không dự đoán được những thứ trên; rollout qua commit nhỏ +
   observe + reference upstream là đúng approach.
 
