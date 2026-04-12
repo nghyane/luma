@@ -262,4 +262,286 @@ mod tests {
         assert!(text.contains("fn main()"));
         assert!(text.contains("what is this"));
     }
+
+    /// Feasibility scan for the evidence-backed handoff RFC.
+    ///
+    /// Reads every session under `~/.config/luma/sessions/`, verifies
+    /// round-trip safety, and prints distributions that validate the
+    /// proposal numerically:
+    ///   - would Phase 1 serde migration be safe?
+    ///   - how much would transcripts actually shrink?
+    ///   - which tools dominate tool_result bytes?
+    ///   - which `EvidenceKind` variants are non-negligible?
+    ///
+    /// Ignored so CI doesn't run it (CI has no real sessions). Invoke:
+    ///   cargo test --release core::session::tests::rfc_feasibility_scan -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn rfc_feasibility_scan() {
+        use crate::core::types::{ContentBlock, Role};
+        use std::collections::BTreeMap;
+
+        let dir = sessions_dir();
+        let Ok(entries) = fs::read_dir(&dir) else {
+            eprintln!("no session dir: {}", dir.display());
+            return;
+        };
+
+        let mut scanned = 0usize;
+        let mut deser_failed: Vec<(PathBuf, String)> = Vec::new();
+        let mut round_trip_failed: Vec<PathBuf> = Vec::new();
+
+        let mut session_bytes: Vec<u64> = Vec::new();
+        let mut session_msgs: Vec<usize> = Vec::new();
+
+        let mut tool_result_sizes: Vec<usize> = Vec::new();
+        let mut tool_result_by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        let mut tool_use_counts: BTreeMap<String, usize> = BTreeMap::new();
+
+        let mut text_block_sizes: Vec<usize> = Vec::new();
+        let mut block_kinds: BTreeMap<&'static str, usize> = BTreeMap::new();
+
+        let mut already_truncated = 0usize;
+        let mut tool_result_ge_32k = 0usize;
+        let mut tool_result_ge_8k = 0usize;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(raw) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let size = raw.len() as u64;
+
+            let session: Session = match serde_json::from_str(&raw) {
+                Ok(s) => s,
+                Err(e) => {
+                    deser_failed.push((path.clone(), e.to_string()));
+                    continue;
+                }
+            };
+
+            // Round-trip: reserialize and re-parse. Not byte-equal (field
+            // order may differ) but must be stable on second pass.
+            match serde_json::to_string(&session) {
+                Ok(round) => {
+                    if serde_json::from_str::<Session>(&round).is_err() {
+                        round_trip_failed.push(path.clone());
+                    }
+                }
+                Err(_) => round_trip_failed.push(path.clone()),
+            }
+
+            scanned += 1;
+            session_bytes.push(size);
+            session_msgs.push(session.messages.len());
+
+            let mut use_id_to_name: BTreeMap<String, String> = BTreeMap::new();
+            for msg in &session.messages {
+                if msg.role != Role::Assistant {
+                    continue;
+                }
+                for block in &msg.content {
+                    if let ContentBlock::ToolUse { id, name, .. } = block {
+                        use_id_to_name.insert(id.clone(), name.clone());
+                        *tool_use_counts.entry(name.clone()).or_default() += 1;
+                    }
+                }
+            }
+
+            for msg in &session.messages {
+                for block in &msg.content {
+                    let kind = match block {
+                        ContentBlock::Text { .. } => "text",
+                        ContentBlock::Paste { .. } => "paste",
+                        ContentBlock::Image { .. } => "image",
+                        ContentBlock::ToolUse { .. } => "tool_use",
+                        ContentBlock::ToolResult { .. } => "tool_result",
+                        ContentBlock::Thinking { .. } => "thinking",
+                        ContentBlock::RedactedThinking { .. } => "redacted_thinking",
+                    };
+                    *block_kinds.entry(kind).or_default() += 1;
+
+                    match block {
+                        ContentBlock::Text { text } | ContentBlock::Paste { text } => {
+                            text_block_sizes.push(text.chars().count());
+                        }
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } => {
+                            let chars = content.chars().count();
+                            tool_result_sizes.push(chars);
+                            if content.contains("[truncated]")
+                                || content.contains("middle truncated")
+                            {
+                                already_truncated += 1;
+                            }
+                            if chars >= 32_000 {
+                                tool_result_ge_32k += 1;
+                            }
+                            if chars >= 8_000 {
+                                tool_result_ge_8k += 1;
+                            }
+                            let key = use_id_to_name
+                                .get(tool_use_id)
+                                .cloned()
+                                .unwrap_or_else(|| "<orphan>".into());
+                            tool_result_by_name.entry(key).or_default().push(chars);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        println!("\n=== Feasibility scan: evidence-backed handoff ===");
+        println!("scanned:         {scanned} sessions");
+        println!("deser failed:    {}", deser_failed.len());
+        for (p, e) in deser_failed.iter().take(5) {
+            println!("  - {}: {}", p.display(), e);
+        }
+        println!("round-trip fail: {}", round_trip_failed.len());
+        for p in round_trip_failed.iter().take(5) {
+            println!("  - {}", p.display());
+        }
+
+        println!("\n--- session size ---");
+        report_u64("bytes", &session_bytes);
+        report_usize("messages", &session_msgs);
+
+        println!("\n--- text/paste block chars ---");
+        report_usize("chars", &text_block_sizes);
+
+        println!("\n--- tool_result chars ---");
+        report_usize("chars", &tool_result_sizes);
+        println!("already marked truncated:               {already_truncated}");
+        println!("tool_result >= 32K (agent cap today):   {tool_result_ge_32k}");
+        println!("tool_result >=  8K (would be evidence): {tool_result_ge_8k}");
+
+        println!("\n--- tool_result by tool (top 20 by total bytes) ---");
+        let mut by_name: Vec<(&String, &Vec<usize>)> = tool_result_by_name.iter().collect();
+        by_name.sort_by_key(|(_, v)| std::cmp::Reverse(v.iter().sum::<usize>()));
+        for (name, sizes) in by_name.iter().take(20) {
+            let total: usize = sizes.iter().sum();
+            let max = sizes.iter().copied().max().unwrap_or(0);
+            let ge8k = sizes.iter().filter(|&&s| s >= 8_000).count();
+            let ge32k = sizes.iter().filter(|&&s| s >= 32_000).count();
+            println!(
+                "  {name:<20} n={:>5}  total={:>10}  max={:>7}  >=8K={:>4}  >=32K={:>4}",
+                sizes.len(),
+                total,
+                max,
+                ge8k,
+                ge32k
+            );
+        }
+
+        println!("\n--- block kinds ---");
+        for (k, n) in &block_kinds {
+            println!("  {k:<18} {n}");
+        }
+
+        println!("\n--- tool_use invocations (top 25) ---");
+        let mut tu: Vec<(&String, &usize)> = tool_use_counts.iter().collect();
+        tu.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+        for (name, n) in tu.iter().take(25) {
+            println!("  {name:<20} {n}");
+        }
+
+        println!("\n--- projected transcript savings ---");
+        project_savings(&tool_result_sizes);
+
+        // Round-trip must be safe today — otherwise Phase 1 migration has
+        // a pre-existing bug to fix first.
+        assert!(
+            round_trip_failed.is_empty(),
+            "{} sessions fail round-trip today",
+            round_trip_failed.len()
+        );
+    }
+
+    #[cfg(test)]
+    fn report_u64(label: &str, v: &[u64]) {
+        if v.is_empty() {
+            println!("  {label}: (empty)");
+            return;
+        }
+        let mut s = v.to_vec();
+        s.sort_unstable();
+        let sum: u64 = s.iter().sum();
+        let mean = sum as f64 / s.len() as f64;
+        println!(
+            "  {label:<10} n={:<5} min={:<10} p50={:<10} p90={:<10} p99={:<10} max={:<10} mean={:.0}",
+            s.len(),
+            s[0],
+            pct_u64(&s, 50),
+            pct_u64(&s, 90),
+            pct_u64(&s, 99),
+            s[s.len() - 1],
+            mean
+        );
+    }
+
+    #[cfg(test)]
+    fn report_usize(label: &str, v: &[usize]) {
+        if v.is_empty() {
+            println!("  {label}: (empty)");
+            return;
+        }
+        let mut s = v.to_vec();
+        s.sort_unstable();
+        let sum: usize = s.iter().sum();
+        let mean = sum as f64 / s.len() as f64;
+        println!(
+            "  {label:<10} n={:<6} min={:<8} p50={:<8} p90={:<8} p99={:<8} max={:<8} mean={:.0}",
+            s.len(),
+            s[0],
+            pct_usize(&s, 50),
+            pct_usize(&s, 90),
+            pct_usize(&s, 99),
+            s[s.len() - 1],
+            mean
+        );
+    }
+
+    #[cfg(test)]
+    fn pct_u64(sorted: &[u64], p: u64) -> u64 {
+        let idx = ((sorted.len() as u64 - 1) * p / 100) as usize;
+        sorted[idx]
+    }
+
+    #[cfg(test)]
+    fn pct_usize(sorted: &[usize], p: usize) -> usize {
+        let idx = (sorted.len() - 1) * p / 100;
+        sorted[idx]
+    }
+
+    #[cfg(test)]
+    fn project_savings(tool_result_sizes: &[usize]) {
+        const SUMMARY_CHARS: usize = 200;
+        let total: usize = tool_result_sizes.iter().sum();
+        for threshold in [4_000usize, 8_000, 16_000] {
+            let mut replaced_chars = 0usize;
+            let mut replaced_count = 0usize;
+            for &s in tool_result_sizes {
+                if s >= threshold {
+                    replaced_chars += s.saturating_sub(SUMMARY_CHARS);
+                    replaced_count += 1;
+                }
+            }
+            let pct = if total == 0 {
+                0.0
+            } else {
+                replaced_chars as f64 / total as f64 * 100.0
+            };
+            println!(
+                "  threshold>={threshold:>6}: {replaced_count:>4} tool_results → evidence, \
+                 transcript shrinks {replaced_chars} chars ({pct:.1}% of tool_result total)"
+            );
+        }
+    }
 }
