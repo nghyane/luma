@@ -153,7 +153,7 @@ impl super::App {
             Event::ToolInput { name, chunk } => {
                 crate::dbg_log!("tool_input {name}: {}B", chunk.len());
                 self.doc.tool_input(&name, &chunk);
-                self.render_tool_stream_frame();
+                self.render();
                 Action::Continue
             }
             Event::ToolOutput { name, chunk } => {
@@ -162,7 +162,7 @@ impl super::App {
                     chunk.chars().take(60).collect::<String>()
                 );
                 self.doc.tool_output(&name, &chunk);
-                self.render_tool_stream_frame();
+                self.render();
                 Action::Continue
             }
             Event::ToolArtifact { name, artifact } => {

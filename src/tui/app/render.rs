@@ -5,7 +5,6 @@ use crate::tui::renderer::{CursorState, Overlay};
 use crate::tui::selection;
 use crate::tui::text::{Line, Span};
 use crate::tui::theme::{icon, palette};
-use crate::tui::view::FollowMode;
 use smallvec::smallvec;
 use termina::event::{MouseButton, MouseEvent, MouseEventKind};
 
@@ -122,16 +121,7 @@ impl super::App {
                 self.renderer.set_bottom_padding("output", 0);
                 self.renderer.set_lines("output", lines);
             }
-            super::state::Screen::Chat => {
-                self.view.prepare_frame(self.doc.blocks(), FollowMode::Auto);
-                self.reconcile_scrollbar_width();
-                self.renderer
-                    .set_bottom_padding("output", self.regions.output.padding.bottom);
-                let vis = self.view.collect_visible();
-                self.renderer.set_lines("output", &vis);
-                self.update_scrollbar();
-                self.update_selection_highlight();
-            }
+            super::state::Screen::Chat => self.render_chat_output(),
         }
         self.set_floating_layers();
         self.render_status();
@@ -140,14 +130,9 @@ impl super::App {
         let _ = self.renderer.flush();
     }
 
-    pub(super) fn render_tool_stream_frame(&mut self) {
-        self.reconcile_input_height();
-        if !matches!(self.screen, super::state::Screen::Chat) {
-            self.render();
-            return;
-        }
-        self.view
-            .prepare_frame(self.doc.blocks(), FollowMode::PreserveOffset);
+    /// Prepare the Chat output region and publish visible lines.
+    fn render_chat_output(&mut self) {
+        self.view.prepare_frame(self.doc.blocks());
         self.reconcile_scrollbar_width();
         self.renderer
             .set_bottom_padding("output", self.regions.output.padding.bottom);
@@ -155,11 +140,6 @@ impl super::App {
         self.renderer.set_lines("output", &vis);
         self.update_scrollbar();
         self.update_selection_highlight();
-        self.set_floating_layers();
-        self.render_status();
-        self.renderer.set_lines("input", &self.build_input_lines());
-        self.update_cursor();
-        let _ = self.renderer.flush();
     }
 
     /// Grow or shrink the input region based on wrapped prompt line count.
@@ -212,7 +192,7 @@ impl super::App {
         if ow != self.ui.last_output_width {
             self.view.set_size(ow as usize, content_h as usize);
             self.ui.last_output_width = ow;
-            self.view.prepare_frame(self.doc.blocks(), FollowMode::Auto);
+            self.view.prepare_frame(self.doc.blocks());
         }
     }
 

@@ -374,7 +374,7 @@ fn full_edit_tool_flow() {
     );
     doc.tool_end("Edit", "");
 
-    view.prepare_frame(doc.blocks(), crate::tui::view::FollowMode::Auto);
+    view.prepare_frame(doc.blocks());
     let vis = view.collect_visible();
     let all: String = vis
         .iter()
@@ -685,7 +685,7 @@ fn screen_welcome_lines_independent_from_doc() {
     doc.user_message(&[crate::core::types::ContentBlock::Text {
         text: "hello world".into(),
     }]);
-    view.prepare_frame(doc.blocks(), crate::tui::view::FollowMode::Auto);
+    view.prepare_frame(doc.blocks());
     let text: String = view
         .collect_visible()
         .iter()
