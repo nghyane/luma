@@ -53,19 +53,23 @@ enum ExchangeFormat {
 
 impl ProviderFlow {
     fn claude(challenge: &str, state: &str, redirect_uri: &str) -> Self {
-        use std::fmt::Write as _;
         let scope = CLAUDE_SCOPES.join(" ");
-        let mut url = format!(
-            "{CLAUDE_AUTHORIZE_URL}?response_type=code&client_id={CLAUDE_CLIENT_ID}\
+        // Upstream Claude Code uses URL.searchParams.append() which produces
+        // form-encoded query strings (spaces → "+").  We replicate the exact
+        // parameter order and encoding so the authorize page accepts our URL.
+        let url = format!(
+            "{CLAUDE_AUTHORIZE_URL}\
+             ?code=true\
+             &client_id={CLAUDE_CLIENT_ID}\
+             &response_type=code\
              &redirect_uri={redirect}\
-             &code_challenge={challenge}&code_challenge_method=S256\
+             &scope={scope}\
+             &code_challenge={challenge}\
+             &code_challenge_method=S256\
              &state={state}",
-            redirect = url_encode(redirect_uri),
+            redirect = form_encode(redirect_uri),
+            scope = form_encode(&scope),
         );
-        let _ = write!(url, "&scope={}", url_encode(&scope));
-        // Tells the login page to surface the Max upsell and keeps the grant
-        // in the "Claude AI" lane (same as upstream Claude Code).
-        url.push_str("&code=true");
 
         Self {
             provider: AuthProvider::Anthropic,
@@ -241,7 +245,8 @@ fn gen_challenge(verifier: &str) -> String {
 }
 
 fn gen_state() -> String {
-    let mut bytes = [0u8; 16];
+    // Upstream Claude Code: `base64URLEncode(randomBytes(32))` → 43 chars.
+    let mut bytes = [0u8; 32];
     getrandom::getrandom(&mut bytes).expect("system entropy source unavailable");
     URL_SAFE_NO_PAD.encode(bytes)
 }
@@ -370,6 +375,8 @@ const NOT_FOUND_RESPONSE: &str = "HTTP/1.1 404 Not Found\r\nConnection: close\r\
 // URL codec
 // =============================================================================
 
+/// Percent-encode per RFC 3986 (spaces → `%20`).
+/// Used for Codex and for redirect URI construction.
 fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.as_bytes() {
@@ -377,6 +384,23 @@ fn url_encode(s: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(*b as char)
             }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Form-encode per `application/x-www-form-urlencoded` (spaces → `+`).
+/// Upstream Claude Code uses JS `URL.searchParams.append()` which produces
+/// this encoding; the authorize endpoint expects it.
+fn form_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' => {
+                out.push(*b as char)
+            }
+            b' ' => out.push('+'),
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -609,7 +633,7 @@ mod tests {
     #[test]
     fn state_is_random_and_urlsafe() {
         let s = gen_state();
-        assert_eq!(s.len(), 22);
+        assert_eq!(s.len(), 43);
         assert!(
             s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -624,6 +648,15 @@ mod tests {
     #[test]
     fn url_encode_escapes_reserved() {
         assert_eq!(url_encode("a b&c"), "a%20b%26c");
+    }
+
+    #[test]
+    fn form_encode_uses_plus_for_spaces() {
+        assert_eq!(form_encode("a b&c"), "a+b%26c");
+        assert_eq!(
+            form_encode("user:profile user:inference"),
+            "user%3Aprofile+user%3Ainference"
+        );
     }
 
     #[test]
@@ -642,12 +675,15 @@ mod tests {
         let flow = ProviderFlow::claude("CHALLENGE", "STATE", "http://localhost:12345/callback");
         let url = &flow.authorize_url;
         assert!(url.starts_with(CLAUDE_AUTHORIZE_URL));
+        // `code=true` must come first (upstream Claude Code order).
+        assert!(url.contains("?code=true&"));
         assert!(url.contains("response_type=code"));
         assert!(url.contains("code_challenge=CHALLENGE"));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("state=STATE"));
-        assert!(url.contains("code=true"));
-        assert!(url.contains("scope="));
+        // Scopes are form-encoded: spaces → "+".
+        assert!(url.contains("scope=user%3Aprofile+user%3Ainference"));
+        // redirect_uri is also form-encoded.
         assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A12345%2Fcallback"));
     }
 
