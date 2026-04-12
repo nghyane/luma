@@ -110,14 +110,6 @@ impl Message {
             .unwrap_or("")
     }
 
-    /// Whether any text block is non-empty.
-    pub fn has_text(&self) -> bool {
-        self.content.iter().any(|b| match b {
-            ContentBlock::Text { text } | ContentBlock::Paste { text } => !text.is_empty(),
-            _ => false,
-        })
-    }
-
     /// Whether the message carries content visible to the user.
     ///
     /// Tool-result and thinking blocks are internal plumbing — they exist
@@ -360,7 +352,6 @@ mod tests {
         };
         assert_eq!(msg.text(), "hello\nworld");
         assert!(msg.has_images());
-        assert!(msg.has_text());
     }
 
     #[test]

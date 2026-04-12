@@ -93,24 +93,45 @@ impl Document {
                 self.user_message(&msg.content);
             }
             Role::Assistant => {
-                // Thinking blocks — rendered collapsed, same as live.
+                let mut text_buf = String::new();
+
                 for block in &msg.content {
-                    if let ContentBlock::Thinking { thinking, .. } = block
-                        && !thinking.is_empty()
-                    {
-                        self.replay_thinking(thinking);
+                    match block {
+                        ContentBlock::Thinking { thinking, .. } if !thinking.is_empty() => {
+                            if !text_buf.is_empty() {
+                                self.assistant_message(&text_buf);
+                                text_buf.clear();
+                            }
+                            self.replay_thinking(thinking);
+                        }
+                        ContentBlock::Text { text } | ContentBlock::Paste { text }
+                            if !text.is_empty() =>
+                        {
+                            if !text_buf.is_empty() {
+                                text_buf.push('\n');
+                            }
+                            text_buf.push_str(text);
+                        }
+                        ContentBlock::ToolUse { name, input, .. } => {
+                            if !text_buf.is_empty() {
+                                self.assistant_message(&text_buf);
+                                text_buf.clear();
+                            }
+                            let summary = crate::core::agent::format_tool_summary(name, input);
+                            let artifact = reconstruct_artifact(name, input);
+                            self.replay_tool(name, &summary, artifact);
+                        }
+                        ContentBlock::ToolResult { .. }
+                        | ContentBlock::RedactedThinking { .. }
+                        | ContentBlock::Image { .. }
+                        | ContentBlock::Text { .. }
+                        | ContentBlock::Paste { .. }
+                        | ContentBlock::Thinking { .. } => {}
                     }
                 }
-                // Text
-                if msg.has_text() {
-                    self.assistant_message(&msg.text());
-                }
-                // Tools — with diff reconstruction for write/edit tools.
-                for (_, name, input) in msg.tool_uses() {
-                    let summary =
-                        crate::core::agent::format_tool_summary(name, input);
-                    let artifact = reconstruct_artifact(name, input);
-                    self.replay_tool(name, &summary, artifact);
+
+                if !text_buf.is_empty() {
+                    self.assistant_message(&text_buf);
                 }
             }
         }
@@ -425,8 +446,14 @@ fn reconstruct_artifact(
 
     match tool_name {
         "Edit" => {
-            let old = input.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-            let new = input.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+            let old = input
+                .get("old_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new = input
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if old.is_empty() && new.is_empty() {
                 return None;
             }
@@ -450,10 +477,7 @@ fn reconstruct_artifact(
             })
         }
         "Write" => {
-            let content = input
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
             if content.is_empty() {
                 return None;
             }
@@ -461,7 +485,10 @@ fn reconstruct_artifact(
             let preview: String = content.lines().take(20).collect::<Vec<_>>().join("\n");
             let truncated = content.lines().count() > 20;
             let display = if truncated {
-                format!("{preview}\n... ({} more lines)", content.lines().count() - 20)
+                format!(
+                    "{preview}\n... ({} more lines)",
+                    content.lines().count() - 20
+                )
             } else {
                 preview
             };
