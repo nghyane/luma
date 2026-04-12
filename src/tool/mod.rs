@@ -8,6 +8,7 @@ pub mod gh_ls;
 pub mod gh_search;
 pub mod glob;
 pub mod grep;
+pub mod multi_edit;
 pub mod read;
 mod shell;
 pub mod web_fetch;

@@ -252,8 +252,11 @@ impl Provider for ClaudeProvider {
                                     let _ =
                                         tx.send(Event::ToolSelected { name: name.clone() }).await;
                                 }
-                                let arg_extractor =
-                                    streamable_arg_for(tools, &name).map(JsonStringExtractor::new);
+                                let streamable = streamable_arg_for(tools, &name);
+                                crate::dbg_log!(
+                                    "claude tool_use block_start: name={name:?} streamable_arg={streamable:?}"
+                                );
+                                let arg_extractor = streamable.map(JsonStringExtractor::new);
                                 pending = Some(PendingBlock::ToolUse {
                                     id,
                                     name,
@@ -335,6 +338,11 @@ impl Provider for ClaudeProvider {
                                     args_buffer.push_str(j);
                                     if let Some(ex) = arg_extractor.as_mut() {
                                         let chunk = ex.feed(j);
+                                        crate::dbg_log!(
+                                            "claude input_json_delta tool={name} delta_bytes={} extracted={}",
+                                            j.len(),
+                                            chunk.len()
+                                        );
                                         if !chunk.is_empty() {
                                             let _ = tx
                                                 .send(Event::ToolInput {
@@ -343,6 +351,10 @@ impl Provider for ClaudeProvider {
                                                 })
                                                 .await;
                                         }
+                                    } else {
+                                        crate::dbg_log!(
+                                            "claude input_json_delta tool={name} NO EXTRACTOR (streamable_arg not set or tool not found)"
+                                        );
                                     }
                                 }
                             }

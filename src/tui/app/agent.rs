@@ -152,6 +152,7 @@ impl super::App {
             registry.register(Box::new(crate::tool::read::ReadTool));
             registry.register(Box::new(crate::tool::write::WriteTool));
             registry.register(Box::new(crate::tool::edit::EditTool));
+            registry.register(Box::new(crate::tool::multi_edit::MultiEditTool));
             registry.register(Box::new(crate::tool::bash::BashTool::claude()));
             registry.register(Box::new(crate::tool::glob::GlobTool));
             registry.register(Box::new(crate::tool::grep::GrepTool));

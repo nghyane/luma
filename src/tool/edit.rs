@@ -25,7 +25,10 @@ fn normalize_quotes(s: &str) -> String {
 
 /// Find actual string in file, accounting for curly-quote normalization.
 /// Returns the file's version of the string if found via normalization.
-fn find_actual_string(content: &str, search: &str) -> Option<String> {
+///
+/// Exposed to the `multi_edit` tool so sequential edits inside one call
+/// share the same fuzzy-match behaviour as a single Edit.
+pub(crate) fn find_actual_string(content: &str, search: &str) -> Option<String> {
     // Exact match — no normalization needed
     if content.contains(search) {
         return None; // caller uses original
