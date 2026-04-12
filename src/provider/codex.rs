@@ -515,7 +515,11 @@ fn build_input(messages: &[Message]) -> Vec<serde_json::Value> {
                 // representable on the Codex wire and are dropped.
                 for block in &msg.content {
                     match block {
-                        ContentBlock::ToolUse { id, name, input: args } => {
+                        ContentBlock::ToolUse {
+                            id,
+                            name,
+                            input: args,
+                        } => {
                             input.push(serde_json::json!({
                                 "type": "function_call",
                                 "name": name,

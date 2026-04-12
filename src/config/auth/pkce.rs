@@ -639,8 +639,7 @@ mod tests {
 
     #[test]
     fn claude_authorize_url_correct() {
-        let flow =
-            ProviderFlow::claude("CHALLENGE", "STATE", "http://localhost:12345/callback");
+        let flow = ProviderFlow::claude("CHALLENGE", "STATE", "http://localhost:12345/callback");
         let url = &flow.authorize_url;
         assert!(url.starts_with(CLAUDE_AUTHORIZE_URL));
         assert!(url.contains("response_type=code"));
@@ -654,11 +653,8 @@ mod tests {
 
     #[test]
     fn codex_authorize_url_correct() {
-        let flow = ProviderFlow::codex(
-            "CHALLENGE",
-            "STATE",
-            "http://localhost:12345/auth/callback",
-        );
+        let flow =
+            ProviderFlow::codex("CHALLENGE", "STATE", "http://localhost:12345/auth/callback");
         let url = &flow.authorize_url;
         assert!(url.contains("auth.openai.com/oauth/authorize"));
         assert!(url.contains("id_token_add_organizations=true"));

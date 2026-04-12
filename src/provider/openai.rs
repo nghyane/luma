@@ -1,8 +1,6 @@
 /// OpenAI-compatible chat completions provider with SSE streaming.
 use crate::core::provider::{Provider, StopReason, StreamRequest, StreamResponse};
-use crate::core::types::{
-    ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage,
-};
+use crate::core::types::{ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage};
 use crate::event::Event;
 use crate::provider::sse::post_sse;
 use anyhow::Result;

@@ -58,7 +58,8 @@ impl super::App {
                     let thumb_h = (visible * visible / total).max(1);
                     let track_h = visible.saturating_sub(thumb_h);
                     if track_h > 0 {
-                        let sd = (f64::from(delta) / track_h as f64 * max_off as f64).round() as isize;
+                        let sd =
+                            (f64::from(delta) / track_h as f64 * max_off as f64).round() as isize;
                         self.view
                             .scroll_to((start_offset as isize + sd).max(0) as usize);
                     }

@@ -528,8 +528,8 @@ fn merge_account(existing: &AccountEntry, mut incoming: AccountEntry) -> Account
     // Provider string in pool entries is always one of the known providers
     // (set by parse_*_json or PKCE login). A bad value here is an invariant
     // violation, not a fallback case.
-    let provider = AuthProvider::from_str(&incoming.provider)
-        .expect("pool entry has invalid provider string");
+    let provider =
+        AuthProvider::from_str(&incoming.provider).expect("pool entry has invalid provider string");
     let current_label = derive_label(provider, incoming.email.as_deref());
     if !current_label.ends_with("-1") {
         incoming.label = current_label;
@@ -1016,7 +1016,11 @@ async fn try_refresh(
     let scopes = json
         .get("scope")
         .and_then(|v| v.as_str())
-        .map(|s| s.split_whitespace().map(std::borrow::ToOwned::to_owned).collect())
+        .map(|s| {
+            s.split_whitespace()
+                .map(std::borrow::ToOwned::to_owned)
+                .collect()
+        })
         .or_else(|| entry.scopes.clone());
 
     Ok(AccountEntry {

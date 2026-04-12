@@ -358,7 +358,9 @@ impl super::App {
         }
         crate::config::prefs::save_thinking(self.config.thinking);
         self.update_status();
-        self.ui.status.set_thinking_level(self.config.thinking.as_str());
+        self.ui
+            .status
+            .set_thinking_level(self.config.thinking.as_str());
     }
 
     pub(super) fn update_status(&mut self) {

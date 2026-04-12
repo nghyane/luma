@@ -184,10 +184,12 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
 fn jittered_backoff_secs(attempt: u8) -> u64 {
     let exp = 1u64 << attempt.saturating_sub(1);
     let base = exp.min(MAX_RETRY_DELAY_SECS);
-    let nanos = u64::from(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos());
+    let nanos = u64::from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos(),
+    );
     let jitter = nanos % (base + 1);
     jitter.max(1)
 }
