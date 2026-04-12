@@ -1,22 +1,28 @@
 # RFC: Evidence-backed Handoff for Multi-Provider Context Planning
 
-- Status: M1 shipped — M2 (handoff, planner, provider switch) deferred pending metrics
+- Status: M1 shipped; M2 planner phase A shipped; handoff + provider switch deferred pending metrics
 - Author: Nghia / Luma
 - Updated: 2026-04-12
 
 ## 0. Implementation status
 
-RFC này được ship theo 2 milestone thay vì 6 phase tuần tự (§10):
+RFC này được ship theo milestone, không theo 6 phase tuần tự (§10):
 
 - **M1 — Evidence store (shipped).** Commits `ec5cc73`, `6224251`, `880b31b`.
   Oversized tool results (≥ 8K) spill sang `sessions/{id}/evidence/{ev_id}.txt`,
   transcript giữ summary + `evidence_id`. Crash-safe write (tmp → fsync →
   rename → append record). Image path scoped sang `images/`. Provider
   adapters không đổi (destructure thủ công, `evidence_id` không lên wire).
-- **M2 — Handoff + planner + provider switch (deferred).** Không implement
-  cho tới khi M1 deploy và có metrics thực (§16) cho thấy cần. Section §4.1
-  handoff, §5 `core/handoff.rs` + `core/context_plan.rs`, §7.2 provider
-  switch, §9 planner rules đều thuộc M2.
+- **M2 planner phase A — Evidence dedup injection (shipped).** Commits
+  `6508100`, `3aae889`. `core/context_plan.rs` chèn giữa `session.messages`
+  và `provider.stream()`. Một rule duy nhất: dedup latest-per-file trong
+  recent turn window, greedy-fit dưới budget 32K chars, inject in-place
+  vào user turn cuối (không tạo User message mới — phá alternation).
+  Trigger khi có bằng chứng duplicate read (ses_19d802b2734 §2.1).
+- **M2 handoff + provider switch (deferred).** `core/handoff.rs` và
+  `ProviderCacheHint` không implement cho tới khi có signal thực từ
+  §16. Planner hiện dùng turn_index recency thay cho `files_in_play`
+  (chưa có handoff).
 
 Các deviation so với RFC gốc — tất cả giảm complexity vì không tìm thấy
 invariant cần encode:
@@ -32,6 +38,14 @@ invariant cần encode:
 - `EvidenceDraft.blob: Option<String>` rút thành `String` (non-optional).
   Caller đã quyết định promote trước khi gọi ingest — `None` branch chưa
   từng hit (§6.5).
+- **Planner inject in-place, không tạo User message mới.** RFC gốc ngầm
+  định evidence là Message riêng. Claude yêu cầu user/assistant alternation
+  nghiêm; injection in-place (prepend `ContentBlock::Text` vào user turn
+  cuối) là cách duy nhất không phá wire contract (§9.1).
+- **Planner dedup dựa trên `related_files` thuần, không cần handoff.**
+  RFC gốc §9 dùng `related_files ∩ handoff.files_in_play`. Phase A dùng
+  `latest-per-file trong recent turn window` — vẫn deterministic, không
+  cần handoff để khởi động, và đã chữa duplicate-read signal đo được.
 
 ## 1. Tóm tắt
 
@@ -82,6 +96,29 @@ xác nhận các giả định:
 - **107/175 session legacy** (role `"tool"`, system prompt raw string) hiện đã
   silent-fail trong `Session::load()`. Dự án đang ở beta — RFC không migrate
   và cũng không cam kết tương thích với session pre-RFC.
+
+### 2.2. Bằng chứng từ M1 production (ses_19d802b2734)
+
+Session dev đầu tiên sau khi M1 ship, ~2 phút, 63 messages:
+
+- **M1 correctness đã verified.** 13/13 tool_result ≥ 8K được promote;
+  13/13 record có blob trên disk (`sessions/{id}/evidence/{ev_id}.txt`);
+  0 orphan, 0 broken ref, 0 `.tmp` leftover. Tmp → fsync → rename
+  (§7.3) hoạt động đúng.
+- **Summary footprint nhỏ đúng expectation.** Min 82, max 87 chars inline
+  per promoted result, so với avg ~15K raw — giảm ~99.4% bytes cho blob.
+  13 × 15K = ~195K raw → ~1.1K in-transcript.
+- **Duplicate read confirm signal M2 cần chữa.** `types.rs` được `Read`
+  lại ở turn 22, 30, 32 (3 lần trong ~10 turn); `agent/turn.rs` ở turn
+  24, 44, 48 (3 lần, gap 20 turn). Agent stateless giữa các turn —
+  summary 85 chars không mang content, khi cần code buộc phải call
+  Read lại. Signal #4 của §16 quan sát được ngay từ session đầu →
+  trigger M2 planner phase A sớm hơn dự định.
+- **`related_files` populated đúng từ args.** Mọi record có path thực
+  — sẵn sàng cho planner dedup rule (§9.1).
+- **`EvidenceKind` distribution:** 13/13 là `read_excerpt` cho session
+  dev read-heavy này; 0 BuildLog. Phase A ưu tiên case read-heavy —
+  case verification cần session chạy test để validate.
 
 Dự án này cần:
 
@@ -183,15 +220,18 @@ Phụ trách:
 - refresh sau tool batch / verification / provider switch
 - giữ `recent_evidence_ids` bounded (`HANDOFF_RECENT_EVIDENCE_MAX = 16`)
 
-### `core/context_plan.rs`
-Phụ trách (**M2**):
+### `core/context_plan.rs` (Phase A shipped)
+Phụ trách:
 - build prepared messages trước mỗi `provider.stream()`
 - chọn evidence nào cần load
 - enforce context budget ở mức planner (char-based)
 - log quyết định planner để debug
 
-Planner giữ **một rule duy nhất** (§9). Rule mới chỉ được thêm kèm
-test regression.
+Phase A đã ship rule duy nhất (§9.1): dedup latest-per-file trong recent
+window 15 turn, budget 32K chars, inject in-place vào user turn cuối.
+Chưa dùng handoff — handoff vẫn là input optional của Phase B.
+
+Rule mới chỉ được thêm kèm test regression (RULES §14).
 
 ## 6. Data model
 
@@ -351,7 +391,7 @@ ToolResult {
 - **Beta breaking.** Thêm field mới với `serde(default)` tương thích read
   cho session post-M1 format; không cam kết cho session pre-RFC.
 
-### 6.5. Tool summary extension (deferred to M2)
+### 6.5. Tool summary extension (deferred to Phase B)
 
 **M1 chọn centralize-first** thay vì trait extension: `classify` ở
 `core::evidence` nhận `(tool_name, args, result)` và cover 5 tool hiện
@@ -387,14 +427,18 @@ Dependency vẫn theo chiều `agent → tool` (RULES §4), không đảo.
 
 ### 7.1. Normal turn
 
-1. User message được push vào `transcript.messages`
-2. `context_plan::build_prepared_messages(&transcript, &evidence, &handoff, budget)`
-3. provider stream trả về assistant text / tool_use
+Actual flow (M1 + Phase A shipped):
+
+1. User message được push vào `session.messages`
+2. `context_plan::build_prepared_messages(PlanInput { transcript, evidence, assets_dir })`
+   build prepared messages — inject evidence in-place vào user turn cuối
+   nếu điều kiện thỏa (§9.1)
+3. `provider.stream(&prepared)` trả về assistant text / tool_use
 4. tools được execute
-5. `evidence::ingest_tool_result(...)` — blob write-first, sau đó mới update record
-6. transcript lưu summary ngắn + evidence ref (thay thế hard truncate hiện tại)
-7. `handoff::refresh_*`
-8. session được save (record ở status `Persisted` sau khi blob fsync)
+5. `maybe_promote_to_evidence(...)` — blob write-first, sau đó mới append record
+6. transcript lưu summary ngắn + `evidence_id` (thay hard truncate)
+7. (Phase B) `handoff::refresh_*` — chưa ship
+8. session được save sau mỗi assistant message và mỗi tool result batch
 
 ### 7.2. Provider switch
 
@@ -476,23 +520,67 @@ Planner dùng bucket theo độ ưu tiên.
 - stale logs
 - evidence không liên quan next step
 
-### Evidence loading (M2)
+### Evidence loading (Phase A shipped)
 
-M2 **chỉ** implement một rule:
+Phase A ship rule dedup độc lập handoff — đã chữa signal duplicate read
+từ ses_19d802b2734 (§2.2):
 
-> Load N evidence gần nhất (theo `turn_index`) mà `related_files` giao với
-> `handoff.files_in_play`. Budget char cứng; vượt budget thì skip evidence cũ
-> nhất trước.
+> Với mỗi user turn cuối (không giữa tool-loop), xét evidence có
+> `turn_index ≥ current_turn - RECENT_TURN_WINDOW`. Dedup latest-per-file.
+> Sort recent-first, greedy-fit dưới `EVIDENCE_INJECTION_BUDGET_CHARS`.
+> Inject chronological order vào user turn cuối.
+
+Constants shipped:
+
+- `RECENT_TURN_WINDOW = 15` — từ duplicate-read cluster (~10-20 turn).
+- `EVIDENCE_INJECTION_BUDGET_CHARS = 32_000` — ~3x p90 blob size.
+
+Phase B (pending handoff) sẽ nâng rule thành:
+
+> Ranking: `unresolved hit > user-mentioned file > recency`. Dedup và
+> budget giữ nguyên.
 
 Mọi rule thêm vào sau phải đi kèm:
-- test regression (input handoff + evidence → output selection)
+- test regression (input transcript + evidence → output selection)
 - log quyết định (which loaded, which dropped, why) vào session debug log
 
 Rule-set chỉ mở rộng khi có evidence thực từ §16 metrics.
 
+### 9.1. Rule hiện tại (Phase A)
+
+**Anchor discovery.** Chỉ inject khi message cuối cùng của transcript là
+user turn có text/paste block. Nếu cuối là tool_result (giữa tool-loop)
+hoặc assistant message → passthrough. Rewrite user turn cũ giữa loop
+sẽ phá cache prefix và mis-align evidence với tool_use đã xử lý.
+
+**Selection algorithm.**
+
+```text
+1. window_start = current_turn - RECENT_TURN_WINDOW
+2. candidates   = records có blob_path.is_some()
+                  ∧ turn_index ≥ window_start
+                  ∧ related_files non-empty
+3. latest[file] = max(turn_index) của record match file
+4. deduped      = record còn candidate nếu nó là latest[f]
+                  cho ít nhất một f ∈ related_files
+5. sort deduped DESC by turn_index
+6. greedy fit dưới EVIDENCE_INJECTION_BUDGET_CHARS (skip over-budget,
+   không partial load)
+7. sort ASC by turn_index để inject chronological
+```
+
+**Injection.** Prepend các evidence block (mỗi block = `ContentBlock::Text`
+có header `# Retrieved evidence: {id} ({summary})\n\n{body}`) vào
+`user_turn.content`. User text gốc vẫn cuối. Claude yêu cầu user/assistant
+alternation nghiêm — tạo User message mới sẽ phá wire format.
+
+**Fallback.** Blob missing on disk → skip record, log qua `dbg_log!`.
+Không fail turn.
+
 ### Budget
 
-- M2 bắt đầu: char-based (deterministic, không provider-specific).
+- Phase A shipped: char-based (`EVIDENCE_INJECTION_BUDGET_CHARS = 32_000`).
+  Deterministic, không provider-specific.
 - Nâng cấp: bổ sung token-estimate per-provider khi đã có metrics.
 
 Lý do: tokenizer khác nhau giữa Anthropic/OpenAI; pick sớm sẽ bias planner.
@@ -532,18 +620,42 @@ Ba item gốc thuộc "Phase 2" bị drop khỏi M1:
   là `ToolResult` hợp lệ với `evidence_id = None`. Không đổi hành vi.
 - `EvidenceStatus::Pending` — bỏ luôn, xem §7.3.
 
-### M2 — Handoff + planner + provider switch (deferred)
+### M2 planner phase A — Evidence dedup (shipped)
 
-Các phần sau không triển khai cho tới khi có dữ liệu thực từ M1:
+Hai commit, trigger sau khi quan sát duplicate read trong
+ses_19d802b2734 (§2.2):
+
+1. **`feat(context_plan): scaffold planner with passthrough`** (`6508100`) —
+   `core/context_plan.rs` với `build_prepared_messages` passthrough;
+   wire vào `turn::run_turn` thay cho `&session.messages` trực tiếp.
+   3 tests preserve order/count/tool_result+evidence_id.
+2. **`feat(context_plan): inject deduped evidence into pending user turn`**
+   (`3aae889`) — select + inject rule (§9.1). 10 tests: passthrough
+   paths, dedup latest-per-file, budget skip, window filter, mid-loop
+   passthrough, assistant-tail passthrough, missing blob graceful.
+
+Deviation so với §9 gốc:
+
+- Dedup dựa `related_files` thuần, không cần `handoff.files_in_play`.
+  Handoff chưa ship; phase A đủ chữa signal #4 một mình.
+- Inject **in-place** vào user turn cuối (prepend content blocks) thay
+  vì tạo Message mới. Wire-safe với Claude alternation requirement.
+- Chỉ anchor user turn **ở cuối** transcript; không scan ngược tìm user
+  text — giữ transcript immutable khi đang giữa tool-loop.
+
+### M2 phase B — Handoff + provider switch (deferred)
+
+Các phần sau không triển khai cho tới khi có dữ liệu thực:
 
 - `core/handoff.rs` — handoff snapshot deterministic (§4.1, §8).
-- `core/context_plan.rs` — một rule duy nhất (§9), char-based budget.
+- Planner ranking nâng cấp: `unresolved hit > user-mentioned > recency`
+  (phase A đã có dedup + recency, phase B bổ sung 2 tín hiệu đầu).
 - Provider switch rebuild prepared context (§7.2).
 - `ProviderCacheHint` optimization.
 - `Session` sub-struct split (§6.1) — re-evaluate khi struct thêm 2-3
   field để biết shape đúng.
 
-Gate để bật M2: xem §16.
+Gate để bật phase B: xem §16.
 
 ## 11. Lợi ích
 
@@ -587,27 +699,45 @@ hoặc từ kinh nghiệm M1):
   Caller quyết định promote trước khi ingest — `None` branch không có user.
 - **`EvidenceStatus`:** bỏ. Write order đảm bảo invariant (§7.3).
 - **`recent_evidence_ids` bounded:** `HANDOFF_RECENT_EVIDENCE_MAX = 16`. FIFO
-  theo `turn_index`. **M2 scope** — chưa ship.
-- **Budget:** char-based ở M2; token-estimate chỉ cân nhắc sau metrics.
+  theo `turn_index`. **Phase B scope** — chưa ship.
+- **Budget:** char-based; token-estimate chỉ cân nhắc sau metrics.
+  Shipped: `EVIDENCE_INJECTION_BUDGET_CHARS = 32_000`.
 - **Image vs evidence:** giữ tách riêng (`images/` vs `evidence/`). Khác
   lifecycle, khác resolver. Ship ở M1.
 - **Migration:** không. Beta → breaking change. Session cũ tham chiếu image
   flat không fallback.
-- **Provider-specific planner tuning:** không ở M1-M2. Nếu metrics
+- **Provider-specific planner tuning:** không ở phase A-B. Nếu metrics
   cho thấy cần, thêm riêng mà không đổi API planner.
-- **`Session` sub-struct split:** không ở M1. Flat thêm 1 field không gây
-  đau; tách khi M2 đưa handoff/providers vào sẽ biết shape đúng.
+- **`Session` sub-struct split:** không ở M1 hay Phase A. Flat thêm
+  2 field (`evidence`, future `handoff`) không gây đau; tách khi
+  `ProviderThreads` vào sẽ biết shape đúng.
+- **Planner anchor:** chỉ user turn **cuối cùng** của transcript, không
+  scan ngược. Rewrite user turn cũ giữa tool-loop sẽ phá cache prefix
+  và mis-align evidence với tool_use đã xử lý (§9.1).
+- **Planner injection shape:** in-place prepend `ContentBlock::Text`,
+  không tạo Message mới. Claude API reject hai user message liên tiếp.
+  OpenAI/Codex reconstruct từ cùng `ContentBlock` sequence nên uniform.
+- **Planner recency window:** `RECENT_TURN_WINDOW = 15`. Từ duplicate-read
+  cluster (~10-20 turn) trong ses_19d802b2734. Tune khi có session workload
+  khác.
 
 ## 14. Rủi ro chính cần canh
 
 - **Planner heuristic drift.** Một khi chạy được, rất dễ thêm rule mà không
-  test. Ép nguyên tắc "mỗi rule mới = 1 test regression". (M2)
+  test. Ép nguyên tắc "mỗi rule mới = 1 test regression". Phase A đã ship
+  với 13 test cover passthrough + dedup + budget + anchor — rule mới của
+  Phase B phải giữ gate này.
 - **I/O overhead.** Mid-turn save hiện đã ghi session.json mỗi batch. M1
-  thêm blob fsync + rename mỗi tool_result ≥ 8K. Chưa đo ở production; nếu
-  metrics cho thấy latency tăng đáng kể, cân nhắc batch hoặc async write.
+  thêm blob fsync + rename mỗi tool_result ≥ 8K. Phase A thêm đọc blob
+  mỗi turn khi có evidence match. Chưa đo ở production; nếu metrics
+  cho thấy latency tăng đáng kể, cân nhắc cache blob content theo
+  session hoặc async read.
 - **Evidence orphan.** Crash giữa tmp write và rename → blob orphan (vô
   hại, chỉ tốn disk). Không có record → planner không thấy. Không cần GC
   chủ động cho tới khi disk pressure thành vấn đề.
+- **Planner chọn sai file.** Phase A dedup thuần theo recency; nếu user
+  chuyển focus sang file ngoài window, evidence cũ không được load.
+  Signal để cân nhắc Phase B ranking (§16.2).
 
 ## 15. Khuyến nghị
 
@@ -624,23 +754,39 @@ Không nên:
 - provider-owned memory policy
 - centralize tri thức tool trong `evidence.rs`/`agent`
 
-## 16. M2 gate — tiêu chí bật handoff/planner
+## 16. Gate — tiêu chí bật từng phase
 
-M2 (handoff, context planner, provider switch) chỉ triển khai khi có ít
-nhất một signal cụ thể dưới đây từ M1 production:
+### 16.1. Phase A (planner dedup) — đã trigger
 
-- **Context overflow thực tế.** Session chạm context window (> 90%) với
-  evidence blobs đã full-size nhưng transcript vẫn vượt budget →
-  planner cần select evidence chứ không phải load hết.
+**Signal đã quan sát:**
+- **Duplicate read loop** (signal #4 mở rộng). Ses_19d802b2734 cho thấy
+  agent `Read` lại cùng file 3 lần trong cluster ~10-20 turn vì
+  summary 85 chars không mang content. Agent stateless giữa các turn.
+  → Phase A shipped.
+
+### 16.2. Phase B (handoff + provider switch) — pending
+
+Phase B chỉ triển khai khi có ít nhất một signal cụ thể từ production:
+
+- **Context overflow sau Phase A.** Session chạm context window (> 90%)
+  sau khi dedup + inject đã chạy → cần handoff facts-only chèn đầu
+  context để giảm thêm, hoặc cần ranking tốt hơn (unresolved > recency).
 - **Provider switch fail rate đo được.** Nếu user switch provider giữa
-  turn và provider mới loss context → cần prepared context rebuild (§7.2).
+  turn và provider mới loss context → cần handoff + prepared context
+  rebuild (§7.2).
 - **Cache hit rate giảm sau evidence.** Nếu prefix cache bị invalidate
-  thường xuyên vì summary format drift → cần handoff để ổn định prefix.
-- **Hallucination do summary không đủ.** Nếu model citing sai vì summary
-  200 chars ghi thiếu → cần planner reload evidence blob.
+  thường xuyên vì summary format drift → cần handoff để ổn định prefix
+  (Phase A đã giữ evidence block format ổn định; handoff là layer kế).
+- **Hallucination về verification status.** Nếu model claim "test pass"
+  sau khi BuildLog fail → cần `handoff.verifications` chèn đầu context
+  để model không miss.
+- **Planner chọn sai evidence.** Phase A dedup theo recency; nếu user
+  quay lại file cũ (ngoài window 15) thường xuyên → cần
+  `unresolved hit > user-mentioned file > recency` ranking.
 
-Không signal nào kích hoạt → M1 đã đủ. M2 chỉ là complexity thừa.
+Không signal nào kích hoạt → Phase A đã đủ. Phase B chỉ là complexity
+thừa.
 
 Theo dõi signal này như thế nào là open question — có thể manual
-inspection tuần đầu, sau đó bổ sung log cần thiết (không add metric
-infrastructure sớm, RULES §27).
+inspection trong các session dev, sau đó bổ sung log cần thiết (không
+add metric infrastructure sớm, RULES §27).
