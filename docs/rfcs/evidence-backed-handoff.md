@@ -376,7 +376,12 @@ Rule mới chỉ được thêm kèm test regression (RULES §14).
 
 ## 6. Data model
 
-### 6.1. Tách `Session`
+### 6.1. Tách `Session` (tentative — Phase B)
+
+**Status:** không ship ở M1 hay Phase A. Shape dưới là draft để reference
+khi Phase B bắt đầu (§16.2), không phải contract. `Session` hiện vẫn flat
+(`messages + usage + turn_durations + evidence`); tách khi có ít nhất
+hai field Phase B (`handoff`, `providers`) để biết boundary đúng (§0, §13).
 
 `Session` hiện đã cohesive với `messages + usage + turn_durations`. Khi thêm
 evidence/handoff/providers, flat struct sẽ có 6 field không cùng lifecycle. Tách
@@ -423,30 +428,36 @@ sẽ silent-fail ở `Session::load()` như hôm nay (đã là hành vi hiện t
 
 ### 6.2. Types mới
 
+`EvidenceRecord` / `EvidenceStore` phản ánh shape **đang ship** ở
+`core/evidence.rs` (M1). Hai deviation so với draft gốc đã chốt ở §13:
+`tool_use_id` là `String` non-optional (mọi record sinh từ một tool_use
+cụ thể), và `EvidenceStatus` bị bỏ — crash-safety được bảo đảm bằng thứ
+tự disk op (§7.3), không bằng flag persist riêng.
+
+`HandoffSnapshot` / `ProviderThreads` / `ProviderCacheHint` là Phase B
+(deferred, §16.2). Shape dưới là draft để review, không phải invariant —
+sẽ tinh chỉnh khi thực sự ship.
+
 ```rust
+// Shipped (M1)
 pub struct EvidenceRecord {
     pub id: String,
     pub kind: EvidenceKind,
-    pub tool_use_id: Option<String>,
+    pub tool_use_id: String,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blob_path: Option<String>,
     pub chars: usize,
     pub turn_index: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub related_files: Vec<String>,
-    /// Crash-safety marker. Planner bỏ qua Pending.
-    #[serde(default)]
-    pub status: EvidenceStatus,
-}
-
-pub enum EvidenceStatus {
-    Pending,
-    Persisted,
 }
 
 pub struct EvidenceStore {
     pub records: Vec<EvidenceRecord>,
 }
 
+// Phase B draft — not shipped
 pub struct HandoffSnapshot {
     pub version: u32,
     pub task: String,
@@ -587,6 +598,14 @@ Không đụng disk — `Write` có thể classify path chưa tồn tại. Dùng
   chưa cần ở scope hiện tại.
 - `../` collapse trong relative path — hiếm gặp trong agent arg.
   Thêm khi có session reproduce.
+- **Mở rộng `extract_related_files` cho Bash/exec_command.** Hiện
+  shell evidence đi qua no-file lane 100% (§9.1). Parse arg — regex
+  lite (`\b[\w./-]+\.\w+\b`) hoặc tokenize `command` — để rút path
+  từ `cargo check src/lib.rs`, `cat src/x.rs`, `rg foo src/`. Lợi:
+  shell-read / build log dedup được với Read trên cùng file, thu
+  hẹp no-file lane. Risk: false positive (arg không phải path, tag
+  `--flag=value`). Defer cho tới khi đo duplicate Bash-vs-Read thực
+  tế trong session (§16.2).
 
 Test matrix trong `core::evidence::tests`: leading-dot-slash,
 cwd-prefix absolute, outside-cwd absolute, dedup-key equality qua
@@ -1048,7 +1067,8 @@ hoặc từ kinh nghiệm M1):
   planner vẫn inject nó (vì đã match dedup). Model thấy code cũ, có
   thể commit nhầm. Phase B có thể invalidate khi Edit cùng file;
   hiện tại agent vẫn có thể `Read` lại để force refresh và tạo
-  record mới.
+  record mới. Signal độc lập của Phase B — có thể ship sớm hơn
+  handoff (chỉ đụng `select_evidence`, không cần handoff snapshot).
 - **Wire shape drift qua providers khác.** Phase A smoosh vào
   `tool_result.content` chạy qua Claude provider adapter OK vì nội
   dung được pass-through. OpenAI/Codex adapter chưa test với smooshed
@@ -1148,8 +1168,15 @@ Phase B chỉ triển khai khi có ít nhất một signal cụ thể từ produ
   `unresolved hit > user-mentioned file > recency` ranking.
 - **Stale evidence sau Edit.** Model commit nhầm dựa trên blob cũ vì
   planner inject blob của record trước Edit → cần invalidate record
-  khi Edit cùng file. Có thể làm standalone không cần handoff, nhưng
-  gộp vào Phase B để batch scope.
+  khi Edit cùng file. Signal **độc lập** — không cần handoff snapshot;
+  chỉ đụng `select_evidence` / `EvidenceStore`. Nên ship sớm hơn phần
+  còn lại của Phase B khi quan sát được hit thực tế.
+- **Bash/Read dedup miss.** Session dev thấy `Bash("cat src/x.rs")`
+  và `Read("src/x.rs")` cùng file nhưng không dedup (shell evidence
+  đi no-file lane vì `extract_related_files` rỗng cho Bash). Signal
+  cho mở rộng `extract_related_files` với arg parse (§6.6). Cũng là
+  fix độc lập — chỉ đụng `core::evidence::extract_related_files`, không
+  cần handoff.
 
 Không signal nào kích hoạt → Phase A đã đủ. Phase B chỉ là complexity
 thừa.

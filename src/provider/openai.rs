@@ -339,3 +339,46 @@ fn to_api_tools(tools: &[ToolSchema]) -> Vec<serde_json::Value> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Planner smooshes `<system-reminder>` evidence chunks into the last
+    /// `tool_result.content` (see RFC §9.1). This test pins that the
+    /// OpenAI adapter (a) forwards that content verbatim on the wire and
+    /// (b) drops the internal `evidence_id` marker so it never reaches
+    /// the model.
+    #[test]
+    fn tool_result_passes_smooshed_content_through_and_drops_evidence_id() {
+        let smooshed = "original tool output\n\n<system-reminder>\n# Retrieved evidence: ev_1 (src/x.rs)\n\nfn main() {}\n</system-reminder>";
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: smooshed.into(),
+                is_error: false,
+                evidence_id: Some("ev_1".into()),
+            }],
+            origin: None,
+        }];
+
+        let api = to_api_messages(&messages, &|_| String::new());
+
+        assert_eq!(api.len(), 1);
+        assert_eq!(api[0]["role"], "tool");
+        assert_eq!(api[0]["tool_call_id"], "call_1");
+        assert_eq!(api[0]["content"].as_str(), Some(smooshed));
+        // `evidence_id` is internal; the wire payload must not carry it.
+        assert!(
+            api[0].get("evidence_id").is_none(),
+            "evidence_id leaked to OpenAI wire: {}",
+            api[0]
+        );
+        assert!(
+            !api[0].to_string().contains("evidence_id"),
+            "evidence_id string leaked anywhere in payload: {}",
+            api[0]
+        );
+    }
+}

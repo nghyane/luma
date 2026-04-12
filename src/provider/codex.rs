@@ -748,4 +748,41 @@ mod tests {
             .to_string();
         assert!(err.contains("stream closed before response.completed"));
     }
+
+    /// Planner smooshes `<system-reminder>` evidence chunks into the last
+    /// `tool_result.content` (see RFC §9.1). This test pins that the
+    /// Codex adapter's `build_input` (a) forwards that content verbatim
+    /// as a `function_call_output` item and (b) drops the internal
+    /// `evidence_id` marker so it never reaches the Responses API.
+    #[test]
+    fn build_input_passes_smooshed_tool_result_through_and_drops_evidence_id() {
+        let smooshed = "original tool output\n\n<system-reminder>\n# Retrieved evidence: ev_1 (src/x.rs)\n\nfn main() {}\n</system-reminder>";
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: smooshed.into(),
+                is_error: false,
+                evidence_id: Some("ev_1".into()),
+            }],
+            origin: None,
+        }];
+
+        let input = build_input(&messages);
+
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "function_call_output");
+        assert_eq!(input[0]["call_id"], "call_1");
+        assert_eq!(input[0]["output"].as_str(), Some(smooshed));
+        assert!(
+            input[0].get("evidence_id").is_none(),
+            "evidence_id leaked to Codex wire: {}",
+            input[0]
+        );
+        assert!(
+            !input[0].to_string().contains("evidence_id"),
+            "evidence_id string leaked anywhere in payload: {}",
+            input[0]
+        );
+    }
 }

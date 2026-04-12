@@ -28,30 +28,35 @@
 //! ## Injection shape
 //!
 //! Evidence text is wrapped in `<system-reminder>…</system-reminder>`
-//! and smooshed into the **content of the last tool_result block**
-//! when the anchor is a tool_result user message. This mirrors Claude
-//! Code's own pattern (`src/utils/messages.ts`: `smooshIntoToolResult`
-//! / `wrapInSystemReminder`). Two reasons beyond "it's what Claude
-//! expects":
+//! and smooshed into the **content of the tool_result block whose
+//! `tool_use_id` produced it**. Two invariants drive this:
 //!
-//! 1. **Prompt-injection hygiene.** A raw Text sibling after a
-//!    `tool_result` looks to the model like user-authored content
-//!    (Claude transcribes user text verbatim). Without the wrapper
-//!    the model treats retrieved evidence as a potential attack and
-//!    defends — e.g. reads files with `limit=302` instead of trusting
-//!    the content. The `<system-reminder>` tag is a trained signal
-//!    that marks metadata as system-authored and trustworthy.
+//! 1. **Claude expects this shape.** Claude Code uses the same
+//!    primitives (`src/utils/messages.ts`:
+//!    `smooshIntoToolResult` / `wrapInSystemReminder`). A raw Text
+//!    sibling after a `tool_result` looks to the model like
+//!    user-authored content (defensive prompt-injection reflex —
+//!    agent reads files with `limit=302` instead of trusting the
+//!    content) **and** renders on the wire as
+//!    `</function_results>\n\nHuman:<…>`, teaching the model to
+//!    emit `Human:` at bare tails (Claude Code A/B
+//!    `sai-20260310-161901` went from 92% to 0% after the switch).
 //!
-//! 2. **`Human:` drift.** Any sibling after a `tool_result` renders
-//!    on the wire as `</function_results>\n\nHuman:<…>`. Repeated
-//!    mid-conversation, this teaches the model to emit `Human:` at
-//!    bare tails — a known training-drift failure mode that Claude
-//!    Code's A/B (`sai-20260310-161901`) documented going from 92%
-//!    to 0% after switching to smoosh.
+//! 2. **Cache stability.** Claude prompt cache matches by byte
+//!    prefix. Siting each chunk at the tool_result that produced
+//!    its record means `msgs[M]` has deterministic bytes across
+//!    every subsequent iteration: iter N+1 smooshes any new
+//!    evidence into a *different* message further down, leaving
+//!    `msgs[0..N]` byte-identical to what iter N sent. Phase A v1
+//!    sited every chunk at the *trailing anchor*, which shifts
+//!    every iter — scan of ses_19d80798d45 showed only 72-84% cache
+//!    hit in the first 15 iters (25K+ chars invalidated per
+//!    request). The tool_use_id pin keeps hit above 95% once the
+//!    evidence store is populated (§2.6).
 //!
-//! When the anchor is a plain user-text turn (no tool_result to
-//! smoosh into), the evidence is prepended as a Text block — safe
-//! because no assistant tool_use precedes the turn.
+//! When the anchor is a plain user-text turn (no tool_use ahead
+//! of it), there is no tool_result to smoosh into and no evidence
+//! to inject at that site — the planner just passes through.
 //!
 //! ## Selection rule (RFC §9, one rule only)
 //!
@@ -105,15 +110,25 @@ pub struct PlanInput<'a> {
 /// `<system-reminder>` and either smooshed into the last tool_result's
 /// content (mid tool-loop) or prepended as a Text block (plain user
 /// turn). See module doc for the rationale.
+/// Build the prepared message sequence for a single provider call.
+///
+/// Passthrough semantics when no evidence can be injected (empty store,
+/// no assets dir, no user anchor). Evidence is wrapped in
+/// `<system-reminder>` and smooshed into the tool_result block whose
+/// `tool_use_id` produced it — pinning the injection site to a
+/// deterministic message keeps prompt-cache prefixes stable across
+/// tool-loop iterations (see §2.6 — phase A v1 mutated the trailing
+/// anchor, which shifted every iter and invalidated 25K+ chars per
+/// request).
 pub fn build_prepared_messages(input: PlanInput<'_>) -> Vec<Message> {
     let mut out: Vec<Message> = input.transcript.to_vec();
 
     let Some(assets_dir) = input.assets_dir else {
         return out;
     };
-    let Some(anchor) = find_injection_anchor(&out) else {
+    if find_injection_anchor(&out).is_none() {
         return out;
-    };
+    }
     let already = collect_injected_ids(&out);
     let current_turn = out.len();
     let selected = select_evidence(&input.evidence.records, current_turn, &already);
@@ -121,55 +136,77 @@ pub fn build_prepared_messages(input: PlanInput<'_>) -> Vec<Message> {
         return out;
     }
 
-    let mut chunks = Vec::with_capacity(selected.len());
+    // Build the chunk + target pairs before mutating so a failing blob
+    // load doesn't leave half-injected state.
+    struct Injection<'a> {
+        rec: &'a EvidenceRecord,
+        chunk: String,
+    }
+    let mut injections: Vec<Injection<'_>> = Vec::with_capacity(selected.len());
     for rec in selected {
         match load_evidence_text(assets_dir, rec) {
-            Ok(text) => chunks.push(wrap_system_reminder(&text)),
+            Ok(text) => injections.push(Injection {
+                rec,
+                chunk: wrap_system_reminder(&text),
+            }),
             Err(e) => {
                 crate::dbg_log!("context_plan: skip evidence {}: {}", rec.id, e);
             }
         }
     }
-    if chunks.is_empty() {
+    if injections.is_empty() {
         return out;
     }
 
-    inject_into_anchor(&mut out[anchor], chunks);
+    // Site each chunk at the tool_result that produced its record.
+    // Deterministic: a record at turn T always smooshes into msg index
+    // M where msg[M] carries the matching tool_use_id. Byte content of
+    // every msg < M stays identical across iterations → cache stable.
+    for inj in injections {
+        match find_tool_result_site(&out, &inj.rec.tool_use_id) {
+            Some((msg_idx, block_idx)) => {
+                if let ContentBlock::ToolResult { content, .. } =
+                    &mut out[msg_idx].content[block_idx]
+                {
+                    if !content.is_empty() {
+                        content.push_str("\n\n");
+                    }
+                    content.push_str(&inj.chunk);
+                }
+            }
+            None => {
+                crate::dbg_log!(
+                    "context_plan: no tool_result site for evidence {} \
+                     (tool_use_id={}); skipping",
+                    inj.rec.id,
+                    inj.rec.tool_use_id
+                );
+            }
+        }
+    }
     out
 }
 
-/// Append evidence chunks to the anchor message.
-///
-/// If any block is a `tool_result`, smoosh every chunk into the **last**
-/// tool_result's content (Claude Code pattern). Otherwise the anchor is
-/// a plain user turn and we prepend the chunks as Text blocks.
-fn inject_into_anchor(msg: &mut Message, chunks: Vec<String>) {
-    let last_tr = msg
-        .content
-        .iter()
-        .rposition(|b| matches!(b, ContentBlock::ToolResult { .. }));
-
-    if let Some(idx) = last_tr
-        && let ContentBlock::ToolResult { content, .. } = &mut msg.content[idx]
-    {
-        for chunk in chunks {
-            if !content.is_empty() {
-                content.push_str("\n\n");
-            }
-            content.push_str(&chunk);
+/// Locate the `(msg_index, block_index)` of the tool_result carrying
+/// `tool_use_id`. Returns `None` if the transcript does not contain
+/// such a block — either the record is stale across a session format
+/// change or the tool_result was pruned.
+fn find_tool_result_site(msgs: &[Message], tool_use_id: &str) -> Option<(usize, usize)> {
+    for (i, m) in msgs.iter().enumerate() {
+        if m.role != Role::User {
+            continue;
         }
-        return;
+        for (j, b) in m.content.iter().enumerate() {
+            if let ContentBlock::ToolResult {
+                tool_use_id: id, ..
+            } = b
+                && id == tool_use_id
+            {
+                return Some((i, j));
+            }
+        }
     }
-
-    // Plain user turn — prepend as Text blocks so the user's own text
-    // remains last in the content vector.
-    let original = std::mem::take(&mut msg.content);
-    let mut merged = Vec::with_capacity(chunks.len() + original.len());
-    for chunk in chunks {
-        merged.push(ContentBlock::Text { text: chunk });
-    }
-    merged.extend(original);
-    msg.content = merged;
+    None
 }
 
 /// Wrap evidence text in a Claude-recognised system-reminder envelope.
@@ -390,6 +427,62 @@ mod tests {
         fs::write(dir.join(format!("{id}.txt")), content).unwrap();
     }
 
+    /// Synthesize a minimal transcript where each evidence record has a
+    /// matching `(assistant tool_use, user tool_result)` pair. The
+    /// planner pins evidence chunks by `tool_use_id`, so any test that
+    /// expects injection must place the record's matching tool_result
+    /// in the transcript.
+    ///
+    /// The last tool_result is also the anchor — phase A only runs
+    /// when the transcript tail is a user turn.
+    fn tool_loop_transcript(records: &[&EvidenceRecord]) -> Vec<Message> {
+        let mut msgs = vec![Message::user("start")];
+        for r in records {
+            msgs.push(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: r.tool_use_id.clone(),
+                    name: "Read".into(),
+                    input: serde_json::json!({
+                        "path": r.related_files.first().cloned().unwrap_or_default()
+                    }),
+                }],
+                origin: None,
+            });
+            msgs.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: r.tool_use_id.clone(),
+                    content: format!("{} summary", r.id),
+                    is_error: false,
+                    evidence_id: Some(r.id.clone()),
+                }],
+                origin: None,
+            });
+        }
+        msgs
+    }
+
+    /// Find a tool_result in `msg` whose `tool_use_id` matches and
+    /// return its content string. Panics if missing — tests use this
+    /// to assert on smooshed bytes at a specific record's site.
+    fn tool_result_content_for<'a>(msgs: &'a [Message], tool_use_id: &str) -> &'a str {
+        for m in msgs {
+            for b in &m.content {
+                if let ContentBlock::ToolResult {
+                    tool_use_id: id,
+                    content,
+                    ..
+                } = b
+                    && id == tool_use_id
+                {
+                    return content.as_str();
+                }
+            }
+        }
+        panic!("no tool_result with id {tool_use_id}");
+    }
+
     #[test]
     fn passthrough_when_no_assets_dir() {
         let msgs = vec![Message::user("hi")];
@@ -415,8 +508,7 @@ mod tests {
 
     #[test]
     fn passthrough_when_system_only() {
-        // Only a system message exists — no user anchor yet (first turn
-        // boot state).
+        // Only a system message exists — no user anchor yet.
         let tmp = tempfile::tempdir().unwrap();
         write_blob(tmp.path(), "ev_1", "body");
         let msgs = vec![Message::system("sys")];
@@ -433,42 +525,48 @@ mod tests {
     }
 
     #[test]
-    fn injects_one_evidence_into_user_text_tail() {
+    fn passthrough_when_record_site_missing() {
+        // Record references a tool_use_id that does not exist in the
+        // transcript (stale record, pruned history). Planner must skip
+        // silently.
         let tmp = tempfile::tempdir().unwrap();
-        write_blob(tmp.path(), "ev_1", "fn main() {}");
-        let msgs = vec![
-            Message::user("start"),
-            Message::assistant("working"),
-            Message::user("what next"),
-        ];
+        write_blob(tmp.path(), "ev_orphan", "body");
+        let msgs = vec![Message::user("q")];
         let store = EvidenceStore {
-            records: vec![rec("ev_1", 1, &["src/main.rs"], 12, true)],
+            records: vec![rec("ev_orphan", 0, &["a.rs"], 100, true)],
         };
         let out = build_prepared_messages(PlanInput {
             transcript: &msgs,
             evidence: &store,
             assets_dir: Some(tmp.path()),
         });
-        // Same message count — evidence merged into anchor, not inserted.
-        assert_eq!(out.len(), 3);
-        let anchor = &out[2];
-        assert_eq!(anchor.role, Role::User);
-        assert_eq!(
-            anchor.content.len(),
-            2,
-            "evidence block + original user text"
-        );
-        match &anchor.content[0] {
-            ContentBlock::Text { text } => {
-                assert!(text.contains("Retrieved evidence: ev_1"));
-                assert!(text.contains("fn main()"));
-            }
-            _ => panic!("expected evidence text block first"),
-        }
-        match &anchor.content[1] {
-            ContentBlock::Text { text } => assert_eq!(text, "what next"),
-            _ => panic!("user text should remain after evidence"),
-        }
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].content.len(), 1, "user text untouched");
+    }
+
+    #[test]
+    fn injects_into_matching_tool_result_by_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_blob(tmp.path(), "ev_1", "fn main() {}");
+        let r = rec("ev_1", 2, &["src/main.rs"], 12, true);
+        let msgs = tool_loop_transcript(&[&r]);
+        let store = EvidenceStore {
+            records: vec![r.clone()],
+        };
+        let out = build_prepared_messages(PlanInput {
+            transcript: &msgs,
+            evidence: &store,
+            assets_dir: Some(tmp.path()),
+        });
+        // Message count unchanged — evidence smooshed inside the
+        // matching tool_result.
+        assert_eq!(out.len(), msgs.len());
+        let content = tool_result_content_for(&out, &r.tool_use_id);
+        assert!(content.starts_with("ev_1 summary"), "original preserved");
+        assert!(content.contains("<system-reminder>"));
+        assert!(content.contains("Retrieved evidence: ev_1"));
+        assert!(content.contains("fn main()"));
+        assert!(content.contains("</system-reminder>"));
     }
 
     #[test]
@@ -476,63 +574,44 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_blob(tmp.path(), "ev_old", "old");
         write_blob(tmp.path(), "ev_new", "new");
-        let msgs = vec![Message::user("q")];
+        let old = rec("ev_old", 2, &["a.rs"], 100, true);
+        let new = rec("ev_new", 5, &["a.rs"], 100, true);
+        let msgs = tool_loop_transcript(&[&old, &new]);
         let store = EvidenceStore {
-            records: vec![
-                rec("ev_old", 2, &["a.rs"], 100, true),
-                rec("ev_new", 5, &["a.rs"], 100, true),
-            ],
+            records: vec![old.clone(), new.clone()],
         };
         let out = build_prepared_messages(PlanInput {
             transcript: &msgs,
             evidence: &store,
             assets_dir: Some(tmp.path()),
         });
-        assert_eq!(out.len(), 1);
-        let anchor = &out[0];
-        assert_eq!(anchor.content.len(), 2);
-        match &anchor.content[0] {
-            ContentBlock::Text { text } => {
-                assert!(text.contains("ev_new"));
-                assert!(!text.contains("ev_old"));
-            }
-            _ => panic!(),
-        }
+        let old_site = tool_result_content_for(&out, &old.tool_use_id);
+        let new_site = tool_result_content_for(&out, &new.tool_use_id);
+        assert!(
+            !old_site.contains("Retrieved evidence"),
+            "older file evidence must be dropped"
+        );
+        assert!(new_site.contains("Retrieved evidence: ev_new"));
     }
 
     #[test]
     fn injects_multiple_when_different_files() {
         let tmp = tempfile::tempdir().unwrap();
-        write_blob(tmp.path(), "ev_a", "A");
-        write_blob(tmp.path(), "ev_b", "B");
-        let msgs = vec![Message::user("q")];
+        write_blob(tmp.path(), "ev_a", "AA");
+        write_blob(tmp.path(), "ev_b", "BB");
+        let a = rec("ev_a", 3, &["a.rs"], 100, true);
+        let b = rec("ev_b", 5, &["b.rs"], 100, true);
+        let msgs = tool_loop_transcript(&[&a, &b]);
         let store = EvidenceStore {
-            records: vec![
-                rec("ev_a", 3, &["a.rs"], 100, true),
-                rec("ev_b", 5, &["b.rs"], 100, true),
-            ],
+            records: vec![a.clone(), b.clone()],
         };
         let out = build_prepared_messages(PlanInput {
             transcript: &msgs,
             evidence: &store,
             assets_dir: Some(tmp.path()),
         });
-        assert_eq!(out.len(), 1);
-        let anchor = &out[0];
-        assert_eq!(anchor.content.len(), 3, "ev_a + ev_b + user text");
-        // Chronological injection order: older turn first.
-        match &anchor.content[0] {
-            ContentBlock::Text { text } => assert!(text.contains("ev_a")),
-            _ => panic!(),
-        }
-        match &anchor.content[1] {
-            ContentBlock::Text { text } => assert!(text.contains("ev_b")),
-            _ => panic!(),
-        }
-        match &anchor.content[2] {
-            ContentBlock::Text { text } => assert_eq!(text, "q"),
-            _ => panic!("user text must remain last"),
-        }
+        assert!(tool_result_content_for(&out, &a.tool_use_id).contains("ev_a"));
+        assert!(tool_result_content_for(&out, &b.tool_use_id).contains("ev_b"));
     }
 
     #[test]
@@ -540,34 +619,30 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_blob(tmp.path(), "ev_stale", "stale");
         write_blob(tmp.path(), "ev_fresh", "fresh");
-        // 20 messages so RECENT_TURN_WINDOW=15 cuts off turn 2.
-        let mut msgs = Vec::new();
-        for _ in 0..20 {
+        let stale = rec("ev_stale", 2, &["a.rs"], 100, true);
+        let fresh = rec("ev_fresh", 20, &["b.rs"], 100, true);
+        // Build a transcript long enough that turn 2 sits outside
+        // RECENT_TURN_WINDOW=15 from the tail.
+        let mut msgs = tool_loop_transcript(&[&stale]);
+        while msgs.len() < 20 {
             msgs.push(Message::user("x"));
         }
+        msgs.extend(tool_loop_transcript(&[&fresh]).into_iter().skip(1));
         let store = EvidenceStore {
-            records: vec![
-                rec("ev_stale", 2, &["a.rs"], 100, true),
-                rec("ev_fresh", 18, &["b.rs"], 100, true),
-            ],
+            records: vec![stale.clone(), fresh.clone()],
         };
         let out = build_prepared_messages(PlanInput {
             transcript: &msgs,
             evidence: &store,
             assets_dir: Some(tmp.path()),
         });
-        assert_eq!(out.len(), 20);
-        let anchor = out.last().unwrap();
-        let joined: String = anchor
-            .content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert!(joined.contains("ev_fresh"));
-        assert!(!joined.contains("ev_stale"));
+        let stale_site = tool_result_content_for(&out, &stale.tool_use_id);
+        let fresh_site = tool_result_content_for(&out, &fresh.tool_use_id);
+        assert!(
+            !stale_site.contains("Retrieved evidence"),
+            "stale record outside window must not inject"
+        );
+        assert!(fresh_site.contains("Retrieved evidence: ev_fresh"));
     }
 
     #[test]
@@ -575,175 +650,140 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_blob(tmp.path(), "ev_big", "X");
         write_blob(tmp.path(), "ev_small", "Y");
-        let msgs = vec![Message::user("q")];
-        // ev_big alone is over budget; ev_small fits.
+        // ev_big alone is over budget; ev_small fits. Ranking is
+        // recent-first so big (turn 2, newer) is tried first and
+        // skipped, leaving room for small (turn 1).
+        let small = rec("ev_small", 1, &["a.rs"], 100, true);
+        let big = rec(
+            "ev_big",
+            2,
+            &["b.rs"],
+            EVIDENCE_INJECTION_BUDGET_CHARS + 1,
+            true,
+        );
+        let msgs = tool_loop_transcript(&[&small, &big]);
         let store = EvidenceStore {
-            records: vec![
-                rec("ev_small", 1, &["a.rs"], 100, true),
-                rec(
-                    "ev_big",
-                    2,
-                    &["b.rs"],
-                    EVIDENCE_INJECTION_BUDGET_CHARS + 1,
-                    true,
-                ),
-            ],
+            records: vec![small.clone(), big.clone()],
         };
         let out = build_prepared_messages(PlanInput {
             transcript: &msgs,
             evidence: &store,
             assets_dir: Some(tmp.path()),
         });
-        assert_eq!(out.len(), 1);
-        let anchor = &out[0];
-        assert_eq!(anchor.content.len(), 2, "only ev_small + user text");
-        match &anchor.content[0] {
-            ContentBlock::Text { text } => {
-                assert!(text.contains("ev_small"));
-                assert!(!text.contains("ev_big"));
-            }
-            _ => panic!(),
-        }
+        assert!(tool_result_content_for(&out, &small.tool_use_id).contains("ev_small"));
+        assert!(
+            !tool_result_content_for(&out, &big.tool_use_id).contains("Retrieved evidence"),
+            "oversize record must be skipped"
+        );
     }
 
     #[test]
     fn skips_records_without_blob_path() {
         let tmp = tempfile::tempdir().unwrap();
-        let msgs = vec![Message::user("q")];
+        let r = rec("ev_inline", 1, &["a.rs"], 50, false);
+        let msgs = tool_loop_transcript(&[&r]);
         let store = EvidenceStore {
-            records: vec![rec("ev_inline", 1, &["a.rs"], 50, false)],
+            records: vec![r.clone()],
         };
         let out = build_prepared_messages(PlanInput {
             transcript: &msgs,
             evidence: &store,
             assets_dir: Some(tmp.path()),
         });
-        assert_eq!(out.len(), 1, "no blob → nothing to inject");
+        let site = tool_result_content_for(&out, &r.tool_use_id);
+        assert!(
+            !site.contains("Retrieved evidence"),
+            "no blob → nothing to inject"
+        );
     }
 
     #[test]
     fn skips_missing_blob_on_disk() {
         let tmp = tempfile::tempdir().unwrap();
-        // Record says blob exists, but file is missing on disk.
-        let msgs = vec![Message::user("q")];
+        let r = rec("ev_ghost", 1, &["a.rs"], 50, true);
+        let msgs = tool_loop_transcript(&[&r]);
         let store = EvidenceStore {
-            records: vec![rec("ev_ghost", 1, &["a.rs"], 50, true)],
+            records: vec![r.clone()],
         };
         let out = build_prepared_messages(PlanInput {
             transcript: &msgs,
             evidence: &store,
             assets_dir: Some(tmp.path()),
         });
-        assert_eq!(out.len(), 1, "missing blob is skipped gracefully");
+        let site = tool_result_content_for(&out, &r.tool_use_id);
+        assert!(
+            !site.contains("Retrieved evidence"),
+            "missing blob is skipped gracefully"
+        );
     }
 
     #[test]
     fn injects_bash_evidence_without_related_files() {
-        // Bash/GhFile/WebFetch records have empty related_files — they
-        // used to be silently dropped by the dedup filter. No-file lane
-        // must still inject them, keyed by recency.
         let tmp = tempfile::tempdir().unwrap();
         write_blob(tmp.path(), "ev_diff", "diff --git a/x b/x\n@@\n-a\n+b");
-        let msgs = vec![Message::user("what changed")];
+        let r = rec("ev_diff", 1, &[], 40, true);
+        let msgs = tool_loop_transcript(&[&r]);
         let store = EvidenceStore {
-            records: vec![rec("ev_diff", 1, &[], 40, true)],
+            records: vec![r.clone()],
         };
         let out = build_prepared_messages(PlanInput {
             transcript: &msgs,
             evidence: &store,
             assets_dir: Some(tmp.path()),
         });
-        let anchor = &out[0];
-        match anchor.content.iter().find_map(|b| match b {
-            ContentBlock::Text { text } if text.contains("Retrieved evidence: ev_diff") => {
-                Some(text.as_str())
-            }
-            _ => None,
-        }) {
-            Some(text) => assert!(text.contains("diff --git")),
-            None => panic!("bash evidence must be injected even with empty related_files"),
-        }
+        let site = tool_result_content_for(&out, &r.tool_use_id);
+        assert!(site.contains("Retrieved evidence: ev_diff"));
+        assert!(site.contains("diff --git"));
     }
 
     #[test]
     fn no_file_lane_keeps_every_record_by_recency() {
-        // Two Bash runs: both must be available (each invocation is a
-        // distinct artifact, no dedup key). Chronological injection.
         let tmp = tempfile::tempdir().unwrap();
         write_blob(tmp.path(), "ev_status", "On branch master");
         write_blob(tmp.path(), "ev_log", "commit abc");
-        let msgs = vec![Message::user("summarise")];
+        let status = rec("ev_status", 1, &[], 20, true);
+        let log = rec("ev_log", 2, &[], 20, true);
+        let msgs = tool_loop_transcript(&[&status, &log]);
         let store = EvidenceStore {
-            records: vec![
-                rec("ev_status", 1, &[], 20, true),
-                rec("ev_log", 2, &[], 20, true),
-            ],
+            records: vec![status.clone(), log.clone()],
         };
         let out = build_prepared_messages(PlanInput {
             transcript: &msgs,
             evidence: &store,
             assets_dir: Some(tmp.path()),
         });
-        let anchor = &out[0];
-        // Two Text evidence blocks prepended; user text last.
-        assert_eq!(anchor.content.len(), 3);
-        match &anchor.content[0] {
-            ContentBlock::Text { text } => assert!(text.contains("ev_status")),
-            _ => panic!(),
-        }
-        match &anchor.content[1] {
-            ContentBlock::Text { text } => assert!(text.contains("ev_log")),
-            _ => panic!(),
-        }
+        assert!(tool_result_content_for(&out, &status.tool_use_id).contains("ev_status"));
+        assert!(tool_result_content_for(&out, &log.tool_use_id).contains("ev_log"));
     }
 
     #[test]
     fn merged_lanes_share_budget() {
-        // One near-budget file evidence + one small bash evidence.
-        // Ranking is most-recent-first so bash (turn 2) is picked,
-        // consuming 20 of the budget. The file (turn 1, near-budget)
-        // then overflows and is dropped. Proves the two lanes share
-        // one budget instead of each getting its own.
         let tmp = tempfile::tempdir().unwrap();
         write_blob(tmp.path(), "ev_file", "F");
         write_blob(tmp.path(), "ev_bash", "B");
         let near_budget = EVIDENCE_INJECTION_BUDGET_CHARS - 10;
-        let msgs = vec![Message::user("q")];
+        let file = rec("ev_file", 1, &["a.rs"], near_budget, true);
+        let bash = rec("ev_bash", 2, &[], 20, true);
+        let msgs = tool_loop_transcript(&[&file, &bash]);
         let store = EvidenceStore {
-            records: vec![
-                rec("ev_file", 1, &["a.rs"], near_budget, true),
-                rec("ev_bash", 2, &[], 20, true),
-            ],
+            records: vec![file.clone(), bash.clone()],
         };
         let out = build_prepared_messages(PlanInput {
             transcript: &msgs,
             evidence: &store,
             assets_dir: Some(tmp.path()),
         });
-        let anchor = &out[0];
-        let ids_seen: Vec<&str> = anchor
-            .content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text } => {
-                    if text.contains("ev_file") {
-                        Some("ev_file")
-                    } else if text.contains("ev_bash") {
-                        Some("ev_bash")
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(ids_seen, vec!["ev_bash"], "newer record wins shared budget");
+        // Newer (bash) wins budget; file overflows and is dropped.
+        assert!(tool_result_content_for(&out, &bash.tool_use_id).contains("ev_bash"));
+        assert!(
+            !tool_result_content_for(&out, &file.tool_use_id).contains("Retrieved evidence"),
+            "file record overflows shared budget"
+        );
     }
 
     #[test]
     fn passthrough_when_tail_is_assistant() {
-        // Assistant tail means the previous turn just finished; there
-        // is no pending user input to decorate.
+        // Assistant tail — previous turn finished, no pending user.
         let tmp = tempfile::tempdir().unwrap();
         write_blob(tmp.path(), "ev_1", "body");
         let msgs = vec![Message::user("q"), Message::assistant("answer")];
@@ -763,269 +803,78 @@ mod tests {
     }
 
     #[test]
-    fn injects_into_tool_result_user_message() {
-        // Mid tool-loop: assistant just emitted a tool_use and the
-        // tool_result user message is the tail. Evidence smooshes
-        // into the tool_result's content, wrapped in
-        // <system-reminder>. The content count stays at 1 —
-        // retrieved context rides inside the tool_result, not as a
-        // sibling block.
+    fn idempotent_across_iters_keeps_cache_prefix_stable() {
+        // The cache-stability invariant (§2.6): iter N+1 sees the same
+        // bytes at every message index ≤ N that iter N did. Feeding
+        // iter N's output back in must produce identical output.
         let tmp = tempfile::tempdir().unwrap();
-        write_blob(tmp.path(), "ev_1", "fn main() {}");
-        let msgs = vec![
-            Message::user("fix this"),
-            Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "tc_1".into(),
-                    name: "Read".into(),
-                    input: serde_json::json!({"path": "a.rs"}),
-                }],
-                origin: None,
-            },
-            Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "tc_1".into(),
-                    content: "summary".into(),
-                    is_error: false,
-                    evidence_id: Some("ev_1".into()),
-                }],
-                origin: None,
-            },
-        ];
-        let store = EvidenceStore {
-            records: vec![rec("ev_1", 1, &["a.rs"], 12, true)],
-        };
-        let out = build_prepared_messages(PlanInput {
-            transcript: &msgs,
-            evidence: &store,
-            assets_dir: Some(tmp.path()),
-        });
-        assert_eq!(out.len(), 3);
-        assert_eq!(out[0].content.len(), 1);
-        match &out[0].content[0] {
-            ContentBlock::Text { text } => assert_eq!(text, "fix this"),
-            _ => panic!(),
-        }
-        let tail = &out[2];
-        assert_eq!(tail.role, Role::User);
-        assert_eq!(
-            tail.content.len(),
-            1,
-            "evidence smooshes inside tool_result"
-        );
-        match &tail.content[0] {
-            ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                ..
-            } => {
-                assert_eq!(tool_use_id, "tc_1");
-                assert!(content.starts_with("summary"), "original result preserved");
-                assert!(content.contains("<system-reminder>"));
-                assert!(content.contains("Retrieved evidence: ev_1"));
-                assert!(content.contains("fn main()"));
-                assert!(content.contains("</system-reminder>"));
-            }
-            _ => panic!("tail must still be a tool_result"),
-        }
-    }
+        write_blob(tmp.path(), "ev_1", "body1");
+        write_blob(tmp.path(), "ev_2", "body2");
+        let r1 = rec("ev_1", 2, &["a.rs"], 50, true);
+        let r2 = rec("ev_2", 4, &["b.rs"], 50, true);
 
-    #[test]
-    fn injects_into_last_tool_result_with_mixed_tail() {
-        // Multi-tool batch: user message carries several tool_result
-        // blocks plus trailing text. Evidence smooshes into the LAST
-        // tool_result's content — not into the trailing text, not
-        // into the first tool_result.
-        let tmp = tempfile::tempdir().unwrap();
-        write_blob(tmp.path(), "ev_1", "body");
-        let tail = Message {
-            role: Role::User,
-            content: vec![
-                ContentBlock::ToolResult {
-                    tool_use_id: "tc_1".into(),
-                    content: "r1".into(),
-                    is_error: false,
-                    evidence_id: None,
-                },
-                ContentBlock::ToolResult {
-                    tool_use_id: "tc_2".into(),
-                    content: "r2".into(),
-                    is_error: false,
-                    evidence_id: None,
-                },
-                ContentBlock::Text {
-                    text: "and one more thing".into(),
-                },
-            ],
-            origin: None,
-        };
-        let msgs = vec![
-            Message::user("start"),
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::ToolUse {
-                        id: "tc_1".into(),
-                        name: "Read".into(),
-                        input: serde_json::json!({"path": "a.rs"}),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "tc_2".into(),
-                        name: "Read".into(),
-                        input: serde_json::json!({"path": "b.rs"}),
-                    },
-                ],
-                origin: None,
-            },
-            tail,
-        ];
+        // Iter N: both records in store, both sites present.
+        let msgs_n = tool_loop_transcript(&[&r1, &r2]);
         let store = EvidenceStore {
-            records: vec![rec("ev_1", 1, &["a.rs"], 12, true)],
-        };
-        let out = build_prepared_messages(PlanInput {
-            transcript: &msgs,
-            evidence: &store,
-            assets_dir: Some(tmp.path()),
-        });
-        let tail = out.last().unwrap();
-        // Block shape unchanged — [tool_result, tool_result, text].
-        assert_eq!(tail.content.len(), 3);
-        // First tool_result untouched.
-        match &tail.content[0] {
-            ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                ..
-            } => {
-                assert_eq!(tool_use_id, "tc_1");
-                assert_eq!(content, "r1", "first tool_result untouched");
-            }
-            _ => panic!(),
-        }
-        // Last tool_result carries the evidence.
-        match &tail.content[1] {
-            ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                ..
-            } => {
-                assert_eq!(tool_use_id, "tc_2");
-                assert!(content.starts_with("r2"));
-                assert!(content.contains("Retrieved evidence: ev_1"));
-                assert!(content.contains("<system-reminder>"));
-            }
-            _ => panic!(),
-        }
-        // Trailing user text untouched.
-        match &tail.content[2] {
-            ContentBlock::Text { text } => assert_eq!(text, "and one more thing"),
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn idempotent_across_tool_loop_iters() {
-        // After iter N the transcript carries the evidence marker
-        // inside a tool_result's content. Iter N+1 must see it and
-        // skip re-injection.
-        let tmp = tempfile::tempdir().unwrap();
-        write_blob(tmp.path(), "ev_1", "body");
-        let msgs = vec![
-            Message::user("q"),
-            Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "tc_1".into(),
-                    name: "Read".into(),
-                    input: serde_json::json!({"path": "a.rs"}),
-                }],
-                origin: None,
-            },
-            Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "tc_1".into(),
-                    content: "summary".into(),
-                    is_error: false,
-                    evidence_id: Some("ev_1".into()),
-                }],
-                origin: None,
-            },
-        ];
-        let store = EvidenceStore {
-            records: vec![rec("ev_1", 1, &["a.rs"], 50, true)],
+            records: vec![r1.clone(), r2.clone()],
         };
         let iter_n = build_prepared_messages(PlanInput {
-            transcript: &msgs,
+            transcript: &msgs_n,
             evidence: &store,
             assets_dir: Some(tmp.path()),
         });
-        let iter_n_content = tool_result_content(iter_n.last().unwrap(), 0);
-        assert_eq!(
-            iter_n_content.matches("Retrieved evidence: ev_1").count(),
-            1
-        );
 
+        // Iter N+1: feed iter N's output back in, same store.
         let iter_np1 = build_prepared_messages(PlanInput {
             transcript: &iter_n,
             evidence: &store,
             assets_dir: Some(tmp.path()),
         });
-        let iter_np1_content = tool_result_content(iter_np1.last().unwrap(), 0);
+
+        // Byte-identical content at both sites.
         assert_eq!(
-            iter_np1_content.matches("Retrieved evidence: ev_1").count(),
-            1,
-            "idempotent: no double smoosh"
+            tool_result_content_for(&iter_n, &r1.tool_use_id),
+            tool_result_content_for(&iter_np1, &r1.tool_use_id),
+            "ev_1 site stable across iters"
         );
         assert_eq!(
-            iter_np1_content, iter_n_content,
-            "tool_result content byte-identical across iters"
+            tool_result_content_for(&iter_n, &r2.tool_use_id),
+            tool_result_content_for(&iter_np1, &r2.tool_use_id),
+            "ev_2 site stable across iters"
+        );
+        // Each site has exactly one evidence marker — no double smoosh.
+        assert_eq!(
+            tool_result_content_for(&iter_np1, &r1.tool_use_id)
+                .matches("Retrieved evidence: ev_1")
+                .count(),
+            1
+        );
+        assert_eq!(
+            tool_result_content_for(&iter_np1, &r2.tool_use_id)
+                .matches("Retrieved evidence: ev_2")
+                .count(),
+            1
         );
     }
 
     #[test]
     fn evidence_wrapped_in_system_reminder() {
-        // Lock in the wrapper shape — it's the signal that tells the
-        // model this text is system-authored metadata, not user input.
-        // Wrapper drift breaks the anti-prompt-injection property.
         let tmp = tempfile::tempdir().unwrap();
         write_blob(tmp.path(), "ev_1", "payload");
-        let msgs = vec![Message::user("q")];
+        let r = rec("ev_1", 0, &["a.rs"], 7, true);
+        let msgs = tool_loop_transcript(&[&r]);
         let store = EvidenceStore {
-            records: vec![rec("ev_1", 0, &["a.rs"], 7, true)],
+            records: vec![r.clone()],
         };
         let out = build_prepared_messages(PlanInput {
             transcript: &msgs,
             evidence: &store,
             assets_dir: Some(tmp.path()),
         });
-        // Plain user-text tail: evidence sits as a prepended Text block.
-        let anchor = &out[0];
-        match &anchor.content[0] {
-            ContentBlock::Text { text } => {
-                assert!(text.starts_with("<system-reminder>\n"));
-                assert!(text.ends_with("\n</system-reminder>"));
-                assert!(text.contains("Retrieved evidence: ev_1"));
-                assert!(text.contains("payload"));
-            }
-            _ => panic!("evidence must be a Text block before user text"),
-        }
-    }
-
-    /// Read the `content` string of the `n`-th `ToolResult` block in a
-    /// message. Panics if not enough tool_results exist — tests use
-    /// this to assert on smooshed content.
-    fn tool_result_content(msg: &Message, n: usize) -> &str {
-        msg.content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
-                _ => None,
-            })
-            .nth(n)
-            .expect("tool_result block present")
+        let site = tool_result_content_for(&out, &r.tool_use_id);
+        assert!(site.contains("<system-reminder>\n"));
+        assert!(site.contains("\n</system-reminder>"));
+        assert!(site.contains("payload"));
     }
 
     #[test]
