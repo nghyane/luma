@@ -118,6 +118,23 @@ impl Message {
         })
     }
 
+    /// Whether the message carries content visible to the user.
+    ///
+    /// Tool-result and thinking blocks are internal plumbing — they exist
+    /// in the history for the provider but are never shown as standalone
+    /// conversation turns. This is the single source of truth for both
+    /// stream replay and history rendering.
+    pub fn has_visible_content(&self) -> bool {
+        self.content.iter().any(|b| {
+            matches!(
+                b,
+                ContentBlock::Text { text } if !text.is_empty()
+            ) || matches!(b, ContentBlock::Paste { text } if !text.is_empty())
+                || matches!(b, ContentBlock::Image { .. })
+                || matches!(b, ContentBlock::ToolUse { .. })
+        })
+    }
+
     /// Whether message contains image blocks.
     pub fn has_images(&self) -> bool {
         self.content
@@ -449,5 +466,44 @@ mod tests {
         let u = Usage::default();
         assert_eq!(u.input_tokens, 0);
         assert_eq!(u.output_tokens, 0);
+    }
+
+    #[test]
+    fn has_visible_content_text() {
+        let msg = Message::user("hello");
+        assert!(msg.has_visible_content());
+    }
+
+    #[test]
+    fn has_visible_content_tool_result_only() {
+        let msg = Message::tool_result("tc_1", "result");
+        assert!(!msg.has_visible_content());
+    }
+
+    #[test]
+    fn has_visible_content_thinking_only() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                thinking: "hmm".into(),
+                signature: "sig".into(),
+            }],
+            origin: None,
+        };
+        assert!(!msg.has_visible_content());
+    }
+
+    #[test]
+    fn has_visible_content_tool_use() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "tc_1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({}),
+            }],
+            origin: None,
+        };
+        assert!(msg.has_visible_content());
     }
 }

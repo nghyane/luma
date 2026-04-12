@@ -86,6 +86,53 @@ impl Document {
         self.blocks.push(block);
     }
 
+    /// Replay a saved message into the document — single entry point for
+    /// history rendering.  Produces the same Block types that the live
+    /// stream path creates, so resume and chat look identical.
+    pub fn replay_message(&mut self, msg: &crate::core::types::Message) {
+        use crate::core::types::{ContentBlock, Role};
+
+        match msg.role {
+            Role::System => {}
+            Role::User => {
+                if !msg.has_visible_content() {
+                    return;
+                }
+                self.user_message(&msg.content);
+            }
+            Role::Assistant => {
+                // Thinking blocks — rendered collapsed, same as live.
+                for block in &msg.content {
+                    if let ContentBlock::Thinking { thinking, .. } = block
+                        && !thinking.is_empty()
+                    {
+                        self.replay_thinking(thinking);
+                    }
+                }
+                // Text
+                if msg.has_text() {
+                    self.assistant_message(&msg.text());
+                }
+                // Tools — collapsed history view.
+                for (_, name, input) in msg.tool_uses() {
+                    let summary =
+                        crate::core::agent::format_tool_summary(name, input);
+                    self.tool_history(name, &summary);
+                }
+            }
+        }
+    }
+
+    /// Push a finished thinking block (for history replay).
+    fn replay_thinking(&mut self, text: &str) {
+        self.commit_last();
+        self.auto_gap(&Block::Thinking(StreamBuf::new()));
+        let mut buf = StreamBuf::new();
+        buf.feed(text);
+        buf.flush();
+        self.blocks.push(Block::Thinking(buf));
+    }
+
     pub fn error(&mut self, text: &str) {
         self.commit_last();
         self.blocks.push(Block::Error(text.to_owned()));

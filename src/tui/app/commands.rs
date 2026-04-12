@@ -290,13 +290,15 @@ impl super::App {
         use crate::core::types::Role;
 
         const MAX_RENDER_TURNS: usize = 6;
-        let mut turn_starts = Vec::new();
-        for (i, msg) in messages.iter().enumerate() {
-            // Only real user prompts start a turn — skip tool-result carriers.
-            if msg.role == Role::User && (msg.has_text() || msg.has_images()) {
-                turn_starts.push(i);
-            }
-        }
+
+        // Count real user turns via the canonical visibility check.
+        let turn_starts: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role == Role::User && m.has_visible_content())
+            .map(|(i, _)| i)
+            .collect();
+
         let skip_turns = turn_starts.len().saturating_sub(MAX_RENDER_TURNS);
         let render_from = if skip_turns > 0 {
             turn_starts[skip_turns]
@@ -314,39 +316,29 @@ impl super::App {
         let mut turn_idx: usize = 0;
         let mut seen_user = false;
         for (i, msg) in messages.iter().enumerate() {
-            match msg.role {
-                Role::System => {}
-                Role::User => {
-                    // Tool-result-only user messages are internal plumbing —
-                    // they carry no visible text, so skip them to avoid empty
-                    // prompt blocks on resume.
-                    if !msg.has_text() && !msg.has_images() {
-                        continue;
-                    }
+            let is_visible_user = msg.role == Role::User && msg.has_visible_content();
+
+            // Skip pre-window messages but still count turns.
+            if i < render_from && msg.role != Role::System {
+                if is_visible_user {
                     turn_idx += 1;
-                    if i < render_from {
-                        continue;
-                    }
-                    if seen_user {
-                        self.turn_divider(turn_durations, turn_idx.wrapping_sub(2));
-                    }
-                    seen_user = true;
-                    self.doc.user_message(&msg.content);
                 }
-                Role::Assistant => {
-                    if i < render_from {
-                        continue;
-                    }
-                    if msg.has_text() {
-                        self.doc.assistant_message(&msg.text());
-                    }
-                    for (_, name, input) in msg.tool_uses() {
-                        let summary = crate::core::agent::format_tool_summary(name, input);
-                        self.doc.tool_history(name, &summary);
-                    }
-                }
+                continue;
             }
+
+            // Turn dividers between visible user messages.
+            if is_visible_user {
+                if seen_user {
+                    self.turn_divider(turn_durations, turn_idx.wrapping_sub(1));
+                }
+                turn_idx += 1;
+                seen_user = true;
+            }
+
+            // Single replay entry point — all block creation in one place.
+            self.doc.replay_message(msg);
         }
+
         if seen_user {
             self.turn_divider(turn_durations, turn_idx.wrapping_sub(1));
         }
