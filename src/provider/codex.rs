@@ -414,6 +414,10 @@ async fn run_codex_stream_loop(
         message: Message {
             role: Role::Assistant,
             content,
+            origin: Some(crate::core::types::MessageOrigin {
+                provider: "codex".into(),
+                model: None,
+            }),
         },
         usage: state.usage,
         stop_reason,

@@ -90,6 +90,7 @@ async fn agent_loop(
                 session.messages.push(Message {
                     role: Role::User,
                     content: blocks,
+                    origin: None,
                 });
 
                 let turn_start = std::time::Instant::now();

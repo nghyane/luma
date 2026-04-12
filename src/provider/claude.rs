@@ -440,6 +440,10 @@ impl Provider for ClaudeProvider {
                 message: Message {
                     role: Role::Assistant,
                     content: blocks,
+                    origin: Some(crate::core::types::MessageOrigin {
+                        provider: "anthropic".into(),
+                        model: Some(self.model.clone()),
+                    }),
                 },
                 usage,
                 stop_reason: parse_stop_reason(&stop_reason),
@@ -633,6 +637,7 @@ fn extract_system(messages: &[Message]) -> String {
 fn content_block_to_api(
     block: &ContentBlock,
     resolve: &crate::core::provider::ImageResolver,
+    include_provider_state: bool,
 ) -> Option<serde_json::Value> {
     match block {
         ContentBlock::Text { text } | ContentBlock::Paste { text } if !text.is_empty() => {
@@ -677,30 +682,47 @@ fn content_block_to_api(
         ContentBlock::Thinking {
             thinking,
             signature,
-        } => Some(serde_json::json!({
+        } if include_provider_state => Some(serde_json::json!({
             "type": "thinking",
             "thinking": thinking,
             "signature": signature,
         })),
-        ContentBlock::RedactedThinking { data } => Some(serde_json::json!({
-            "type": "redacted_thinking",
-            "data": data,
-        })),
+        ContentBlock::RedactedThinking { data } if include_provider_state => {
+            Some(serde_json::json!({
+                "type": "redacted_thinking",
+                "data": data,
+            }))
+        }
+        ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => None,
     }
+}
+
+fn should_roundtrip_claude_thinking(msg: &Message, is_latest_assistant: bool) -> bool {
+    is_latest_assistant
+        && msg.role == Role::Assistant
+        && msg.has_tool_use()
+        && msg
+            .origin
+            .as_ref()
+            .is_some_and(|origin| origin.provider == "anthropic")
 }
 
 fn to_api_messages(
     messages: &[Message],
     resolve: &crate::core::provider::ImageResolver,
 ) -> Vec<serde_json::Value> {
+    let latest_assistant_idx = messages.iter().rposition(|m| m.role == Role::Assistant);
     messages
         .iter()
-        .filter(|m| m.role != Role::System)
-        .map(|msg| {
+        .enumerate()
+        .filter(|(_, m)| m.role != Role::System)
+        .map(|(idx, msg)| {
+            let include_provider_state =
+                should_roundtrip_claude_thinking(msg, Some(idx) == latest_assistant_idx);
             let content: Vec<serde_json::Value> = msg
                 .content
                 .iter()
-                .filter_map(|b| content_block_to_api(b, resolve))
+                .filter_map(|b| content_block_to_api(b, resolve, include_provider_state))
                 .collect();
             let role = match msg.role {
                 Role::User => "user",
@@ -843,6 +865,107 @@ mod tests {
             .map(|o| o.label)
             .collect();
         assert_eq!(labels, ["off", "low", "medium", "high"]);
+    }
+
+    #[test]
+    fn strips_thinking_blocks_from_non_claude_history() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "reasoning".into(),
+                    signature: "sig".into(),
+                },
+                ContentBlock::Text {
+                    text: "answer".into(),
+                },
+            ],
+            origin: Some(crate::core::types::MessageOrigin {
+                provider: "codex".into(),
+                model: Some("gpt-5.4".into()),
+            }),
+        }];
+        let api = to_api_messages(&messages, &|_| String::new());
+        let content = api[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+    }
+
+    #[test]
+    fn strips_thinking_blocks_from_claude_non_tool_turns() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "reasoning".into(),
+                    signature: "sig".into(),
+                },
+                ContentBlock::Text {
+                    text: "answer".into(),
+                },
+            ],
+            origin: Some(crate::core::types::MessageOrigin {
+                provider: "anthropic".into(),
+                model: Some("claude-sonnet-4-6".into()),
+            }),
+        }];
+        let api = to_api_messages(&messages, &|_| String::new());
+        let content = api[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+    }
+
+    #[test]
+    fn preserves_thinking_blocks_for_latest_claude_tool_turn() {
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "old".into(),
+                        signature: "old-sig".into(),
+                    },
+                    ContentBlock::Text {
+                        text: "old answer".into(),
+                    },
+                ],
+                origin: Some(crate::core::types::MessageOrigin {
+                    provider: "anthropic".into(),
+                    model: Some("claude-sonnet-4-6".into()),
+                }),
+            },
+            Message::tool_result("tc_prev", "done"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "reasoning".into(),
+                        signature: "sig".into(),
+                    },
+                    ContentBlock::Text {
+                        text: "calling tool".into(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tc_1".into(),
+                        name: "read".into(),
+                        input: serde_json::json!({"path": "/tmp/x"}),
+                    },
+                ],
+                origin: Some(crate::core::types::MessageOrigin {
+                    provider: "anthropic".into(),
+                    model: Some("claude-sonnet-4-6".into()),
+                }),
+            },
+            Message::tool_result("tc_1", "file"),
+        ];
+        let api = to_api_messages(&messages, &|_| String::new());
+        let content = api[2]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[2]["type"], "tool_use");
+        let old_content = api[0]["content"].as_array().unwrap();
+        assert_eq!(old_content.len(), 1);
+        assert_eq!(old_content[0]["type"], "text");
     }
 
     #[test]

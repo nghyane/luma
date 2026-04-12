@@ -345,6 +345,7 @@ async fn run_turn(
         session.messages.push(Message {
             role: Role::User,
             content: result_blocks,
+            origin: None,
         });
         // Mid-turn save: persist after tool results.
         session.save();

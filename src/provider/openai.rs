@@ -205,6 +205,10 @@ impl Provider for OpenAIProvider {
                 message: Message {
                     role: Role::Assistant,
                     content,
+                    origin: Some(crate::core::types::MessageOrigin {
+                        provider: "openai".into(),
+                        model: Some(self.model.clone()),
+                    }),
                 },
                 usage,
                 stop_reason: parse_finish_reason(&finish_reason),

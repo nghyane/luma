@@ -403,6 +403,7 @@ mod bench {
                     content: vec![ContentBlock::Text {
                         text: format!("Turn {i}: please help me debug this issue with my Rust code. I'm seeing a borrow checker error when I try to mutate a field while holding a reference to another field."),
                     }],
+                    origin: None,
                 });
                 msgs.push(Message {
                     role: Role::Assistant,
@@ -416,6 +417,7 @@ mod bench {
                             input: serde_json::json!({"path": "src/foo.rs"}),
                         },
                     ],
+                    origin: None,
                 });
                 msgs.push(Message::tool_result(
                     format!("tc_{i}"),

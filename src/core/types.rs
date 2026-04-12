@@ -51,6 +51,16 @@ pub enum ContentBlock {
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<MessageOrigin>,
+}
+
+/// Provider/model provenance for assistant messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageOrigin {
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl Message {
@@ -135,6 +145,7 @@ impl Message {
         Self {
             role,
             content: vec![ContentBlock::Text { text: text.into() }],
+            origin: None,
         }
     }
 
@@ -168,6 +179,7 @@ impl Message {
                 content: content.into(),
                 is_error: false,
             }],
+            origin: None,
         }
     }
 }
@@ -328,6 +340,7 @@ mod tests {
                     text: "world".into(),
                 },
             ],
+            origin: None,
         };
         assert_eq!(msg.text(), "hello\nworld");
         assert!(msg.has_images());
@@ -385,6 +398,7 @@ mod tests {
                     input: serde_json::json!({"path": "/tmp/x"}),
                 },
             ],
+            origin: None,
         };
         assert!(msg.has_tool_use());
         let uses: Vec<_> = msg.tool_uses().collect();
@@ -411,6 +425,7 @@ mod tests {
                     text: "answer".into(),
                 },
             ],
+            origin: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"thinking\":\"reasoning...\""));
