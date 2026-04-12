@@ -131,7 +131,8 @@ impl super::App {
         let project_instructions = crate::config::instructions::discover();
         let instructions_block =
             crate::config::instructions::build_instructions(&project_instructions);
-        let base_prompt = crate::config::prompt::build(&model.source, self.config.mode);
+        let style = crate::tool::ToolStyle::for_source(&model.source);
+        let base_prompt = crate::config::prompt::build(self.config.mode, style);
         let system_prompt = format!(
             "{base_prompt}\n{}{skill_catalog}{instructions_block}",
             self.config.env_context
@@ -144,34 +145,12 @@ impl super::App {
             thinking: self.config.thinking,
         };
 
-        let mut registry = crate::core::registry::Registry::new();
-        if model.source == "codex" {
-            registry.register(Box::new(crate::tool::bash::BashTool::codex()));
-            registry.register(Box::new(crate::tool::apply_patch::ApplyPatchTool));
-        } else {
-            registry.register(Box::new(crate::tool::read::ReadTool));
-            registry.register(Box::new(crate::tool::write::WriteTool));
-            registry.register(Box::new(crate::tool::edit::EditTool));
-            registry.register(Box::new(crate::tool::multi_edit::MultiEditTool));
-            registry.register(Box::new(crate::tool::bash::BashTool::claude()));
-            registry.register(Box::new(crate::tool::glob::GlobTool));
-            registry.register(Box::new(crate::tool::grep::GrepTool));
-        }
-        registry.add_server_capability("web_search");
-        if let Some(backend) = Self::search_backend() {
-            registry.register(Box::new(crate::tool::web_search::WebSearchTool::new(
-                backend,
-            )));
-        }
-        registry.register(Box::new(crate::tool::web_fetch::WebFetchTool));
-        registry.register(Box::new(crate::tool::gh_file::GhFileTool));
-        registry.register(Box::new(crate::tool::gh_ls::GhLsTool));
-        registry.register(Box::new(crate::tool::gh_search::GhSearchTool));
+        let registry = crate::tool::build_registry(style, Self::search_backend());
 
         self.agent.tx = Some(crate::core::agent::spawn(config, registry, tx));
     }
 
-    fn search_backend() -> Option<crate::tool::web_search::SearchBackend> {
+    pub(super) fn search_backend() -> Option<crate::tool::web_search::SearchBackend> {
         use crate::tool::web_search::SearchBackend;
         if let Ok(key) = std::env::var("EXA_API_KEY") {
             return Some(SearchBackend::Exa { api_key: key });

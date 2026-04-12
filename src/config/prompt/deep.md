@@ -10,8 +10,6 @@ Persist until the task is fully handled end-to-end: implementation, verification
 
 Before performing file edits, briefly state what you're about to change and why. Keep it to 1-2 sentences.
 
-{tools}
-
 # Git Safety
 
 - NEVER use destructive commands (`reset --hard`, `checkout -- .`) unless the user explicitly asks.
