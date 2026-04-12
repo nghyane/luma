@@ -48,6 +48,7 @@ impl super::App {
             return;
         }
         self.ensure_agent_loop();
+        self.commit_pending_config();
         self.enter_chat();
         self.doc.user_message(&content);
         self.sync_prompt_commands();
@@ -148,6 +149,12 @@ impl super::App {
         let registry = crate::tool::build_registry(style, Self::search_backend());
 
         self.agent.tx = Some(crate::core::agent::spawn(config, registry, tx));
+        self.agent.last_sent = Some(super::state::SentConfig {
+            mode: self.config.mode,
+            model_id: model.id.clone(),
+            source: model.source.clone(),
+            thinking: self.config.thinking,
+        });
     }
 
     pub(super) fn search_backend() -> Option<crate::tool::web_search::SearchBackend> {

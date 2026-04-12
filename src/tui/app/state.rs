@@ -62,6 +62,22 @@ pub struct AgentHandle {
     /// intermediate Ready state that `on_agent_done` would otherwise set
     /// before `SessionLoaded` arrives.
     pub is_loading_session: bool,
+    /// Snapshot of the config the agent loop is currently running with.
+    /// `None` before the loop is spawned. Used to compute whether the
+    /// user's local [`AppConfig`] has drifted since the last turn —
+    /// pending changes are committed right before the next `Chat`
+    /// instead of eagerly on every mode/model toggle.
+    pub last_sent: Option<SentConfig>,
+}
+
+/// Snapshot of the fields the agent loop cares about. Compared against
+/// `AppConfig` at submit time to decide which `Set*` commands to send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentConfig {
+    pub mode: AgentMode,
+    pub model_id: String,
+    pub source: String,
+    pub thinking: ThinkingLevel,
 }
 
 impl AgentHandle {
@@ -75,6 +91,7 @@ impl AgentHandle {
             pending_images: None,
             abort_countdown: 0,
             is_loading_session: false,
+            last_sent: None,
         }
     }
 }

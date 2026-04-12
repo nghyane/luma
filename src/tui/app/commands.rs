@@ -218,13 +218,9 @@ impl super::App {
             self.config.thinking = thinking_caps.coerce(self.config.thinking);
             crate::config::prefs::save_thinking(self.config.thinking);
             crate::config::prefs::save_mode_model(self.config.mode, model_id);
-            // Rebuild prompt + registry for the new provider's tool style so
-            // a cross-provider switch (e.g. Claude → Codex) swaps Native ↔
-            // Patch tools instead of leaving the previous registry in place.
-            self.hot_swap_context();
-            if let Some(tx) = &self.agent.tx {
-                let _ = tx.try_send(AgentCommand::SetThinking(self.config.thinking));
-            }
+            // Config drift is committed to the agent loop at submit time —
+            // see `commit_pending_config`. Keep this path local-only so
+            // picking a model doesn't mutate the transcript.
             self.update_status();
         }
     }
@@ -243,48 +239,65 @@ impl super::App {
         self.config.thinking = thinking_caps.coerce(self.config.thinking);
         crate::config::prefs::save_mode(self.config.mode);
         crate::config::prefs::save_thinking(self.config.thinking);
-        // Cancel any in-flight turn so the swap lands on a clean boundary.
-        if let Some(c) = self.agent.cancel.take() {
-            c.cancel();
-        }
-        self.hot_swap_context();
-        self.enter_chat();
-        self.doc.divider_with_label(self.config.mode.as_str());
+        // Deferred: the new prompt + registry are pushed to the agent loop
+        // on the next submit (see `commit_pending_config`). Cycling modes
+        // while idle should not touch transcript, stream, or scroll.
         self.update_status();
         self.sync_prompt_commands();
     }
 
-    /// Rebuild system prompt + tool registry for the current mode/model and
-    /// send them to the live agent loop without dropping the transcript.
-    fn hot_swap_context(&mut self) {
+    /// If the user's local config has drifted from what the agent loop is
+    /// running, push the minimal set of `Set*` commands to catch it up.
+    /// Called right before sending `AgentCommand::Chat`.
+    pub(super) fn commit_pending_config(&mut self) {
         let Some(model) = self.config.model.clone() else {
             return;
         };
-        let Some(tx) = &self.agent.tx else {
-            // No loop yet — next submit will spawn one with the new config.
+        let Some(tx) = self.agent.tx.clone() else {
             return;
         };
-        let skills = crate::config::skills::discover();
-        let skill_catalog = crate::config::skills::build_catalog(&skills);
-        let project_instructions = crate::config::instructions::discover();
-        let instructions_block =
-            crate::config::instructions::build_instructions(&project_instructions);
-        let style = crate::tool::ToolStyle::for_source(&model.source);
-        let base_prompt = crate::config::prompt::build(self.config.mode, style);
-        let system_prompt = format!(
-            "{base_prompt}\n{}{skill_catalog}{instructions_block}",
-            self.config.env_context
-        );
-        let registry = crate::tool::build_registry(style, Self::search_backend());
-        let _ = tx.try_send(AgentCommand::SetContext {
-            system_prompt,
-            registry,
-        });
-        // Keep model/provider identity in sync with the new mode default.
-        let _ = tx.try_send(AgentCommand::SetModel {
+        let desired = super::state::SentConfig {
+            mode: self.config.mode,
             model_id: model.id.clone(),
             source: model.source.clone(),
-        });
+            thinking: self.config.thinking,
+        };
+        if self.agent.last_sent.as_ref() == Some(&desired) {
+            return;
+        }
+        let sent = self.agent.last_sent.as_ref();
+        let prompt_dirty = sent.is_none_or(|s| s.mode != desired.mode || s.source != desired.source);
+        let model_dirty = sent.is_none_or(|s| s.model_id != desired.model_id || s.source != desired.source);
+        let thinking_dirty = sent.is_none_or(|s| s.thinking != desired.thinking);
+
+        if prompt_dirty {
+            let skills = crate::config::skills::discover();
+            let skill_catalog = crate::config::skills::build_catalog(&skills);
+            let project_instructions = crate::config::instructions::discover();
+            let instructions_block =
+                crate::config::instructions::build_instructions(&project_instructions);
+            let style = crate::tool::ToolStyle::for_source(&desired.source);
+            let base_prompt = crate::config::prompt::build(desired.mode, style);
+            let system_prompt = format!(
+                "{base_prompt}\n{}{skill_catalog}{instructions_block}",
+                self.config.env_context
+            );
+            let registry = crate::tool::build_registry(style, Self::search_backend());
+            let _ = tx.try_send(AgentCommand::SetContext {
+                system_prompt,
+                registry,
+            });
+        }
+        if model_dirty {
+            let _ = tx.try_send(AgentCommand::SetModel {
+                model_id: desired.model_id.clone(),
+                source: desired.source.clone(),
+            });
+        }
+        if thinking_dirty {
+            let _ = tx.try_send(AgentCommand::SetThinking(desired.thinking));
+        }
+        self.agent.last_sent = Some(desired);
     }
 
     pub(super) fn resume_session(&mut self, picker_id: &str) {
