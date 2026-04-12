@@ -23,11 +23,37 @@
 //! therefore anchors on the trailing user message of the transcript
 //! even when it only carries `tool_result` blocks — that is the sole
 //! insertion point visible to the provider on the very next
-//! `stream()` call within the same tool loop. Anchoring on a
-//! user-text message only (the original design) would miss this case
-//! entirely; phase A as initially shipped never fired in practice.
+//! `stream()` call within the same tool loop.
 //!
-//! The rule (RFC §9, one rule only):
+//! ## Injection shape
+//!
+//! Evidence text is wrapped in `<system-reminder>…</system-reminder>`
+//! and smooshed into the **content of the last tool_result block**
+//! when the anchor is a tool_result user message. This mirrors Claude
+//! Code's own pattern (`src/utils/messages.ts`: `smooshIntoToolResult`
+//! / `wrapInSystemReminder`). Two reasons beyond "it's what Claude
+//! expects":
+//!
+//! 1. **Prompt-injection hygiene.** A raw Text sibling after a
+//!    `tool_result` looks to the model like user-authored content
+//!    (Claude transcribes user text verbatim). Without the wrapper
+//!    the model treats retrieved evidence as a potential attack and
+//!    defends — e.g. reads files with `limit=302` instead of trusting
+//!    the content. The `<system-reminder>` tag is a trained signal
+//!    that marks metadata as system-authored and trustworthy.
+//!
+//! 2. **`Human:` drift.** Any sibling after a `tool_result` renders
+//!    on the wire as `</function_results>\n\nHuman:<…>`. Repeated
+//!    mid-conversation, this teaches the model to emit `Human:` at
+//!    bare tails — a known training-drift failure mode that Claude
+//!    Code's A/B (`sai-20260310-161901`) documented going from 92%
+//!    to 0% after switching to smoosh.
+//!
+//! When the anchor is a plain user-text turn (no tool_result to
+//! smoosh into), the evidence is prepended as a Text block — safe
+//! because no assistant tool_use precedes the turn.
+//!
+//! ## Selection rule (RFC §9, one rule only)
 //!
 //! 1. Consider records whose `turn_index` falls in the recent window
 //!    (last [`RECENT_TURN_WINDOW`] assistant turns).
@@ -39,10 +65,6 @@
 //! 5. Skip records already injected in the transcript (detected by
 //!    the stable header `# Retrieved evidence: {id}`). Idempotent
 //!    across tool-loop iterations.
-//!
-//! Injected evidence is prepended as `ContentBlock::Text` entries to
-//! the anchor message's content. The evidence store itself is
-//! unchanged.
 
 use crate::core::evidence::{EvidenceRecord, EvidenceStore};
 use crate::core::types::{ContentBlock, Message, Role};
@@ -79,15 +101,10 @@ pub struct PlanInput<'a> {
 /// Build the prepared message sequence for a single provider call.
 ///
 /// Passthrough semantics when no evidence can be injected (empty store,
-/// no assets dir, no user anchor). See module doc for selection rules.
-///
-/// Evidence text is prepended as additional `ContentBlock::Text` entries
-/// to the trailing user message — not inserted as separate messages.
-/// Anthropic requires strict user/assistant alternation; inserting a
-/// second user message would fail at the wire layer. The anchor may be
-/// a user-text turn *or* a `tool_result`-only user turn: the latter is
-/// the common case inside a multi-tool-call assistant turn, which is
-/// where duplicate reads actually happen.
+/// no assets dir, no user anchor). Evidence is wrapped in
+/// `<system-reminder>` and either smooshed into the last tool_result's
+/// content (mid tool-loop) or prepended as a Text block (plain user
+/// turn). See module doc for the rationale.
 pub fn build_prepared_messages(input: PlanInput<'_>) -> Vec<Message> {
     let mut out: Vec<Message> = input.transcript.to_vec();
 
@@ -104,42 +121,65 @@ pub fn build_prepared_messages(input: PlanInput<'_>) -> Vec<Message> {
         return out;
     }
 
-    let mut blocks = Vec::with_capacity(selected.len());
+    let mut chunks = Vec::with_capacity(selected.len());
     for rec in selected {
-        match load_evidence_block(assets_dir, rec) {
-            Ok(block) => blocks.push(block),
+        match load_evidence_text(assets_dir, rec) {
+            Ok(text) => chunks.push(wrap_system_reminder(&text)),
             Err(e) => {
                 crate::dbg_log!("context_plan: skip evidence {}: {}", rec.id, e);
             }
         }
     }
-    if blocks.is_empty() {
+    if chunks.is_empty() {
         return out;
     }
 
-    // Insert evidence after any leading tool_result blocks and before
-    // user text. Anthropic requires that a user turn following an
-    // assistant tool_use begin with the matching tool_result blocks;
-    // a leading text block trips "tool_use ids were found without
-    // tool_result blocks immediately after" (HTTP 400). When the tail
-    // has no tool_results (plain user text), the loop stops at index
-    // 0 and evidence lands at the front as before.
-    let original = std::mem::take(&mut out[anchor].content);
-    let split = original
-        .iter()
-        .position(|b| !matches!(b, ContentBlock::ToolResult { .. }))
-        .unwrap_or(original.len());
-    let mut merged = Vec::with_capacity(blocks.len() + original.len());
-    let mut iter = original.into_iter();
-    for _ in 0..split {
-        if let Some(b) = iter.next() {
-            merged.push(b);
-        }
-    }
-    merged.extend(blocks);
-    merged.extend(iter);
-    out[anchor].content = merged;
+    inject_into_anchor(&mut out[anchor], chunks);
     out
+}
+
+/// Append evidence chunks to the anchor message.
+///
+/// If any block is a `tool_result`, smoosh every chunk into the **last**
+/// tool_result's content (Claude Code pattern). Otherwise the anchor is
+/// a plain user turn and we prepend the chunks as Text blocks.
+fn inject_into_anchor(msg: &mut Message, chunks: Vec<String>) {
+    let last_tr = msg
+        .content
+        .iter()
+        .rposition(|b| matches!(b, ContentBlock::ToolResult { .. }));
+
+    if let Some(idx) = last_tr
+        && let ContentBlock::ToolResult { content, .. } = &mut msg.content[idx]
+    {
+        for chunk in chunks {
+            if !content.is_empty() {
+                content.push_str("\n\n");
+            }
+            content.push_str(&chunk);
+        }
+        return;
+    }
+
+    // Plain user turn — prepend as Text blocks so the user's own text
+    // remains last in the content vector.
+    let original = std::mem::take(&mut msg.content);
+    let mut merged = Vec::with_capacity(chunks.len() + original.len());
+    for chunk in chunks {
+        merged.push(ContentBlock::Text { text: chunk });
+    }
+    merged.extend(original);
+    msg.content = merged;
+}
+
+/// Wrap evidence text in a Claude-recognised system-reminder envelope.
+///
+/// The tags are a trained signal: the model treats the contents as
+/// system-authored metadata instead of user-authored text, which
+/// suppresses the prompt-injection defensive reflex observed in
+/// sessions before the wrapper landed.
+fn wrap_system_reminder(text: &str) -> String {
+    format!("<system-reminder>\n{text}\n</system-reminder>")
 }
 
 /// Return the index of the trailing user message — the injection point.
@@ -164,32 +204,48 @@ fn find_injection_anchor(msgs: &[Message]) -> Option<usize> {
     Some(last)
 }
 
-/// Collect evidence ids already materialised as text blocks in the
-/// transcript. Used to skip double-injection across tool-loop
-/// iterations — the header `# Retrieved evidence: {id}` is the stable
-/// marker [`load_evidence_block`] writes.
+/// Collect evidence ids already materialised in the transcript.
+///
+/// Used to skip double-injection across tool-loop iterations. The
+/// stable marker is `# Retrieved evidence: {id}` — it appears either
+/// inside a `ContentBlock::Text.text` (plain user-turn anchor) or
+/// inside a `ContentBlock::ToolResult.content` string (tool_result
+/// anchor after smoosh). Scan both.
 fn collect_injected_ids(msgs: &[Message]) -> HashSet<String> {
-    const PREFIX: &str = "# Retrieved evidence: ";
     let mut ids = HashSet::new();
     for m in msgs {
         for b in &m.content {
-            let ContentBlock::Text { text } = b else {
-                continue;
-            };
-            let Some(rest) = text.strip_prefix(PREFIX) else {
-                continue;
-            };
-            // Header format: "{id} ({summary})\n\n…". Id is everything
-            // up to the first space or '('.
-            let end = rest
-                .find(|c: char| c.is_whitespace() || c == '(')
-                .unwrap_or(rest.len());
-            if end > 0 {
-                ids.insert(rest[..end].to_owned());
+            match b {
+                ContentBlock::Text { text } | ContentBlock::Paste { text } => {
+                    collect_ids_from_haystack(text, &mut ids);
+                }
+                ContentBlock::ToolResult { content, .. } => {
+                    collect_ids_from_haystack(content, &mut ids);
+                }
+                _ => {}
             }
         }
     }
     ids
+}
+
+/// Scan `haystack` for every `# Retrieved evidence: {id}` occurrence
+/// and record the id. Multiple evidence blocks may share one string
+/// (several chunks smooshed into the same tool_result content).
+fn collect_ids_from_haystack(haystack: &str, ids: &mut HashSet<String>) {
+    const MARKER: &str = "# Retrieved evidence: ";
+    let mut cursor = 0;
+    while let Some(rel) = haystack[cursor..].find(MARKER) {
+        let start = cursor + rel + MARKER.len();
+        let end = haystack[start..]
+            .find(|c: char| c.is_whitespace() || c == '(')
+            .map(|n| start + n)
+            .unwrap_or(haystack.len());
+        if end > start {
+            ids.insert(haystack[start..end].to_owned());
+        }
+        cursor = end;
+    }
 }
 
 /// Select evidence records to inject, in chronological order.
@@ -263,12 +319,14 @@ fn select_evidence<'a>(
     picked
 }
 
-/// Load an evidence blob and wrap it as a single `Text` content block.
+/// Load an evidence blob and render it as inject-ready text (without
+/// the system-reminder wrapper — that is applied by
+/// [`wrap_system_reminder`]).
 ///
-/// Format is stable (prefix line identifies the record) so repeated
+/// Format is stable (header line identifies the record) so repeated
 /// injections produce identical bytes — preserves the provider's
 /// prompt-cache prefix.
-fn load_evidence_block(assets_dir: &Path, rec: &EvidenceRecord) -> std::io::Result<ContentBlock> {
+fn load_evidence_text(assets_dir: &Path, rec: &EvidenceRecord) -> std::io::Result<String> {
     let rel = rec
         .blob_path
         .as_ref()
@@ -280,9 +338,7 @@ fn load_evidence_block(assets_dir: &Path, rec: &EvidenceRecord) -> std::io::Resu
         id = rec.id,
         summary = rec.summary,
     );
-    Ok(ContentBlock::Text {
-        text: format!("{header}{body}"),
-    })
+    Ok(format!("{header}{body}"))
 }
 
 #[cfg(test)]
@@ -586,13 +642,11 @@ mod tests {
     #[test]
     fn injects_into_tool_result_user_message() {
         // Mid tool-loop: assistant just emitted a tool_use and the
-        // tool_result user message is the tail. This is the hot path
-        // for duplicate reads — the planner must decorate this user
-        // message so the next stream() call sees the evidence.
-        //
-        // Evidence must land *after* the tool_result block. Anthropic
-        // rejects a user turn whose first block is text when it
-        // follows an assistant tool_use; tool_result must come first.
+        // tool_result user message is the tail. Evidence smooshes
+        // into the tool_result's content, wrapped in
+        // <system-reminder>. The content count stays at 1 —
+        // retrieved context rides inside the tool_result, not as a
+        // sibling block.
         let tmp = tempfile::tempdir().unwrap();
         write_blob(tmp.path(), "ev_1", "fn main() {}");
         let msgs = vec![
@@ -626,38 +680,41 @@ mod tests {
             assets_dir: Some(tmp.path()),
         });
         assert_eq!(out.len(), 3);
-        // "fix this" user turn untouched — only the tool_result tail is
-        // decorated.
         assert_eq!(out[0].content.len(), 1);
         match &out[0].content[0] {
             ContentBlock::Text { text } => assert_eq!(text, "fix this"),
             _ => panic!(),
         }
-        // Tail user message: tool_result first (API requirement), then
-        // evidence block.
         let tail = &out[2];
         assert_eq!(tail.role, Role::User);
-        assert_eq!(tail.content.len(), 2);
+        assert_eq!(
+            tail.content.len(),
+            1,
+            "evidence smooshes inside tool_result"
+        );
         match &tail.content[0] {
-            ContentBlock::ToolResult { tool_use_id, .. } => {
-                assert_eq!(tool_use_id, "tc_1")
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => {
+                assert_eq!(tool_use_id, "tc_1");
+                assert!(content.starts_with("summary"), "original result preserved");
+                assert!(content.contains("<system-reminder>"));
+                assert!(content.contains("Retrieved evidence: ev_1"));
+                assert!(content.contains("fn main()"));
+                assert!(content.contains("</system-reminder>"));
             }
-            _ => panic!("tool_result must come first after assistant tool_use"),
-        }
-        match &tail.content[1] {
-            ContentBlock::Text { text } => {
-                assert!(text.contains("Retrieved evidence: ev_1"));
-                assert!(text.contains("fn main()"));
-            }
-            _ => panic!("evidence must be appended after tool_result"),
+            _ => panic!("tail must still be a tool_result"),
         }
     }
 
     #[test]
-    fn injects_after_all_tool_results_with_mixed_tail() {
+    fn injects_into_last_tool_result_with_mixed_tail() {
         // Multi-tool batch: user message carries several tool_result
-        // blocks plus trailing text. Evidence lands between the last
-        // tool_result and the trailing text.
+        // blocks plus trailing text. Evidence smooshes into the LAST
+        // tool_result's content — not into the trailing text, not
+        // into the first tool_result.
         let tmp = tempfile::tempdir().unwrap();
         write_blob(tmp.path(), "ev_1", "body");
         let tail = Message {
@@ -710,31 +767,46 @@ mod tests {
             assets_dir: Some(tmp.path()),
         });
         let tail = out.last().unwrap();
-        // [tool_result tc_1, tool_result tc_2, evidence, trailing text]
-        assert_eq!(tail.content.len(), 4);
+        // Block shape unchanged — [tool_result, tool_result, text].
+        assert_eq!(tail.content.len(), 3);
+        // First tool_result untouched.
         match &tail.content[0] {
-            ContentBlock::ToolResult { tool_use_id, .. } => assert_eq!(tool_use_id, "tc_1"),
-            _ => panic!("first block must be tool_result tc_1"),
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => {
+                assert_eq!(tool_use_id, "tc_1");
+                assert_eq!(content, "r1", "first tool_result untouched");
+            }
+            _ => panic!(),
         }
+        // Last tool_result carries the evidence.
         match &tail.content[1] {
-            ContentBlock::ToolResult { tool_use_id, .. } => assert_eq!(tool_use_id, "tc_2"),
-            _ => panic!("second block must be tool_result tc_2"),
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => {
+                assert_eq!(tool_use_id, "tc_2");
+                assert!(content.starts_with("r2"));
+                assert!(content.contains("Retrieved evidence: ev_1"));
+                assert!(content.contains("<system-reminder>"));
+            }
+            _ => panic!(),
         }
+        // Trailing user text untouched.
         match &tail.content[2] {
-            ContentBlock::Text { text } => assert!(text.contains("Retrieved evidence: ev_1")),
-            _ => panic!("evidence must land after the tool_result cluster"),
-        }
-        match &tail.content[3] {
             ContentBlock::Text { text } => assert_eq!(text, "and one more thing"),
-            _ => panic!("trailing user text must remain last"),
+            _ => panic!(),
         }
     }
 
     #[test]
     fn idempotent_across_tool_loop_iters() {
-        // Simulate iter N → iter N+1 of the same tool loop. After iter
-        // N the transcript carries an injected header for ev_1; iter
-        // N+1 must not duplicate that injection.
+        // After iter N the transcript carries the evidence marker
+        // inside a tool_result's content. Iter N+1 must see it and
+        // skip re-injection.
         let tmp = tempfile::tempdir().unwrap();
         write_blob(tmp.path(), "ev_1", "body");
         let msgs = vec![
@@ -767,48 +839,70 @@ mod tests {
             evidence: &store,
             assets_dir: Some(tmp.path()),
         });
-        // Iter N: evidence injected once.
-        let iter_n_tail = iter_n.last().unwrap();
-        assert_eq!(iter_n_tail.content.len(), 2);
-        let evidence_occurrences_n: usize = iter_n_tail
-            .content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text } => {
-                    Some(text.matches("Retrieved evidence: ev_1").count())
-                }
-                _ => None,
-            })
-            .sum();
-        assert_eq!(evidence_occurrences_n, 1);
+        let iter_n_content = tool_result_content(iter_n.last().unwrap(), 0);
+        assert_eq!(
+            iter_n_content.matches("Retrieved evidence: ev_1").count(),
+            1
+        );
 
-        // Iter N+1: feed the injected transcript back in, same store.
-        // Planner must recognise ev_1 is already present and skip.
         let iter_np1 = build_prepared_messages(PlanInput {
             transcript: &iter_n,
             evidence: &store,
             assets_dir: Some(tmp.path()),
         });
-        let iter_np1_tail = iter_np1.last().unwrap();
+        let iter_np1_content = tool_result_content(iter_np1.last().unwrap(), 0);
         assert_eq!(
-            iter_np1_tail.content.len(),
-            2,
-            "no new block — still [evidence, tool_result]"
+            iter_np1_content.matches("Retrieved evidence: ev_1").count(),
+            1,
+            "idempotent: no double smoosh"
         );
-        let evidence_occurrences_np1: usize = iter_np1_tail
-            .content
+        assert_eq!(
+            iter_np1_content, iter_n_content,
+            "tool_result content byte-identical across iters"
+        );
+    }
+
+    #[test]
+    fn evidence_wrapped_in_system_reminder() {
+        // Lock in the wrapper shape — it's the signal that tells the
+        // model this text is system-authored metadata, not user input.
+        // Wrapper drift breaks the anti-prompt-injection property.
+        let tmp = tempfile::tempdir().unwrap();
+        write_blob(tmp.path(), "ev_1", "payload");
+        let msgs = vec![Message::user("q")];
+        let store = EvidenceStore {
+            records: vec![rec("ev_1", 0, &["a.rs"], 7, true)],
+        };
+        let out = build_prepared_messages(PlanInput {
+            transcript: &msgs,
+            evidence: &store,
+            assets_dir: Some(tmp.path()),
+        });
+        // Plain user-text tail: evidence sits as a prepended Text block.
+        let anchor = &out[0];
+        match &anchor.content[0] {
+            ContentBlock::Text { text } => {
+                assert!(text.starts_with("<system-reminder>\n"));
+                assert!(text.ends_with("\n</system-reminder>"));
+                assert!(text.contains("Retrieved evidence: ev_1"));
+                assert!(text.contains("payload"));
+            }
+            _ => panic!("evidence must be a Text block before user text"),
+        }
+    }
+
+    /// Read the `content` string of the `n`-th `ToolResult` block in a
+    /// message. Panics if not enough tool_results exist — tests use
+    /// this to assert on smooshed content.
+    fn tool_result_content(msg: &Message, n: usize) -> &str {
+        msg.content
             .iter()
             .filter_map(|b| match b {
-                ContentBlock::Text { text } => {
-                    Some(text.matches("Retrieved evidence: ev_1").count())
-                }
+                ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
                 _ => None,
             })
-            .sum();
-        assert_eq!(
-            evidence_occurrences_np1, 1,
-            "injection is idempotent across iters"
-        );
+            .nth(n)
+            .expect("tool_result block present")
     }
 
     #[test]
