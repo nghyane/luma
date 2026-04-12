@@ -292,7 +292,8 @@ impl super::App {
         const MAX_RENDER_TURNS: usize = 6;
         let mut turn_starts = Vec::new();
         for (i, msg) in messages.iter().enumerate() {
-            if msg.role == Role::User {
+            // Only real user prompts start a turn — skip tool-result carriers.
+            if msg.role == Role::User && (msg.has_text() || msg.has_images()) {
                 turn_starts.push(i);
             }
         }
@@ -316,6 +317,12 @@ impl super::App {
             match msg.role {
                 Role::System => {}
                 Role::User => {
+                    // Tool-result-only user messages are internal plumbing —
+                    // they carry no visible text, so skip them to avoid empty
+                    // prompt blocks on resume.
+                    if !msg.has_text() && !msg.has_images() {
+                        continue;
+                    }
                     turn_idx += 1;
                     if i < render_from {
                         continue;
