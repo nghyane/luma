@@ -310,11 +310,11 @@ async fn run_turn(
             if provider.supports_max_tokens_override() {
                 anyhow::bail!(
                     "output token limit hit even at {ESCALATED_MAX_TOKENS} tokens. \
-                     Try /compact or switch model."
+                     Start a new session or switch to a model with larger output capacity."
                 );
             }
             anyhow::bail!(
-                "{} hit its output token limit. Try /compact or switch model.",
+                "{} hit its output token limit. Start a new session or switch to a model with larger output capacity.",
                 provider.name()
             );
         }

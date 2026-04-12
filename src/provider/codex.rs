@@ -353,7 +353,7 @@ async fn run_codex_stream_loop(
                     .unwrap_or("unknown error");
                 state.failure_error = Some(if err_code == "context_length_exceeded" {
                     anyhow::anyhow!(
-                        "codex context window exceeded: {err_msg}. Try /compact or switch model."
+                        "codex context window exceeded: {err_msg}. Start a new session or switch to a model with larger context."
                     )
                 } else {
                     anyhow::anyhow!("codex response.failed ({err_code}): {err_msg}")
