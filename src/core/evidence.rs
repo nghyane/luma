@@ -234,11 +234,22 @@ fn is_build_command(args: &serde_json::Value) -> bool {
     VERIFIERS.iter().any(|v| lower.contains(v))
 }
 
-/// Extract file paths mentioned in tool args.
+/// Extract file paths mentioned in tool args, normalized for dedup.
 ///
-/// Drives `files_in_play` intersection when the planner picks evidence to
-/// reload; returning an empty vec is fine — the planner falls back to
-/// recency.
+/// Drives the planner's dedup-by-file rule. Agents may reference the
+/// same file via several equivalent spellings across turns
+/// (`src/x.rs`, `./src/x.rs`, `/Users/me/proj/src/x.rs`); without
+/// normalization each spelling becomes a distinct dedup key and the
+/// planner injects the same file repeatedly.
+///
+/// Normalization is cheap and deterministic — strips a leading `./`
+/// and, for absolute paths, rewrites to cwd-relative when possible.
+/// No filesystem access: evidence may be classified for files that
+/// don't exist yet (e.g. `Write`), so `canonicalize` is not an
+/// option.
+///
+/// Returns an empty vec when the tool has no path argument — the
+/// planner falls back to pure recency in that case.
 fn extract_related_files(tool_name: &str, args: &serde_json::Value) -> Vec<String> {
     let field = match tool_name {
         "Read" | "Edit" | "Write" => "path",
@@ -247,8 +258,27 @@ fn extract_related_files(tool_name: &str, args: &serde_json::Value) -> Vec<Strin
     };
     args.get(field)
         .and_then(|v| v.as_str())
-        .map(|s| vec![s.to_owned()])
+        .map(|s| vec![normalize_path(s)])
         .unwrap_or_default()
+}
+
+/// Collapse equivalent path spellings to a single canonical key.
+///
+/// Used by [`extract_related_files`] so the planner's dedup-by-file
+/// rule treats `src/x.rs`, `./src/x.rs`, and `<cwd>/src/x.rs` as the
+/// same file. Kept cheap (no disk access) so it is safe to call on
+/// paths that may not exist yet.
+fn normalize_path(raw: &str) -> String {
+    use std::path::Path;
+    let trimmed = raw.strip_prefix("./").unwrap_or(raw);
+    let p = Path::new(trimmed);
+    if p.is_absolute()
+        && let Ok(cwd) = std::env::current_dir()
+        && let Ok(rel) = p.strip_prefix(&cwd)
+    {
+        return rel.to_string_lossy().into_owned();
+    }
+    trimmed.to_owned()
 }
 
 /// Build the short summary that replaces the full result in the transcript.
@@ -455,5 +485,60 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(leftover.is_empty(), "tmp file leaked: {leftover:?}");
+    }
+
+    #[test]
+    fn normalize_strips_leading_dot_slash() {
+        assert_eq!(normalize_path("./src/main.rs"), "src/main.rs");
+        assert_eq!(normalize_path("src/main.rs"), "src/main.rs");
+    }
+
+    #[test]
+    fn normalize_absolute_path_under_cwd_becomes_relative() {
+        let cwd = std::env::current_dir().unwrap();
+        let abs = cwd.join("src/main.rs");
+        let normalized = normalize_path(abs.to_str().unwrap());
+        // On windows this round-trips with backslashes; compare both ways.
+        let expected = std::path::Path::new("src/main.rs");
+        assert_eq!(std::path::Path::new(&normalized), expected);
+    }
+
+    #[test]
+    fn normalize_absolute_path_outside_cwd_passes_through() {
+        // /tmp/x.rs is outside any reasonable cwd; must not be rewritten.
+        let raw = if cfg!(windows) {
+            r"C:\tmp\x.rs"
+        } else {
+            "/tmp/x.rs"
+        };
+        assert_eq!(normalize_path(raw), raw);
+    }
+
+    #[test]
+    fn classify_dedup_keys_match_across_path_spellings() {
+        // The three spellings an agent commonly produces for the same
+        // file all yield the same dedup key on platforms where the cwd
+        // contains `src/` — which is this crate's layout.
+        let cwd = std::env::current_dir().unwrap();
+        let rel = classify(
+            "Read",
+            &serde_json::json!({"path": "src/core/evidence.rs"}),
+            "x",
+        )
+        .unwrap();
+        let dot = classify(
+            "Read",
+            &serde_json::json!({"path": "./src/core/evidence.rs"}),
+            "x",
+        )
+        .unwrap();
+        let abs = classify(
+            "Read",
+            &serde_json::json!({"path": cwd.join("src/core/evidence.rs").to_str().unwrap()}),
+            "x",
+        )
+        .unwrap();
+        assert_eq!(rel.related_files, dot.related_files);
+        assert_eq!(rel.related_files, abs.related_files);
     }
 }
