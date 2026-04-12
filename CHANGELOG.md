@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-beta.10] - 2026-04-12
+
+### Changed
+- Chat rendering now uses explicit follow modes so normal frames still auto-follow while tool-stream frames preserve the current viewport offset
+- Streaming `ToolInput` and `ToolOutput` events trigger an immediate partial render, keeping long-running tool output live without a full redraw pass
+- Structured file-change blocks now render through the artifact path more consistently, with clearer collapsed and expanded output for multi-file diffs
+
+### Fixed
+- Tool streaming no longer snaps the chat view back to bottom when the user is reviewing older content mid-run
+- Tool block snapshots now cover artifact-backed collapsed and expanded diff states, reducing regressions in structured tool rendering
+
 ## [0.4.0-beta.9] - 2026-04-11
 
 ### Added

@@ -53,6 +53,42 @@ fn render_tool_expanded() {
 }
 
 #[test]
+fn render_multi_file_change_uses_dim_file_headers() {
+    let mut tb = ToolBlock::history("apply_patch", "hello.txt");
+    tb.artifact = Some(crate::core::types::FileChangeArtifact {
+        files: vec![
+            crate::core::types::FileArtifact {
+                path: "old.txt".into(),
+                operation: crate::core::types::FileOp::Delete,
+                diff: Some("-old".into()),
+                preview: None,
+            },
+            crate::core::types::FileArtifact {
+                path: "new.txt".into(),
+                operation: crate::core::types::FileOp::Add,
+                diff: Some("+new".into()),
+                preview: None,
+            },
+        ],
+        raw_input: None,
+        error: None,
+        status: crate::core::types::ToolStatus::Done,
+    });
+    tb.is_expanded = false;
+
+    let mut st = RenderState::new();
+    let lines = render_block(&Block::Tool(tb), &mut st, 80, 0);
+    let text: String = lines
+        .iter()
+        .flat_map(|l| l.spans.iter().map(|s| s.text.as_str()))
+        .collect();
+    assert!(text.contains("Created new.txt"));
+    assert!(text.contains("Deleted old.txt"));
+    assert!(!text.contains("A new.txt"));
+    assert!(!text.contains("D old.txt"));
+}
+
+#[test]
 fn tool_pending_shows_spinner() {
     let tb = ToolBlock::streaming("Edit", "");
     let mut st = RenderState::new();
@@ -66,6 +102,32 @@ fn tool_pending_shows_spinner() {
         text.contains("preparing Edit"),
         "write tool pending: {text}"
     );
+}
+
+#[test]
+fn tool_pending_write_preview_caps_height_when_partial_exists() {
+    let mut tb = ToolBlock::streaming("Write", "src/main.rs");
+    let mut preview = StreamBuf::new();
+    for i in 0..12 {
+        preview.feed(&format!(
+            "line {i}
+"
+        ));
+    }
+    preview.feed("partial");
+    tb.arg_preview = Some(Box::new(preview));
+
+    let mut st = RenderState::new();
+    let lines = render_block(&Block::Tool(tb), &mut st, 80, 0);
+
+    assert_eq!(lines.len(), 13, "header + capped preview height");
+    let body: Vec<String> = lines[1..]
+        .iter()
+        .map(|line| line.spans.iter().map(|span| span.text.as_str()).collect())
+        .collect();
+    assert_eq!(body.len(), 12);
+    assert_eq!(body.last().map(String::as_str), Some("  partial"));
+    assert!(!body.iter().any(|line| line == "  line 11"));
 }
 
 #[test]
@@ -309,7 +371,7 @@ fn full_edit_tool_flow() {
     );
     doc.tool_end("Edit", "");
 
-    view.prepare_frame(doc.blocks());
+    view.prepare_frame(doc.blocks(), crate::tui::view::FollowMode::Auto);
     let vis = view.collect_visible();
     let all: String = vis
         .iter()
@@ -620,7 +682,7 @@ fn screen_welcome_lines_independent_from_doc() {
     doc.user_message(&[crate::core::types::ContentBlock::Text {
         text: "hello world".into(),
     }]);
-    view.prepare_frame(doc.blocks());
+    view.prepare_frame(doc.blocks(), crate::tui::view::FollowMode::Auto);
     let text: String = view
         .collect_visible()
         .iter()

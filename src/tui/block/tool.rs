@@ -70,21 +70,25 @@ fn render_file_change_block(tb: &ToolBlock, artifact: &FileChangeArtifact, w: us
             } else {
                 for file in &artifact.files {
                     result.push(Line::new(smallvec![
-                        Span::new("  ".to_owned(), palette::DIM),
-                        Span::new(
-                            format!("{} {}", file_op_label(&file.operation), file.path),
-                            palette::FG
-                        ),
+                        Span::new("  # ".to_owned(), palette::DIM),
+                        Span::new(file_change_title(file), palette::DIM),
                     ]));
-                    if tb.is_expanded {
-                        render_file_artifact(file, true, &mut result);
-                    }
+                    render_file_artifact(file, tb.is_expanded, &mut result);
                 }
             }
         }
     }
 
     result
+}
+
+fn file_change_title(file: &FileArtifact) -> String {
+    match &file.operation {
+        FileOp::Add => format!("Created {}", file.path),
+        FileOp::Update => format!("Updated {}", file.path),
+        FileOp::Delete => format!("Deleted {}", file.path),
+        FileOp::Move { from } => format!("Renamed {from} -> {}", file.path),
+    }
 }
 
 fn render_file_artifact(file: &FileArtifact, is_expanded: bool, result: &mut Vec<Line>) {
@@ -100,15 +104,6 @@ fn render_file_artifact(file: &FileArtifact, is_expanded: bool, result: &mut Vec
                 Span::new(line.to_owned(), palette::DIM),
             ]));
         }
-    }
-}
-
-fn file_op_label(op: &FileOp) -> &'static str {
-    match op {
-        FileOp::Add => "A",
-        FileOp::Update => "M",
-        FileOp::Delete => "D",
-        FileOp::Move { .. } => "R",
     }
 }
 
@@ -202,18 +197,19 @@ fn render_pending_write(tb: &ToolBlock, result: &mut Vec<Line>) {
     let active = tb.arg_preview.as_ref().or(tb.stream.as_ref());
     if let Some(stream) = active {
         let total = stream.committed.len();
-        if total > 0 {
-            for line in &stream.committed[total.saturating_sub(TOOL_PREVIEW_LINES)..] {
-                result.push(Line::new(smallvec![
-                    Span::new("  ".to_owned(), palette::DIM),
-                    Span::new(line.clone(), palette::DIM),
-                ]));
+        let start = total.saturating_sub(TOOL_PREVIEW_LINES);
+        let mut visible: Vec<String> = stream.committed[start..].to_vec();
+        if !stream.partial().is_empty() {
+            if visible.len() < TOOL_PREVIEW_LINES {
+                visible.push(stream.partial().to_owned());
+            } else if let Some(last) = visible.last_mut() {
+                *last = stream.partial().to_owned();
             }
         }
-        if !stream.partial().is_empty() {
+        for line in visible {
             result.push(Line::new(smallvec![
                 Span::new("  ".to_owned(), palette::DIM),
-                Span::new(stream.partial().to_owned(), palette::DIM),
+                Span::new(line, palette::DIM),
             ]));
         }
     }

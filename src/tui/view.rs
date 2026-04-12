@@ -5,6 +5,12 @@ use crate::tui::layout::LayoutIter;
 use crate::tui::scroll::ScrollView;
 use crate::tui::text::Line;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FollowMode {
+    Auto,
+    PreserveOffset,
+}
+
 pub struct ViewState {
     pub layout: Layout,
     pub scroll: ScrollView,
@@ -18,12 +24,15 @@ impl ViewState {
         }
     }
 
-    /// Refresh layout + auto-scroll. Call once per frame before reading.
-    pub fn prepare_frame(&mut self, blocks: &[Block]) {
+    /// Refresh layout and apply the requested scroll policy. Call once per frame before reading.
+    pub fn prepare_frame(&mut self, blocks: &[Block], follow: FollowMode) {
         self.layout.refresh(blocks, self.scroll.offset);
         let total = self.layout.total_lines();
         let height = self.layout.height();
-        self.scroll.auto_scroll(total, height);
+        match follow {
+            FollowMode::Auto => self.scroll.auto_scroll(total, height),
+            FollowMode::PreserveOffset => {}
+        }
         self.scroll.clamp(total, height);
     }
 
