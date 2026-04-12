@@ -36,9 +36,9 @@ pub fn build_catalog(skills: &[Skill]) -> String {
 
     let mut out = String::from(
         "\nThe following skills provide specialized instructions for specific tasks.\n\
-         When a task matches a skill's description, use the read tool to load the SKILL.md \
-         at the listed path before proceeding. When a skill references relative paths, \
-         resolve them against the skill's directory (the parent of SKILL.md).\n\n\
+         When a task matches a skill's description, use the Read tool with the listed \
+         `location` URI to load the skill's instructions before proceeding. Skill \
+         paths referenced inside a skill resolve against the skill's `directory`.\n\n\
          <available_skills>\n",
     );
     for s in skills {
@@ -48,8 +48,8 @@ pub fn build_catalog(skills: &[Skill]) -> String {
             .map(|p| p.display().to_string())
             .unwrap_or_default();
         out.push_str(&format!(
-            "  <skill name=\"{}\">\n    <description>{}</description>\n    <location>{}</location>\n    <directory>{}</directory>\n  </skill>\n",
-            s.name, s.description, s.path.display(), dir
+            "  <skill name=\"{}\">\n    <description>{}</description>\n    <location>artifact://skill/{}</location>\n    <directory>{}</directory>\n  </skill>\n",
+            s.name, s.description, s.name, dir
         ));
     }
     out.push_str("</available_skills>\n");
@@ -154,6 +154,14 @@ mod tests {
         let catalog = build_catalog(&skills);
         assert!(catalog.contains("<skill name=\"test\">"));
         assert!(catalog.contains("A test"));
+        assert!(
+            catalog.contains("<location>artifact://skill/test</location>"),
+            "catalog must advertise artifact URI, not filesystem path:\n{catalog}"
+        );
+        assert!(
+            !catalog.contains("/tmp/test/SKILL.md"),
+            "raw filesystem path must not leak into catalog"
+        );
     }
 
     #[test]

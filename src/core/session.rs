@@ -207,53 +207,108 @@ where
     CURRENT_SESSION.scope(session_id.to_owned(), fut).await
 }
 
+/// Result of resolving a URI-style path to a filesystem location.
+///
+/// Separate from a bare `PathBuf` because some resource types need
+/// post-read transformations that the caller must apply consistently —
+/// e.g. `artifact://skill/{name}` strips the YAML frontmatter before
+/// returning the body to the model, since the frontmatter is already
+/// in the system prompt catalog.
+#[derive(Debug)]
+pub enum Resolved {
+    /// Read the file verbatim.
+    Path(PathBuf),
+    /// Read the file, then drop a leading `---…---` YAML frontmatter
+    /// block before returning content to the caller.
+    PathStripFrontmatter(PathBuf),
+}
+
 /// Resolve a URI-style path to a concrete filesystem location.
 ///
-/// Scheme registry (extensible — `skill://`, `session://` can slot in
-/// later without touching call sites):
+/// Single-scheme registry (`artifact://`) with typed sub-resolvers so
+/// the model only ever needs to remember one URL form. Currently
+/// registered types:
 ///
-/// * `artifact://{id}` — re-read a stored evidence blob from the
-///   current session's `evidence/` directory. Requires
-///   [`scope_current_session`] to be active.
+/// * `artifact://ev/{id}` — re-read a stored evidence blob from the
+///   current session's `evidence/` directory. Requires an active
+///   [`scope_current_session`].
+/// * `artifact://skill/{name}` — load a skill's `SKILL.md` body
+///   (frontmatter stripped). Names come from the `<available_skills>`
+///   catalog injected into the system prompt.
 ///
-/// Non-URI strings pass through unchanged so plain filesystem paths
-/// (the vast majority of tool calls) take no penalty.
-pub fn resolve_resource_path(path: &str) -> std::io::Result<PathBuf> {
+/// Non-URI strings pass through as plain filesystem paths so the vast
+/// majority of tool calls take no penalty.
+pub fn resolve_resource_path(path: &str) -> std::io::Result<Resolved> {
     let Some((scheme, rest)) = path.split_once("://") else {
-        return Ok(PathBuf::from(path));
+        return Ok(Resolved::Path(PathBuf::from(path)));
     };
-    match scheme {
-        "artifact" => resolve_artifact(rest),
+    if scheme != "artifact" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unknown URI scheme: {scheme}"),
+        ));
+    }
+    let (kind, id) = rest.split_once('/').ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "artifact:// requires `{type}/{id}` (e.g. artifact://ev/ev_abc)",
+        )
+    })?;
+    match kind {
+        "ev" => resolve_evidence(id).map(Resolved::Path),
+        "skill" => resolve_skill(id).map(Resolved::PathStripFrontmatter),
         other => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("unknown URI scheme: {other}"),
+            format!("unknown artifact type: {other}"),
         )),
     }
 }
 
-fn resolve_artifact(id: &str) -> std::io::Result<PathBuf> {
-    // Reject malformed ids early so path joins can't escape the
-    // evidence directory via '..' or absolute components.
-    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
+fn is_safe_id_segment(s: &str) -> bool {
+    !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains("..")
+}
+
+fn resolve_evidence(id: &str) -> std::io::Result<PathBuf> {
+    if !is_safe_id_segment(id) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("invalid artifact id: {id}"),
+            format!("invalid evidence id: {id}"),
         ));
     }
     let session_id = CURRENT_SESSION.try_with(|s| s.clone()).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "artifact:// requires an active session",
+            "artifact://ev requires an active session",
         )
     })?;
     let path = session_evidence_dir(&session_id).join(format!("{id}.txt"));
     if !path.exists() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!("artifact {id} not found in session {session_id}"),
+            format!("artifact ev/{id} not found in session {session_id}"),
         ));
     }
     Ok(path)
+}
+
+fn resolve_skill(name: &str) -> std::io::Result<PathBuf> {
+    if !is_safe_id_segment(name) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid skill name: {name}"),
+        ));
+    }
+    // Discovery already walks project + user skill directories with
+    // precedence rules — reuse it so resolution matches what the
+    // catalog advertises byte-for-byte.
+    let skills = crate::config::skills::discover();
+    let skill = skills.iter().find(|s| s.name == name).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("skill not found: {name}"),
+        )
+    })?;
+    Ok(skill.path.clone())
 }
 
 /// Save image bytes to `sessions/{session_id}/images/{filename}`. Returns filename.
@@ -344,10 +399,17 @@ mod tests {
         let _ = list_sessions();
     }
 
+    fn path_of(r: Resolved) -> PathBuf {
+        match r {
+            Resolved::Path(p) | Resolved::PathStripFrontmatter(p) => p,
+        }
+    }
+
     #[test]
     fn resolve_plain_path_passes_through() {
         let out = resolve_resource_path("/abs/path/file.rs").unwrap();
-        assert_eq!(out, PathBuf::from("/abs/path/file.rs"));
+        assert!(matches!(out, Resolved::Path(_)));
+        assert_eq!(path_of(out), PathBuf::from("/abs/path/file.rs"));
     }
 
     #[test]
@@ -356,18 +418,30 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
-    #[tokio::test]
-    async fn resolve_artifact_without_session_scope_fails() {
-        // Outside scope_current_session — resolver must refuse.
+    #[test]
+    fn resolve_artifact_without_type_is_error() {
+        // artifact:// must be followed by {type}/{id}.
         let err = resolve_resource_path("artifact://ev_abc").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn resolve_artifact_unknown_type_is_error() {
+        let err = resolve_resource_path("artifact://bogus/x").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn resolve_evidence_without_session_scope_fails() {
+        let err = resolve_resource_path("artifact://ev/ev_abc").unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 
     #[tokio::test]
-    async fn resolve_artifact_rejects_path_traversal() {
+    async fn resolve_evidence_rejects_path_traversal() {
         scope_current_session("ses_nope", async {
             for bad in ["", "../etc", "a/b", "a\\b", ".."] {
-                let uri = format!("artifact://{bad}");
+                let uri = format!("artifact://ev/{bad}");
                 let err = resolve_resource_path(&uri).unwrap_err();
                 assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{uri}");
             }
@@ -376,12 +450,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_artifact_missing_blob_reports_not_found() {
+    async fn resolve_evidence_missing_blob_reports_not_found() {
         scope_current_session("ses_nope", async {
-            let err = resolve_resource_path("artifact://ev_does_not_exist").unwrap_err();
+            let err = resolve_resource_path("artifact://ev/ev_does_not_exist").unwrap_err();
             assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
         })
         .await;
+    }
+
+    #[test]
+    fn resolve_skill_rejects_path_traversal() {
+        for bad in ["", "../etc", "a/b", "a\\b", ".."] {
+            let uri = format!("artifact://skill/{bad}");
+            let err = resolve_resource_path(&uri).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{uri}");
+        }
+    }
+
+    #[test]
+    fn resolve_skill_unknown_name_is_not_found() {
+        // A name that can't reasonably match any discovered skill.
+        let err = resolve_resource_path("artifact://skill/definitely_not_a_real_skill_xyz_42")
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 
     #[test]

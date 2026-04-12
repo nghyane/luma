@@ -310,19 +310,19 @@ fn build_summary(tool_name: &str, args: &serde_json::Value, result: &str) -> Str
                 let end = limit.map(|l| offset + l - 1);
                 match end {
                     Some(e) => format!(
-                        "{path} (partial: lines {offset}-{e}, {lines} lines stored as {{id}})"
+                        "{path} (partial: lines {offset}-{e}, {lines} lines stored as artifact://ev/{{id}})"
                     ),
                     None => format!(
-                        "{path} (partial: from line {offset}, {lines} lines stored as {{id}})"
+                        "{path} (partial: from line {offset}, {lines} lines stored as artifact://ev/{{id}})"
                     ),
                 }
             } else {
-                format!("{path} ({lines} lines, stored as {{id}})")
+                format!("{path} ({lines} lines, stored as artifact://ev/{{id}})")
             }
         }
         "Grep" | "GhSearch" => {
             let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
-            format!("grep {pattern:?}: {lines} lines, stored as {{id}}")
+            format!("grep {pattern:?}: {lines} lines, stored as artifact://ev/{{id}}")
         }
         "Bash" | "exec_command" | "shell" => {
             let exit = result
@@ -336,9 +336,9 @@ fn build_summary(tool_name: &str, args: &serde_json::Value, result: &str) -> Str
                 .chars()
                 .take(60)
                 .collect();
-            format!("$ {cmd_preview} → exit {exit}, {lines} lines, stored as {{id}}")
+            format!("$ {cmd_preview} → exit {exit}, {lines} lines, stored as artifact://ev/{{id}}")
         }
-        _ => format!("{tool_name}: {lines} lines, stored as {{id}}"),
+        _ => format!("{tool_name}: {lines} lines, stored as artifact://ev/{{id}}"),
     };
     truncate_summary(&raw)
 }

@@ -33,7 +33,11 @@ impl Tool for ReadTool {
             name: "Read".into(),
             description: concat!(
                 "Read a file or list a directory. Returns content with line numbers (e.g. '1: content').\n",
-                "- Path must be absolute, OR an artifact URI `artifact://{id}` to re-read a stored evidence blob from this session (the id appears in prior tool summaries as `stored as ev_xxx`).\n",
+                "- `path` can be an absolute filesystem path OR an `artifact://` URI:\n",
+                "  - `artifact://ev/{id}` — re-read a stored evidence blob from this session\n",
+                "    (ids appear in prior tool summaries, e.g. 'stored as artifact://ev/ev_abc').\n",
+                "  - `artifact://skill/{name}` — load a skill's instructions\n",
+                "    (names come from the `<available_skills>` catalog; frontmatter is stripped).\n",
                 "- Default reads up to 2000 lines. Use offset/limit for large files.\n",
                 "- Files larger than 10MB require offset and limit parameters.\n",
                 "- Avoid tiny repeated slices (e.g. 30-line chunks). Read a larger window instead.\n",
@@ -66,12 +70,17 @@ impl Tool for ReadTool {
                 bail!("missing path argument");
             }
 
-            // URI schemes (artifact://) resolve to a concrete path in the
-            // session asset tree; plain paths pass through unchanged.
-            let path = match crate::core::session::resolve_resource_path(path_str) {
-                Ok(p) => p.canonicalize().unwrap_or(p),
+            // URI schemes (artifact://ev/, artifact://skill/) resolve to
+            // a concrete path plus a post-read transformation flag.
+            let resolved = match crate::core::session::resolve_resource_path(path_str) {
+                Ok(r) => r,
                 Err(e) => bail!("{e}"),
             };
+            let (raw_path, strip_frontmatter) = match resolved {
+                crate::core::session::Resolved::Path(p) => (p, false),
+                crate::core::session::Resolved::PathStripFrontmatter(p) => (p, true),
+            };
+            let path = raw_path.canonicalize().unwrap_or(raw_path);
 
             let meta = match fs::metadata(&path) {
                 Ok(m) => m,
@@ -134,6 +143,16 @@ impl Tool for ReadTool {
                 );
             }
 
+            // For skill artifacts, skip past the leading `---…---` YAML
+            // frontmatter so line 1 lines up with the first body line
+            // (the frontmatter is already advertised in the skill
+            // catalog inside the system prompt).
+            let skip_lines = if strip_frontmatter {
+                count_frontmatter_lines(&path)?
+            } else {
+                0
+            };
+
             let file = fs::File::open(&path)?;
             let mut reader = BufReader::new(file);
 
@@ -153,7 +172,10 @@ impl Tool for ReadTool {
 
             for (i, line) in reader.lines().enumerate() {
                 let line = line?;
-                let line_num = i + 1;
+                if i < skip_lines {
+                    continue;
+                }
+                let line_num = i - skip_lines + 1;
                 total_lines = line_num;
                 if line_num < offset {
                     continue;
@@ -198,6 +220,31 @@ impl Tool for ReadTool {
 /// Public wrapper for edit tool "did you mean?" suggestions.
 pub fn suggest_similar_file(path: &std::path::Path) -> Option<String> {
     suggest_similar(path)
+}
+
+/// Count the lines taken up by a leading `---…---` YAML frontmatter
+/// block — inclusive of both fence lines. Returns 0 when the file
+/// doesn't start with one, so callers can use the value as an offset
+/// unconditionally.
+fn count_frontmatter_lines(path: &std::path::Path) -> std::io::Result<usize> {
+    let file = fs::File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines();
+    match lines.next() {
+        Some(Ok(first)) if first.trim() == "---" => {
+            let mut skipped = 1;
+            for line in lines {
+                skipped += 1;
+                if line?.trim() == "---" {
+                    return Ok(skipped);
+                }
+            }
+            // Unterminated frontmatter — treat as no frontmatter to
+            // avoid swallowing the whole file.
+            Ok(0)
+        }
+        _ => Ok(0),
+    }
 }
 
 /// Suggest a similar filename in the same directory.
@@ -245,6 +292,32 @@ fn str_distance(a: &str, b: &str) -> usize {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn count_frontmatter_counts_delimiter_lines_inclusive() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("skill.md");
+        std::fs::write(&file, "---\nname: x\ndesc: y\n---\nbody\nmore\n").unwrap();
+        assert_eq!(count_frontmatter_lines(&file).unwrap(), 4);
+    }
+
+    #[test]
+    fn count_frontmatter_returns_zero_without_delimiter() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("plain.md");
+        std::fs::write(&file, "# title\nbody\n").unwrap();
+        assert_eq!(count_frontmatter_lines(&file).unwrap(), 0);
+    }
+
+    #[test]
+    fn count_frontmatter_returns_zero_on_unterminated_fence() {
+        // An opening `---` with no closing fence: treat as no
+        // frontmatter so the Read tool doesn't swallow the whole file.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("broken.md");
+        std::fs::write(&file, "---\nname: x\nno close\n").unwrap();
+        assert_eq!(count_frontmatter_lines(&file).unwrap(), 0);
+    }
 
     #[tokio::test]
     async fn read_file() {
