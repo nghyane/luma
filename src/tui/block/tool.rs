@@ -196,20 +196,25 @@ fn render_pending_write(tb: &ToolBlock, result: &mut Vec<Line>) {
     // for Write/Edit/apply_patch).
     let active = tb.arg_preview.as_ref().or(tb.stream.as_ref());
     if let Some(stream) = active {
+        let partial = stream.partial();
+        let has_partial = !partial.is_empty();
+        let keep = if has_partial {
+            TOOL_PREVIEW_LINES.saturating_sub(1)
+        } else {
+            TOOL_PREVIEW_LINES
+        };
         let total = stream.committed.len();
-        let start = total.saturating_sub(TOOL_PREVIEW_LINES);
-        let mut visible: Vec<String> = stream.committed[start..].to_vec();
-        if !stream.partial().is_empty() {
-            if visible.len() < TOOL_PREVIEW_LINES {
-                visible.push(stream.partial().to_owned());
-            } else if let Some(last) = visible.last_mut() {
-                *last = stream.partial().to_owned();
-            }
-        }
-        for line in visible {
+        let start = total.saturating_sub(keep);
+        for line in &stream.committed[start..] {
             result.push(Line::new(smallvec![
                 Span::new("  ".to_owned(), palette::DIM),
-                Span::new(line, palette::DIM),
+                Span::new(line.clone(), palette::DIM),
+            ]));
+        }
+        if has_partial {
+            result.push(Line::new(smallvec![
+                Span::new("  ".to_owned(), palette::DIM),
+                Span::new(partial.to_owned(), palette::DIM),
             ]));
         }
     }

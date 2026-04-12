@@ -127,7 +127,10 @@ fn tool_pending_write_preview_caps_height_when_partial_exists() {
         .collect();
     assert_eq!(body.len(), 12);
     assert_eq!(body.last().map(String::as_str), Some("  partial"));
-    assert!(!body.iter().any(|line| line == "  line 11"));
+    // Oldest line is dropped to make room for the in-flight partial; all other
+    // committed lines remain visible.
+    assert!(!body.iter().any(|line| line == "  line 0"));
+    assert!(body.iter().any(|line| line == "  line 11"));
 }
 
 #[test]
