@@ -1,5 +1,4 @@
 pub mod agent;
-pub mod context_plan;
 pub mod evidence;
 pub mod provider;
 pub mod registry;

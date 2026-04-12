@@ -171,7 +171,7 @@ fn sessions_dir() -> PathBuf {
 ///     images/{image_id}
 ///     evidence/{evidence_id}.txt
 /// ```
-pub fn session_assets_dir(session_id: &str) -> PathBuf {
+fn session_assets_dir(session_id: &str) -> PathBuf {
     sessions_dir().join(session_id)
 }
 
