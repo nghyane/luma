@@ -12,7 +12,18 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 const MAX_ITERATIONS: usize = 50;
-const MAX_RESULT_LEN: usize = 32_000;
+
+/// Final safety cap on a single tool_result before it is written into the
+/// transcript. Tools are expected to produce outputs already bounded by
+/// their own limits (e.g. `bash` does head+tail truncation at 32K); this
+/// cap only catches tools that forgot to bound, to keep the transcript
+/// from ballooning on a runaway result.
+///
+/// When the evidence store (see `docs/rfcs/evidence-backed-handoff.md`)
+/// lands, this cap is superseded by evidence ingestion and this site will
+/// instead create an `EvidenceRecord`.
+const AGENT_RESULT_SAFETY_CAP: usize = 32_000;
+
 const STREAM_RETRIES: u8 = 2;
 const STREAM_RETRY_DELAY_SECS: u64 = 2;
 
@@ -332,9 +343,9 @@ async fn run_turn(
         // abort, so the model sees what happened on replay.
         let mut result_blocks: Vec<ContentBlock> = Vec::with_capacity(tool_results.len());
         for (id, mut text) in tool_results {
-            if text.len() > MAX_RESULT_LEN {
-                text.truncate(MAX_RESULT_LEN);
-                text.push_str("\n[truncated]");
+            if text.len() > AGENT_RESULT_SAFETY_CAP {
+                text.truncate(AGENT_RESULT_SAFETY_CAP);
+                text.push_str(crate::core::tool::TRUNCATION_MARKER);
             }
             result_blocks.push(ContentBlock::ToolResult {
                 tool_use_id: id,

@@ -10,6 +10,15 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// Maximum combined stdout+stderr bytes retained in the tool result.
+///
+/// When output exceeds this cap, `bash` uses head+tail truncation (see
+/// [`HEAD_BYTES`], [`TAIL_BYTES`]) with a self-describing middle marker —
+/// intentionally richer than the generic
+/// [`crate::core::tool::TRUNCATION_MARKER`], because the tail of a build
+/// log is usually the part that matters. `bash` therefore does *not*
+/// rely on the agent-level safety cap in `core::agent::turn` and bounds
+/// itself.
 const MAX_OUTPUT: usize = 32_000;
 const HEAD_BYTES: usize = 8_000; // keep first 8K
 const TAIL_BYTES: usize = 20_000; // keep last 20K — errors/results are at the end

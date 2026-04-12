@@ -120,7 +120,7 @@ impl Tool for GhFileTool {
                 for (i, line) in content.lines().enumerate() {
                     result.push_str(&format!("{}: {line}\n", i + 1));
                     if result.len() > MAX_OUTPUT_BYTES {
-                        result.push_str("\n[truncated]");
+                        result.push_str(crate::core::tool::TRUNCATION_MARKER);
                         break;
                     }
                 }
