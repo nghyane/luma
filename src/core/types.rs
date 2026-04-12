@@ -129,13 +129,12 @@ impl Message {
     /// conversation turns. This is the single source of truth for both
     /// stream replay and history rendering.
     pub fn has_visible_content(&self) -> bool {
-        self.content.iter().any(|b| {
-            matches!(
-                b,
-                ContentBlock::Text { text } if !text.is_empty()
-            ) || matches!(b, ContentBlock::Paste { text } if !text.is_empty())
-                || matches!(b, ContentBlock::Image { .. })
-                || matches!(b, ContentBlock::ToolUse { .. })
+        self.content.iter().any(|b| match b {
+            ContentBlock::Text { text } | ContentBlock::Paste { text } => !text.is_empty(),
+            ContentBlock::Image { .. } | ContentBlock::ToolUse { .. } => true,
+            ContentBlock::ToolResult { .. }
+            | ContentBlock::Thinking { .. }
+            | ContentBlock::RedactedThinking { .. } => false,
         })
     }
 

@@ -73,10 +73,9 @@ impl Document {
         }
         self.commit_last();
         self.auto_gap(&Block::Text(TextBlock::new()));
-        let mut tb = TextBlock::new();
-        tb.feed(trimmed);
-        tb.flush();
-        self.blocks.push(Block::Text(tb));
+        self.blocks.push(Block::Text(TextBlock {
+            stream: StreamBuf::finished(trimmed),
+        }));
     }
 
     pub fn tool_history(&mut self, name: &str, summary: &str) {
@@ -153,10 +152,7 @@ impl Document {
     fn replay_thinking(&mut self, text: &str) {
         self.commit_last();
         self.auto_gap(&Block::Thinking(StreamBuf::new()));
-        let mut buf = StreamBuf::new();
-        buf.feed(text);
-        buf.flush();
-        self.blocks.push(Block::Thinking(buf));
+        self.blocks.push(Block::Thinking(StreamBuf::finished(text)));
     }
 
     pub fn error(&mut self, text: &str) {

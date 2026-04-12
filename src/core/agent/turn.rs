@@ -426,12 +426,11 @@ async fn execute_one(
 
             match res {
                 Ok(exec) => {
-                    let captured = exec.artifact.clone();
-                    if let Some(artifact) = exec.artifact {
+                    if let Some(ref artifact) = exec.artifact {
                         let _ = tx
                             .send(Event::ToolArtifact {
                                 name: tu.name.clone(),
-                                artifact: Box::new(artifact),
+                                artifact: Box::new(artifact.clone()),
                             })
                             .await;
                     }
@@ -445,7 +444,7 @@ async fn execute_one(
                     if let Some(name) = &skill {
                         let _ = tx.send(Event::SkillEnd(format!("loaded {name}"))).await;
                     }
-                    (exec.result, captured)
+                    (exec.result, exec.artifact)
                 }
                 Err(e) => {
                     let msg = format!("Error: {e}");

@@ -14,6 +14,14 @@ impl StreamBuf {
         }
     }
 
+    /// Create a buffer pre-loaded with finished content (no partial).
+    pub fn finished(text: &str) -> Self {
+        let mut buf = Self::new();
+        buf.feed(text);
+        buf.flush();
+        buf
+    }
+
     /// Feed a token chunk. Newlines split into committed lines.
     pub fn feed(&mut self, token: &str) {
         for (i, part) in token.split('\n').enumerate() {
