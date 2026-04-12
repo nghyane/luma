@@ -31,6 +31,7 @@ impl Tool for GrepTool {
                 "- Filter by file type with include param: \"*.rs\", \"*.{ts,tsx}\"\n",
                 "- Results sorted by modification time (newest first).\n",
                 "- Respects .gitignore rules. Skips binary files.\n",
+                "- Call in parallel for multiple independent patterns or paths.\n",
                 "- Not for finding files by name — use `Glob` instead.",
             ).to_owned(),
             parameters: serde_json::json!({

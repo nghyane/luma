@@ -26,7 +26,8 @@ impl Tool for GhSearchTool {
                 "Search code in a GitHub repository using the gh CLI.\n",
                 "- Requires `gh` to be installed and authenticated.\n",
                 "- Returns matching file paths and URLs.\n",
-                "- Use to find specific code, functions, or patterns in a remote repo.",
+                "- Use to find specific code, functions, or patterns in a remote repo.\n",
+                "- Call in parallel for multiple independent queries.",
             )
             .into(),
             parameters: serde_json::json!({

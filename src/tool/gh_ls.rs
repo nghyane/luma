@@ -26,7 +26,8 @@ impl Tool for GhLsTool {
                 "List files in a GitHub repository using the gh CLI.\n",
                 "- Requires `gh` to be installed and authenticated.\n",
                 "- Returns file tree with type (dir/file), path, and URL.\n",
-                "- Use path prefix to filter results to a subdirectory.",
+                "- Use path prefix to filter results to a subdirectory.\n",
+                "- Call in parallel for multiple repos or path prefixes.",
             )
             .into(),
             parameters: serde_json::json!({

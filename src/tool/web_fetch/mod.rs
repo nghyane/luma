@@ -32,6 +32,7 @@ impl Tool for WebFetchTool {
                 "- Strips nav, footer, sidebar, scripts, styles.\n",
                 "- When objective is given, returns only the most relevant excerpts.\n",
                 "- Output clipped to 256KB.\n",
+                "- Call in parallel for multiple unrelated URLs.\n",
                 "- Use for reading documentation, blog posts, API references.",
             )
             .into(),

@@ -27,7 +27,8 @@ impl Tool for GhFileTool {
                 "- Requires `gh` to be installed and authenticated.\n",
                 "- Repo format: owner/name or full GitHub URL.\n",
                 "- When objective is given, returns only relevant code blocks.\n",
-                "- Output clipped to 256KB.",
+                "- Output clipped to 256KB.\n",
+                "- Call in parallel for multiple files you need to fetch.",
             )
             .into(),
             parameters: serde_json::json!({
