@@ -321,7 +321,7 @@ fn build_env_context() -> String {
     let date = format!("{year}-{month:02}-{day:02}");
 
     format!(
-        "\n<env>\n  OS: {} {}\n  Shell: {shell}\n  CWD: {}\n  Git: {git_info}\n  Date: {date}\n  CLI: {}\n</env>",
+        "\n<env>\n  OS: {} {}\n  Shell: {shell}\n  CWD: {}\n  Git: {git_info}\n  Date: {date}\n  CLI: {}\n</env>\nShell commands execute in CWD by default — do not prefix `cd <cwd> && …`; paths inside CWD can be relative.",
         std::env::consts::OS,
         std::env::consts::ARCH,
         cwd.display(),

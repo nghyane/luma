@@ -28,7 +28,8 @@ impl Tool for GrepTool {
             description: concat!(
                 "Search file contents using regex. Returns file paths with line numbers and matching lines.\n",
                 "- Regex syntax: \"log.*Error\", \"fn\\s+\\w+\", \"TODO|FIXME\"\n",
-                "- Filter by file type with include param: \"*.rs\", \"*.{ts,tsx}\"\n",
+                "- Filter by file type with include param: \"*.rs\", \"*.{ts,tsx}\", \"src/**/*.ts\"\n",
+                "- ALWAYS set `include` when the target language is known — 5-10× faster in large repos than scanning every file.\n",
                 "- Results sorted by modification time (newest first).\n",
                 "- Respects .gitignore rules. Skips binary files.\n",
                 "- Call in parallel for multiple independent patterns or paths.\n",

@@ -60,7 +60,7 @@ impl Tool for BashTool {
                 "  find files: `glob` (not find/fd)\n",
                 "  search contents: `grep` (not grep/rg)\n",
                 "Rules:\n",
-                "- Use absolute paths. Quote paths with spaces.\n",
+                "- Quote paths with spaces.\n",
                 "- Do NOT use interactive commands (editors, REPLs, password prompts).\n",
                 "- Independent commands: use separate parallel tool calls.\n",
                 "- Dependent commands: chain with && in a single call.\n",
@@ -103,7 +103,12 @@ impl Tool for BashTool {
                 bail!("blocked dangerous command — {command}");
             }
 
-            let mut child = shell::spawn(command)?;
+            // Child inherits Luma's cwd — callers no longer need to
+            // prefix `cd /abs/path && …` when the project root is
+            // already the working directory. Audit of real sessions
+            // showed 61% of Bash calls starting with that exact
+            // prefix; inherited cwd makes it a no-op.
+            let mut child = shell::spawn(command, None)?;
 
             let mut stdout = child.stdout.take().expect("stdout piped");
             let mut stderr = child.stderr.take().expect("stderr piped");
