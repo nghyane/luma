@@ -218,19 +218,12 @@ impl super::App {
             self.config.thinking = thinking_caps.coerce(self.config.thinking);
             crate::config::prefs::save_thinking(self.config.thinking);
             crate::config::prefs::save_mode_model(self.config.mode, model_id);
+            // Rebuild prompt + registry for the new provider's tool style so
+            // a cross-provider switch (e.g. Claude → Codex) swaps Native ↔
+            // Patch tools instead of leaving the previous registry in place.
+            self.hot_swap_context();
             if let Some(tx) = &self.agent.tx {
-                if tx
-                    .try_send(AgentCommand::SetModel {
-                        model_id: m.id.clone(),
-                        source: m.source.clone(),
-                    })
-                    .is_err()
-                {
-                    self.doc
-                        .warn("agent is busy; model switch will apply next turn");
-                } else {
-                    let _ = tx.try_send(AgentCommand::SetThinking(self.config.thinking));
-                }
+                let _ = tx.try_send(AgentCommand::SetThinking(self.config.thinking));
             }
             self.update_status();
         }
