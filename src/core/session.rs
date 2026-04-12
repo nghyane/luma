@@ -151,12 +151,28 @@ fn sessions_dir() -> PathBuf {
         .join("sessions")
 }
 
-/// Directory for storing session assets (images, etc).
+/// Root directory for assets belonging to one session.
+///
+/// Layout is segmented by asset kind so new kinds (evidence blobs) can live
+/// alongside images without collision:
+///
+/// ```text
+/// sessions/
+///   {id}.json
+///   {id}/
+///     images/{image_id}
+///     evidence/{evidence_id}.txt
+/// ```
 fn session_assets_dir(session_id: &str) -> PathBuf {
     sessions_dir().join(session_id)
 }
 
-/// Save image bytes to `sessions/{session_id}/{filename}`. Returns filename.
+/// Subdirectory holding image attachments for a session.
+fn session_images_dir(session_id: &str) -> PathBuf {
+    session_assets_dir(session_id).join("images")
+}
+
+/// Save image bytes to `sessions/{session_id}/images/{filename}`. Returns filename.
 pub fn save_image(session_id: &str, data: &[u8], ext: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let ts = SystemTime::now()
@@ -164,16 +180,20 @@ pub fn save_image(session_id: &str, data: &[u8], ext: &str) -> String {
         .unwrap_or_default()
         .as_millis();
     let filename = format!("img_{ts:x}.{ext}");
-    let dir = session_assets_dir(session_id);
+    let dir = session_images_dir(session_id);
     let _ = fs::create_dir_all(&dir);
     let _ = fs::write(dir.join(&filename), data);
     filename
 }
 
-/// Read image as base64 from deterministic path `sessions/{session_id}/{image_id}`.
+/// Read image as base64 from `sessions/{session_id}/images/{image_id}`.
+///
+/// Returns an empty string if the file is absent. Sessions created before
+/// the `images/` subdirectory layout store attachments flat in the session
+/// root and will not resolve — acceptable under the project's beta stance.
 pub fn read_image_base64(session_id: &str, image_id: &str) -> String {
     use base64::Engine;
-    let path = session_assets_dir(session_id).join(image_id);
+    let path = session_images_dir(session_id).join(image_id);
     match fs::read(&path) {
         Ok(data) => base64::engine::general_purpose::STANDARD.encode(&data),
         Err(_) => String::new(),
