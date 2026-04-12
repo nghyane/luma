@@ -180,6 +180,11 @@ fn session_images_dir(session_id: &str) -> PathBuf {
     session_assets_dir(session_id).join("images")
 }
 
+/// Subdirectory holding evidence blobs for a session.
+pub fn session_evidence_dir(session_id: &str) -> PathBuf {
+    session_assets_dir(session_id).join("evidence")
+}
+
 /// Save image bytes to `sessions/{session_id}/images/{filename}`. Returns filename.
 pub fn save_image(session_id: &str, data: &[u8], ext: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};

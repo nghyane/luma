@@ -13,16 +13,13 @@ use tokio::sync::mpsc;
 
 const MAX_ITERATIONS: usize = 50;
 
-/// Final safety cap on a single tool_result before it is written into the
-/// transcript. Tools are expected to produce outputs already bounded by
-/// their own limits (e.g. `bash` does head+tail truncation at 32K); this
-/// cap only catches tools that forgot to bound, to keep the transcript
-/// from ballooning on a runaway result.
+/// Fallback cap when evidence ingestion fails (I/O error on the blob).
 ///
-/// When the evidence store (see `docs/rfcs/evidence-backed-handoff.md`)
-/// lands, this cap is superseded by evidence ingestion and this site will
-/// instead create an `EvidenceRecord`.
-const AGENT_RESULT_SAFETY_CAP: usize = 32_000;
+/// Normal oversized results spill to the evidence store (see
+/// `core::evidence` and `maybe_promote_to_evidence`). If the blob write
+/// fails, this cap bounds the inline copy so a runaway tool can't balloon
+/// the transcript. Dead path in practice — kept for defense in depth.
+const SAFETY_FALLBACK_CAP: usize = 32_000;
 
 const STREAM_RETRIES: u8 = 2;
 const STREAM_RETRY_DELAY_SECS: u64 = 2;
@@ -339,19 +336,31 @@ async fn run_turn(
         let tool_results = execute_tools(&tool_uses, registry, tx, cancel.clone()).await;
         let aborted = cancel.is_cancelled();
 
+        // Current turn index — points at the assistant message that just
+        // pushed these tool_use blocks. Used by evidence records so the
+        // planner can reason about recency (most recent assistant turn).
+        let turn_index = session.messages.len().saturating_sub(1);
+        let evidence_dir = crate::core::session::session_evidence_dir(&session.id);
+
         // Push all tool_result blocks as a single user message — even on
-        // abort, so the model sees what happened on replay.
+        // abort, so the model sees what happened on replay. Results above
+        // `EVIDENCE_PROMOTION_THRESHOLD` spill to the evidence store and
+        // keep only a summary inline.
         let mut result_blocks: Vec<ContentBlock> = Vec::with_capacity(tool_results.len());
-        for (id, mut text) in tool_results {
-            if text.len() > AGENT_RESULT_SAFETY_CAP {
-                text.truncate(AGENT_RESULT_SAFETY_CAP);
-                text.push_str(crate::core::tool::TRUNCATION_MARKER);
-            }
+        for (id, text) in tool_results {
+            let (content, evidence_id) = maybe_promote_to_evidence(
+                session,
+                &evidence_dir,
+                turn_index,
+                &tool_uses,
+                &id,
+                text,
+            );
             result_blocks.push(ContentBlock::ToolResult {
                 tool_use_id: id,
-                content: text,
+                content,
                 is_error: false,
-                evidence_id: None,
+                evidence_id,
             });
         }
         session.messages.push(Message {
@@ -367,6 +376,49 @@ async fn run_turn(
         }
     }
     Ok(())
+}
+
+/// If `text` exceeds the evidence threshold, persist it as evidence and
+/// return `(summary, Some(id))`; otherwise return `(text, None)`.
+///
+/// A failed blob write falls back to inline truncation so the turn keeps
+/// progressing — losing disk space is worse than losing a debuggable
+/// artifact. `SAFETY_FALLBACK_CAP` bounds the inline copy so a pathological
+/// runaway tool can't blow up the transcript either way.
+fn maybe_promote_to_evidence(
+    session: &mut Session,
+    evidence_dir: &std::path::Path,
+    turn_index: usize,
+    tool_uses: &[ToolUseRef],
+    tool_use_id: &str,
+    mut text: String,
+) -> (String, Option<String>) {
+    use crate::core::evidence::{EVIDENCE_PROMOTION_THRESHOLD, classify};
+
+    if text.len() < EVIDENCE_PROMOTION_THRESHOLD {
+        return (text, None);
+    }
+    let Some(tu) = tool_uses.iter().find(|t| t.id == tool_use_id) else {
+        return (text, None);
+    };
+    let Some(draft) = classify(&tu.name, &tu.input, &text) else {
+        return (text, None);
+    };
+    let summary = draft.summary.clone();
+    match session
+        .evidence
+        .ingest(evidence_dir, turn_index, tool_use_id, draft)
+    {
+        Ok(id) => (summary, Some(id)),
+        Err(e) => {
+            crate::dbg_log!("evidence ingest failed for {tool_use_id}: {e}");
+            if text.len() > SAFETY_FALLBACK_CAP {
+                text.truncate(SAFETY_FALLBACK_CAP);
+                text.push_str(crate::core::tool::TRUNCATION_MARKER);
+            }
+            (text, None)
+        }
+    }
 }
 
 /// Check if a read tool call targets a SKILL.md file.
@@ -596,5 +648,56 @@ mod tests {
     fn abort_is_not_retryable() {
         let err = anyhow::anyhow!("Aborted");
         assert!(!is_stream_retryable(&err));
+    }
+
+    #[test]
+    fn short_result_stays_inline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut session = Session::new();
+        let tool_uses = vec![ToolUseRef {
+            id: "tc_1".into(),
+            name: "Read".into(),
+            input: serde_json::json!({"path": "/tmp/x.rs"}),
+        }];
+        let (content, evidence_id) = maybe_promote_to_evidence(
+            &mut session,
+            tmp.path(),
+            0,
+            &tool_uses,
+            "tc_1",
+            "short".into(),
+        );
+        assert_eq!(content, "short");
+        assert!(evidence_id.is_none());
+        assert!(session.evidence.records.is_empty());
+    }
+
+    #[test]
+    fn oversized_result_promotes_to_evidence() {
+        use crate::core::evidence::EVIDENCE_PROMOTION_THRESHOLD;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut session = Session::new();
+        let tool_uses = vec![ToolUseRef {
+            id: "tc_1".into(),
+            name: "Read".into(),
+            input: serde_json::json!({"path": "/tmp/big.rs"}),
+        }];
+        let big = "x".repeat(EVIDENCE_PROMOTION_THRESHOLD + 1);
+        let (content, evidence_id) =
+            maybe_promote_to_evidence(&mut session, tmp.path(), 2, &tool_uses, "tc_1", big.clone());
+        let id = evidence_id.expect("promoted");
+        assert!(
+            content.len() < big.len(),
+            "summary must be shorter than blob"
+        );
+        assert!(content.contains("/tmp/big.rs"));
+        assert_eq!(session.evidence.records.len(), 1);
+        let rec = &session.evidence.records[0];
+        assert_eq!(rec.id, id);
+        assert_eq!(rec.turn_index, 2);
+        assert_eq!(rec.tool_use_id, "tc_1");
+        let blob = std::fs::read_to_string(tmp.path().join(format!("{id}.txt"))).unwrap();
+        assert_eq!(blob, big);
     }
 }
