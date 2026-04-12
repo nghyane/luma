@@ -265,7 +265,14 @@ async fn run_turn(
         }
 
         // First attempt: provider default max_tokens.
-        let prepared = crate::core::context_plan::build_prepared_messages(&session.messages);
+        let assets_dir = crate::core::session::session_assets_dir(&session.id);
+        let prepared = crate::core::context_plan::build_prepared_messages(
+            crate::core::context_plan::PlanInput {
+                transcript: &session.messages,
+                evidence: &session.evidence,
+                assets_dir: Some(&assets_dir),
+            },
+        );
         let mut result = stream_with_retry(&ctx, &prepared, None).await?;
 
         // Escalate once if the first call hit max_tokens before finishing,
