@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-beta.11] - 2026-04-12
+
+### Fixed
+- Prompt input no longer inserts literal characters for Ctrl/Alt-modified keys on Windows consoles (fixes Delete rendering as `h` via legacy Ctrl+H); added proper handling for Delete (forward-delete), Home, End, Ctrl+H (backspace), and Ctrl+W (delete word)
+- Mouse any-motion tracking (`?1003`) disabled and bare `Moved` events short-circuited, eliminating an event-bus flood that could stall keyboard/scroll input mid-stream on Windows
+- Terminal restore sequence now resets SGR and clears the main screen after leaving the alternate screen, so the shell is clean on exit
+- Stdin reader filters `Char('\0')` key events emitted by Windows for bare modifier presses
+- Windows startup now forces console code page to UTF-8 (`chcp 65001`) so legacy `cmd.exe` renders box-drawing and decorative glyphs correctly
+- Removed double gap between thinking and tool blocks caused by `render_thinking` appending a trailing empty line on top of `auto_gap`
+- Removed the dark half-cell gap at the bottom of the prompt separator by switching to a lower half-block with swapped fg/bg
+
+### Changed
+- Mode and model switches are now deferred until the next submit, matching the "staged change" UX of other picker dialogs
+- Tool registry is rebuilt when the model changes across providers so tool IDs stay consistent
+- System prompt and tool registry hot-swap on mode change without requiring a restart
+- Prompt and tool axes split into `mode` (behavior) and tool style (provider) so the two can vary independently
+
 ## [0.4.0-beta.10] - 2026-04-12
 
 ### Changed
