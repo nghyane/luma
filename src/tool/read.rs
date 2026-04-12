@@ -209,6 +209,18 @@ impl Tool for ReadTool {
                 result.push_str(&format!("\n({total_lines} lines total)\n"));
             }
 
+            // Tiny-window pushback: the agent pays a full round trip per
+            // Read, so a 30-line slice out of a 1000-line file is almost
+            // always a loss versus one 300-500 line read. Audit of 9
+            // real sessions counted 57 tiny reads, 30 on a single file
+            // — nudge the model to widen the window next time.
+            const TINY_LIMIT_THRESHOLD: usize = 30;
+            if args.get("limit").is_some() && limit < TINY_LIMIT_THRESHOLD && total_lines > limit {
+                result.push_str(&format!(
+                    "\n[hint: read {limit} lines; consider a wider window (100-500) next time — one call beats multiple round trips.]\n"
+                ));
+            }
+
             Ok(ToolExecution {
                 result,
                 artifact: None,
@@ -339,6 +351,54 @@ mod tests {
 
         assert!(result.result.contains("1: line1"));
         assert!(result.result.contains("3: line3"));
+    }
+
+    #[tokio::test]
+    async fn tiny_limit_appends_hint() {
+        // Audit found 57 Read calls with limit < 30 across 9 sessions;
+        // surface a hint to widen the window so the agent stops paying
+        // a full round trip per 20-line slice.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("big.txt");
+        let body: String = (1..=500).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&file, body).unwrap();
+
+        let tool = ReadTool;
+        let (tx, _rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let result = tool
+            .execute(
+                serde_json::json!({"path": file.to_str().unwrap(), "limit": 10}),
+                tx,
+                cancel,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.result.contains("hint: read 10 lines"));
+        assert!(result.result.contains("wider window"));
+    }
+
+    #[tokio::test]
+    async fn normal_limit_no_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("big.txt");
+        let body: String = (1..=500).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&file, body).unwrap();
+
+        let tool = ReadTool;
+        let (tx, _rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let result = tool
+            .execute(
+                serde_json::json!({"path": file.to_str().unwrap(), "limit": 200}),
+                tx,
+                cancel,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.result.contains("hint:"));
     }
 
     #[tokio::test]
