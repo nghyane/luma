@@ -55,7 +55,6 @@ pub fn render_thinking(stream: &StreamBuf, state: &mut RenderState, width: usize
         result.extend(render_thinking_line(stream.partial(), is_first, width));
     }
 
-    result.push(Line::empty());
     result
 }
 
