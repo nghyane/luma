@@ -405,6 +405,28 @@ fn maybe_promote_to_evidence(
     let Some(tu) = tool_uses.iter().find(|t| t.id == tool_use_id) else {
         return (text, None);
     };
+    // A Read call pulling an `artifact://…` URI is the agent re-reading
+    // a resource that already lives outside the transcript (either a
+    // stored evidence blob or a discovered skill). Promoting the
+    // returned content again would:
+    //
+    //   * duplicate the blob on disk (for `artifact://ev/`), and
+    //   * hide the content the agent explicitly asked for by replacing
+    //     it with yet another summary — the agent then loops,
+    //     pull-reading into opaque summaries.
+    //
+    // Keep the content inline for this call. Cache cost is bounded
+    // (one turn per explicit pull), and the bytes the agent asked for
+    // are the bytes it receives.
+    if tu.name.eq_ignore_ascii_case("read")
+        && tu
+            .input
+            .get("path")
+            .and_then(|v| v.as_str())
+            .is_some_and(|p| p.starts_with("artifact://"))
+    {
+        return (text, None);
+    }
     let Some(draft) = classify(&tu.name, &tu.input, &text) else {
         return (text, None);
     };
@@ -707,5 +729,62 @@ mod tests {
         assert_eq!(rec.tool_use_id, "tc_1");
         let blob = std::fs::read_to_string(tmp.path().join(format!("{id}.txt"))).unwrap();
         assert_eq!(blob, big);
+    }
+
+    #[test]
+    fn artifact_uri_read_stays_inline_even_when_oversized() {
+        // An agent re-reading artifact://ev/{id} gets the stored
+        // evidence back verbatim. Promoting that content again would
+        // just duplicate the blob and loop the agent through a second
+        // summary — the very thing the explicit pull was trying to
+        // avoid. Guard against the regression.
+        use crate::core::evidence::EVIDENCE_PROMOTION_THRESHOLD;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut session = Session::new();
+        let tool_uses = vec![ToolUseRef {
+            id: "tc_pull".into(),
+            name: "Read".into(),
+            input: serde_json::json!({"path": "artifact://ev/ev_abc"}),
+        }];
+        let big = "y".repeat(EVIDENCE_PROMOTION_THRESHOLD + 1);
+        let (content, evidence_id) = maybe_promote_to_evidence(
+            &mut session,
+            tmp.path(),
+            3,
+            &tool_uses,
+            "tc_pull",
+            big.clone(),
+        );
+        assert!(evidence_id.is_none(), "pull must not re-promote");
+        assert_eq!(content, big, "content must be returned verbatim");
+        assert!(
+            session.evidence.records.is_empty(),
+            "no new evidence record from a pull"
+        );
+    }
+
+    #[test]
+    fn artifact_skill_read_stays_inline_even_when_oversized() {
+        use crate::core::evidence::EVIDENCE_PROMOTION_THRESHOLD;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut session = Session::new();
+        let tool_uses = vec![ToolUseRef {
+            id: "tc_skill".into(),
+            name: "Read".into(),
+            input: serde_json::json!({"path": "artifact://skill/test-skill"}),
+        }];
+        let big = "z".repeat(EVIDENCE_PROMOTION_THRESHOLD + 1);
+        let (content, evidence_id) = maybe_promote_to_evidence(
+            &mut session,
+            tmp.path(),
+            1,
+            &tool_uses,
+            "tc_skill",
+            big.clone(),
+        );
+        assert!(evidence_id.is_none(), "skill pull must not promote");
+        assert_eq!(content, big);
     }
 }
