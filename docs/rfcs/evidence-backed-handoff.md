@@ -14,15 +14,18 @@ RFC này được ship theo milestone, không theo 6 phase tuần tự (§10):
   rename → append record). Image path scoped sang `images/`. Provider
   adapters không đổi (destructure thủ công, `evidence_id` không lên wire).
 - **M2 planner phase A — Evidence dedup injection (shipped).** Commits
-  `6508100`, `3aae889`, `d3b62ea`, `1f86532`. `core/context_plan.rs` chèn
-  giữa `session.messages` và `provider.stream()`. Một rule duy nhất:
-  dedup latest-per-file trong recent turn window, greedy-fit dưới budget
-  32K chars, inject in-place vào user turn cuối (không tạo User message
-  mới — phá alternation). Anchor bao phủ cả tool_result tail để fire
-  đúng lúc duplicate loop xảy ra (§9.1). Path normalize trước khi dedup
-  để `src/x.rs` / `./src/x.rs` / `{cwd}/src/x.rs` cùng key (§6.6).
-  Trigger từ ses_19d802b2734 (§2.2); post-ship fix từ ses_19d8049f736
-  (§2.3).
+  `6508100`, `3aae889`, `d3b62ea`, `1f86532`, `c61e8e8`, `a49bad9`.
+  `core/context_plan.rs` chèn giữa `session.messages` và
+  `provider.stream()`. Một rule duy nhất: dedup latest-per-file trong
+  recent turn window, greedy-fit dưới budget 32K chars, smoosh
+  evidence (đã wrap `<system-reminder>`) vào `tool_result.content`
+  cuối khi anchor là tool_result user message; prepend Text block
+  khi anchor là plain user text. Anchor bao phủ cả tool_result tail
+  để fire đúng lúc duplicate loop xảy ra (§9.1). Path normalize
+  trước khi dedup để `src/x.rs` / `./src/x.rs` / `{cwd}/src/x.rs`
+  cùng key (§6.6). Trigger từ ses_19d802b2734 (§2.2); post-ship
+  fix từ ses_19d8049f736 (§2.3) và ses dùng phase A đầu tiên
+  (§2.4, prompt-injection defense + wire format).
 - **M2 handoff + provider switch (deferred).** `core/handoff.rs` và
   `ProviderCacheHint` không implement cho tới khi có signal thực từ
   §16. Planner hiện dùng turn_index recency thay cho `files_in_play`
@@ -50,6 +53,16 @@ invariant cần encode:
   RFC gốc §9 dùng `related_files ∩ handoff.files_in_play`. Phase A dùng
   `latest-per-file trong recent turn window` — vẫn deterministic, không
   cần handoff để khởi động, và đã chữa duplicate-read signal đo được.
+- **Injection shape mirror Claude Code.** Evidence wrap trong
+  `<system-reminder>...</system-reminder>` và smoosh vào
+  `tool_result.content` (không làm sibling `ContentBlock::Text`).
+  Đây không phải lựa chọn của dự án — là invariant từ Claude API
+  training. Sibling Text sau tool_result (a) bị model hiểu là user
+  input và trigger prompt-injection defense, (b) render trên wire
+  thành `</function_results>\n\nHuman:<…>` → teach model emit
+  `Human:` drift (Claude Code A/B 92% → 0%, §2.4). Pattern này có
+  sẵn ở `src/utils/messages.ts` của Claude Code leak; RFC phase A
+  đầu không biết và đã retrofit.
 
 ## 1. Tóm tắt
 
@@ -156,6 +169,52 @@ Ba fix shipped ngay sau session (§0):
 - `1f86532` `fix(evidence): normalize related_files for dedup across
   path spellings` — `normalize_path` (strip `./`, rewrite cwd-prefix
   sang relative) ở classify time, không đụng disk.
+
+### 2.4. Bằng chứng từ session đầu dùng Phase A (inject fired lần đầu)
+
+Hai bug mới quan sát được khi phase A thật sự chạy và agent thấy
+injection output:
+
+- **400 Bad Request: tool_use without tool_result immediately after.**
+  Phase A bản `d3b62ea` prepend evidence làm `ContentBlock::Text`
+  block đứng **trước** `tool_result` trong user tail. Anthropic API
+  yêu cầu user message sau assistant tool_use bắt đầu bằng
+  tool_result → reject toàn turn. Fix ban đầu ở `c61e8e8`: dịch
+  evidence xuống sau tool_result cluster (vẫn sibling Text). Wire
+  hợp lệ nhưng vẫn không đúng shape Claude expect (xem điểm 2).
+- **Agent treat evidence như prompt-injection attack.** Khi fix 400
+  xong, session tiếp theo cho thấy agent đọc file với `limit=302`
+  (defensive chunking) thay vì trust content đã có sẵn trong
+  context. Model thấy Text block lạ sau tool_result, behavior là
+  "user chèn gì đó đáng ngờ, phòng thủ". Agent vẫn `Read` lại file
+  bình thường → inject không có tác dụng giảm duplicate.
+
+**Research từ Claude Code leak giải quyết cả hai:**
+
+`src/utils/messages.ts` ở `yasasbanukaofficial/claude-code` có 2
+primitive được dùng mọi chỗ inject metadata vào user message:
+
+- `wrapInSystemReminder(text)` → `<system-reminder>\n{text}\n</system-reminder>`.
+  Trained signal: model hiểu content là system-authored metadata,
+  không phải user input. Prompt-injection reflex tắt.
+- `smooshIntoToolResult(tr, blocks)` → concat text chunks vào
+  `tool_result.content` cuối, **không** tạo sibling Text. Comment
+  trong source: sibling sau tool_result render trên wire thành
+  `</function_results>\n\nHuman:<…>` → repeated mid-conversation
+  teach model emit `Human:` drift. A/B test (`sai-20260310-161901`)
+  của Claude Code: 92% → 0% khi chuyển sang smoosh.
+
+Fix shipped ở `a49bad9`:
+
+- `wrap_system_reminder` + smoosh vào `tool_result.content` khi
+  anchor có tool_result.
+- Plain user-text anchor (không có tool_result, không có assistant
+  tool_use liền trước) vẫn prepend Text block — không cần smoosh.
+- `collect_injected_ids` scan cả `tool_result.content` để idempotent.
+
+**Lesson quan trọng:** injection shape không phải design choice —
+là invariant cứng từ Claude training. Phase B và các layer sau phải
+reuse hai primitive này, không được "prototype" shape khác.
 
 Dự án này cần:
 
@@ -624,11 +683,12 @@ anchor vào đó thì phase A không fire. Chỉ anchor message **cuối
 cùng**, không scan ngược — user turn cũ giữ nguyên để cache prefix
 ổn định.
 
-**Idempotency qua header scan.** `collect_injected_ids` scan các Text
-block tìm prefix `# Retrieved evidence: {id}`; record đã có trong
-transcript bị filter khỏi selection set. Mỗi iter của cùng tool loop
-vẫn chạy planner nhưng không re-inject — tail message tăng monotonic
-theo số evidence unique, không phình theo iter count.
+**Idempotency qua marker scan.** `collect_injected_ids` scan cả Text
+block và `tool_result.content` string tìm marker
+`# Retrieved evidence: {id}`; record đã có trong transcript bị
+filter khỏi selection set. Mỗi iter của cùng tool loop vẫn chạy
+planner nhưng không re-inject — tail message tăng monotonic theo số
+evidence unique, không phình theo iter count.
 
 **Path normalization cho dedup.** `related_files` đã normalize ở
 classify time (§6.6). Dedup key dùng path sau normalize → 3 spelling
@@ -652,11 +712,36 @@ cùng file dedup đúng về 1 record.
 7. sort ASC by turn_index để inject chronological
 ```
 
-**Injection.** Prepend các evidence block (mỗi block = `ContentBlock::Text`
-có header `# Retrieved evidence: {id} ({summary})\n\n{body}`) vào
-`user_turn.content`. Original content (user text hoặc tool_result
-blocks) giữ nguyên sau evidence. Claude yêu cầu user/assistant
-alternation nghiêm — tạo User message mới sẽ phá wire format.
+**Injection shape (invariant cứng, không tự chọn).**
+
+Mỗi evidence được render thành chunk:
+
+```text
+<system-reminder>
+# Retrieved evidence: {id} ({summary})
+
+{body}
+</system-reminder>
+```
+
+Sau đó chèn tuỳ shape của anchor:
+
+- **Anchor có tool_result (mid tool-loop).** Smoosh từng chunk vào
+  `tool_result.content` **cuối cùng** — concat với `\n\n` separator,
+  không tạo block mới. Mirror `smooshIntoToolResult` của Claude
+  Code. Block shape của message không đổi.
+- **Anchor plain user text (không tool_result).** Prepend mỗi chunk
+  làm `ContentBlock::Text` trước user text gốc. Không có assistant
+  tool_use liền trước → không có ràng buộc "tool_result must come
+  first" và không có `Human:` drift risk.
+
+**Lý do bắt buộc shape này** (§2.4):
+- `<system-reminder>` tag là trained signal — nếu bỏ, model treat
+  content như user input → prompt-injection defense triggered →
+  agent dùng `limit=302` thay vì trust content.
+- Sibling Text sau tool_result render trên wire thành
+  `</function_results>\n\nHuman:<…>` → teach model emit `Human:`
+  (A/B của Claude Code 92% → 0%).
 
 **Fallback.** Blob missing on disk → skip record, log qua `dbg_log!`.
 Không fail turn.
@@ -732,18 +817,40 @@ Hai commit fix sau ses_19d8049f736 (§2.3) cho thấy 2 bug design:
    rewrite cwd-prefix absolute → relative. Ba spelling cùng file dedup
    đúng về 1 key. 4 tests thêm trong `core::evidence`.
 
+Hai commit fix sau session đầu thật sự fire phase A (§2.4):
+
+5. **`fix(context_plan): insert evidence after tool_results, not before`**
+   (`c61e8e8`) — Anthropic API reject 400 vì user message sau assistant
+   tool_use phải bắt đầu bằng tool_result. Fix ban đầu: dịch evidence
+   Text block xuống sau tool_result cluster (vẫn sibling, chưa đúng
+   shape Claude expect).
+6. **`fix(context_plan): smoosh evidence into tool_result and wrap in system-reminder`**
+   (`a49bad9`) — retrofit 2 primitive của Claude Code:
+   `wrap_system_reminder` quanh chunk và smoosh vào
+   `tool_result.content` cuối. Giải quyết cả prompt-injection
+   defense trigger (agent dùng `limit=302` defensive) và `Human:`
+   drift (A/B 92% → 0% trong Claude Code A/B). Tests pivot:
+   `evidence_wrapped_in_system_reminder` pin wrapper shape;
+   `injects_into_last_tool_result_with_mixed_tail` pin last-of-many
+   rule; idempotency test scan `tool_result.content` thay vì Text
+   block.
+
 Deviation so với §9 gốc:
 
 - Dedup dựa `related_files` thuần (đã normalize), không cần
   `handoff.files_in_play`. Handoff chưa ship; phase A đủ chữa
   signal #4 một mình.
-- Inject **in-place** vào user turn cuối (prepend content blocks) thay
-  vì tạo Message mới. Wire-safe với Claude alternation requirement.
+- Inject **in-place** vào user turn cuối, không tạo Message mới.
+  Wire-safe với Claude alternation requirement.
 - Anchor accept tool_result-only user message. Cache prefix vẫn ổn
   vì planner chỉ chạm message cuối; user turn cũ giữ nguyên.
 - Chỉ anchor **message cuối cùng**, không scan ngược — rewrite user
   turn mid-transcript sẽ phá cache và mis-align evidence với
   tool_use đã xử lý.
+- **Injection shape mirror Claude Code** (§2.4): wrap
+  `<system-reminder>` + smoosh vào `tool_result.content`. Không
+  tạo sibling Text block sau tool_result — không phải lựa chọn,
+  là invariant cứng từ Claude training.
 
 ### M2 phase B — Handoff + provider switch (deferred)
 
@@ -819,12 +926,17 @@ hoặc từ kinh nghiệm M1):
   evidence với tool_use đã xử lý (§9.1). *Lưu ý:* bản phase A đầu
   chỉ anchor user-text; fix ở `d3b62ea` sau khi quan sát 0 fire
   trong ses_19d8049f736.
-- **Planner idempotency:** scan Text block trong transcript tìm header
-  `# Retrieved evidence: {id}`; record đã có thì không re-inject.
-  Giữ tail message stable qua mỗi iter của cùng tool loop (§9.1).
-- **Planner injection shape:** in-place prepend `ContentBlock::Text`,
-  không tạo Message mới. Claude API reject hai user message liên tiếp.
-  OpenAI/Codex reconstruct từ cùng `ContentBlock` sequence nên uniform.
+- **Planner idempotency:** scan cả Text block và `tool_result.content`
+  trong transcript tìm marker `# Retrieved evidence: {id}`; record đã
+  có thì không re-inject. Giữ tail message stable qua mỗi iter của
+  cùng tool loop (§9.1).
+- **Planner injection shape:** mirror Claude Code primitives
+  (`src/utils/messages.ts`) — wrap `<system-reminder>...</system-reminder>`
+  và smoosh vào `tool_result.content` cuối khi anchor có tool_result;
+  prepend `ContentBlock::Text` khi anchor plain user text. Không bao
+  giờ tạo sibling Text sau tool_result. Lý do: (a) tag là trained
+  signal, bỏ thì prompt-injection defense trigger; (b) sibling sau
+  tool_result teach `Human:` drift (§2.4).
 - **Planner recency window:** `RECENT_TURN_WINDOW = 15`. Từ duplicate-read
   cluster (~10-20 turn) trong ses_19d802b2734. Tune khi có session workload
   khác.
@@ -837,9 +949,9 @@ hoặc từ kinh nghiệm M1):
 
 - **Planner heuristic drift.** Một khi chạy được, rất dễ thêm rule mà không
   test. Ép nguyên tắc "mỗi rule mới = 1 test regression". Phase A đã ship
-  với 14 context_plan test + 4 evidence normalize test cover passthrough,
-  dedup, budget, anchor, idempotency, path spelling — rule mới của Phase B
-  phải giữ gate này.
+  với 16 context_plan test + 4 evidence normalize test cover passthrough,
+  dedup, budget, anchor, idempotency, path spelling, wrapper shape,
+  smoosh target — rule mới của Phase B phải giữ gate này.
 - **I/O overhead.** Mid-turn save hiện đã ghi session.json mỗi batch. M1
   thêm blob fsync + rename mỗi tool_result ≥ 8K. Phase A thêm đọc blob
   mỗi turn khi có evidence match. Chưa đo ở production; nếu metrics
@@ -857,6 +969,12 @@ hoặc từ kinh nghiệm M1):
   thể commit nhầm. Phase B có thể invalidate khi Edit cùng file;
   hiện tại agent vẫn có thể `Read` lại để force refresh và tạo
   record mới.
+- **Wire shape drift qua providers khác.** Phase A smoosh vào
+  `tool_result.content` chạy qua Claude provider adapter OK vì nội
+  dung được pass-through. OpenAI/Codex adapter chưa test với smooshed
+  content; nếu gặp provider reject hoặc parse lỗi, phải split theo
+  provider (rule Claude ≠ rule khác) thay vì unify. Low-risk cho tới
+  khi tương tác thực với OpenAI/Codex có evidence inject.
 
 ## 15. Khuyến nghị
 
@@ -889,10 +1007,27 @@ Không nên:
 - **Path spelling không normalize.** 3 spelling cùng file → 3 key
   dedup → double-inject. → `1f86532` normalize_path.
 
-Bài học: gate M2 phase A ship được trên scan data (§2.1) + cross-turn
-hypothesis, nhưng intra-turn pattern chỉ lộ ra khi observe session
-thực (§2.3). RFC không dự đoán được; rollout qua commit nhỏ + observe
-là đúng approach.
+**Bug design khi phase A thật sự fire (§2.4) → fix:**
+- **Wire format reject 400.** User message sau assistant tool_use phải
+  bắt đầu bằng tool_result, không được bắt đầu bằng Text. → `c61e8e8`
+  dịch Text xuống sau tool_result cluster (vẫn sibling).
+- **Prompt-injection defense + `Human:` drift.** Sibling Text sau
+  tool_result bị model treat là user input (defensive
+  `limit=302` reads) và render trên wire thành `Human:` → teach
+  model emit `Human:` drift. → `a49bad9` mirror Claude Code:
+  wrap `<system-reminder>` + smoosh vào `tool_result.content`. Pattern
+  là invariant cứng từ training, không phải design choice.
+
+Bài học:
+- Gate M2 phase A ship được trên scan data (§2.1) + cross-turn
+  hypothesis, nhưng intra-turn pattern chỉ lộ ra khi observe session
+  thực (§2.3).
+- Wire-format contract và prompt-injection defense là 2 invariant ẩn
+  Claude không document nhưng Claude Code source đã giải quyết —
+  research source leak trước khi prototype injection shape mới
+  (§2.4).
+- RFC không dự đoán được những thứ trên; rollout qua commit nhỏ +
+  observe + reference upstream là đúng approach.
 
 ### 16.2. Phase B (handoff + provider switch) — pending
 

@@ -250,30 +250,45 @@ fn collect_ids_from_haystack(haystack: &str, ids: &mut HashSet<String>) {
 
 /// Select evidence records to inject, in chronological order.
 ///
-/// Dedups by file (latest record per file wins), filters by the recent
-/// turn window, skips records already injected (idempotent across
-/// tool-loop iterations), ranks most-recent-first for budget decisions,
-/// then returns in chronological order so injection reads top-down.
+/// Two lanes driven by whether a record carries `related_files`:
+///
+/// * **File-based lane** (Read/Edit/Write/Grep). Dedup latest-per-file
+///   so the same file is not injected twice, then fall into the
+///   shared budget.
+/// * **No-file lane** (Bash/GhFile/WebFetch). No dedup key — each
+///   invocation is its own artifact (two `git diff` calls produce
+///   two unrelated diffs). Kept by recency only.
+///
+/// Both lanes share the same recent-window filter, idempotency
+/// check, and char budget. The two-lane split was added after a
+/// session where `Bash git diff` evidence was promoted but never
+/// re-injected because the original single-lane filter required a
+/// non-empty `related_files`, silently dropping the entire class
+/// of tool outputs (ses §2.5).
 fn select_evidence<'a>(
     records: &'a [EvidenceRecord],
     current_turn: usize,
     already_injected: &HashSet<String>,
 ) -> Vec<&'a EvidenceRecord> {
     let window_start = current_turn.saturating_sub(RECENT_TURN_WINDOW);
-    let candidates_vec: Vec<&EvidenceRecord> = records
+    let in_window: Vec<&EvidenceRecord> = records
         .iter()
         .filter(|r| {
             r.blob_path.is_some()
                 && r.turn_index >= window_start
-                && !r.related_files.is_empty()
                 && !already_injected.contains(&r.id)
         })
         .collect();
 
-    // Latest turn seen per file — drives dedup.
+    // Lane A — file-based dedup.
+    let file_records: Vec<&EvidenceRecord> = in_window
+        .iter()
+        .copied()
+        .filter(|r| !r.related_files.is_empty())
+        .collect();
     let mut latest_turn_by_file: std::collections::HashMap<&str, usize> =
         std::collections::HashMap::new();
-    for rec in &candidates_vec {
+    for rec in &file_records {
         for file in &rec.related_files {
             latest_turn_by_file
                 .entry(file.as_str())
@@ -285,8 +300,7 @@ fn select_evidence<'a>(
                 .or_insert(rec.turn_index);
         }
     }
-    // Keep a record if it is the latest for at least one of its files.
-    let mut deduped: Vec<&EvidenceRecord> = candidates_vec
+    let mut file_lane: Vec<&EvidenceRecord> = file_records
         .into_iter()
         .filter(|rec| {
             rec.related_files.iter().any(|f| {
@@ -296,18 +310,24 @@ fn select_evidence<'a>(
             })
         })
         .collect();
-
-    // Two distinct records at the same turn_index that both claim
-    // "latest" for different files are both kept; dedup purely by id.
     let mut seen: HashSet<&str> = HashSet::new();
-    deduped.retain(|r| seen.insert(r.id.as_str()));
+    file_lane.retain(|r| seen.insert(r.id.as_str()));
 
-    // Budget pass: most-recent first, so newer evidence wins when
-    // something has to be dropped.
-    deduped.sort_by(|a, b| b.turn_index.cmp(&a.turn_index));
+    // Lane B — recency only.
+    let no_file_lane: Vec<&EvidenceRecord> = in_window
+        .into_iter()
+        .filter(|r| r.related_files.is_empty())
+        .collect();
+
+    // Merge lanes and apply the shared budget. Most-recent-first so
+    // newer evidence wins when something has to be dropped.
+    let mut merged: Vec<&EvidenceRecord> = file_lane;
+    merged.extend(no_file_lane);
+    merged.sort_by(|a, b| b.turn_index.cmp(&a.turn_index));
+
     let mut picked = Vec::new();
     let mut used = 0usize;
-    for rec in deduped {
+    for rec in merged {
         if used + rec.chars > EVIDENCE_INJECTION_BUDGET_CHARS {
             continue;
         }
@@ -615,6 +635,109 @@ mod tests {
             assets_dir: Some(tmp.path()),
         });
         assert_eq!(out.len(), 1, "missing blob is skipped gracefully");
+    }
+
+    #[test]
+    fn injects_bash_evidence_without_related_files() {
+        // Bash/GhFile/WebFetch records have empty related_files — they
+        // used to be silently dropped by the dedup filter. No-file lane
+        // must still inject them, keyed by recency.
+        let tmp = tempfile::tempdir().unwrap();
+        write_blob(tmp.path(), "ev_diff", "diff --git a/x b/x\n@@\n-a\n+b");
+        let msgs = vec![Message::user("what changed")];
+        let store = EvidenceStore {
+            records: vec![rec("ev_diff", 1, &[], 40, true)],
+        };
+        let out = build_prepared_messages(PlanInput {
+            transcript: &msgs,
+            evidence: &store,
+            assets_dir: Some(tmp.path()),
+        });
+        let anchor = &out[0];
+        match anchor.content.iter().find_map(|b| match b {
+            ContentBlock::Text { text } if text.contains("Retrieved evidence: ev_diff") => {
+                Some(text.as_str())
+            }
+            _ => None,
+        }) {
+            Some(text) => assert!(text.contains("diff --git")),
+            None => panic!("bash evidence must be injected even with empty related_files"),
+        }
+    }
+
+    #[test]
+    fn no_file_lane_keeps_every_record_by_recency() {
+        // Two Bash runs: both must be available (each invocation is a
+        // distinct artifact, no dedup key). Chronological injection.
+        let tmp = tempfile::tempdir().unwrap();
+        write_blob(tmp.path(), "ev_status", "On branch master");
+        write_blob(tmp.path(), "ev_log", "commit abc");
+        let msgs = vec![Message::user("summarise")];
+        let store = EvidenceStore {
+            records: vec![
+                rec("ev_status", 1, &[], 20, true),
+                rec("ev_log", 2, &[], 20, true),
+            ],
+        };
+        let out = build_prepared_messages(PlanInput {
+            transcript: &msgs,
+            evidence: &store,
+            assets_dir: Some(tmp.path()),
+        });
+        let anchor = &out[0];
+        // Two Text evidence blocks prepended; user text last.
+        assert_eq!(anchor.content.len(), 3);
+        match &anchor.content[0] {
+            ContentBlock::Text { text } => assert!(text.contains("ev_status")),
+            _ => panic!(),
+        }
+        match &anchor.content[1] {
+            ContentBlock::Text { text } => assert!(text.contains("ev_log")),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn merged_lanes_share_budget() {
+        // One near-budget file evidence + one small bash evidence.
+        // Ranking is most-recent-first so bash (turn 2) is picked,
+        // consuming 20 of the budget. The file (turn 1, near-budget)
+        // then overflows and is dropped. Proves the two lanes share
+        // one budget instead of each getting its own.
+        let tmp = tempfile::tempdir().unwrap();
+        write_blob(tmp.path(), "ev_file", "F");
+        write_blob(tmp.path(), "ev_bash", "B");
+        let near_budget = EVIDENCE_INJECTION_BUDGET_CHARS - 10;
+        let msgs = vec![Message::user("q")];
+        let store = EvidenceStore {
+            records: vec![
+                rec("ev_file", 1, &["a.rs"], near_budget, true),
+                rec("ev_bash", 2, &[], 20, true),
+            ],
+        };
+        let out = build_prepared_messages(PlanInput {
+            transcript: &msgs,
+            evidence: &store,
+            assets_dir: Some(tmp.path()),
+        });
+        let anchor = &out[0];
+        let ids_seen: Vec<&str> = anchor
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => {
+                    if text.contains("ev_file") {
+                        Some("ev_file")
+                    } else if text.contains("ev_bash") {
+                        Some("ev_bash")
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids_seen, vec!["ev_bash"], "newer record wins shared budget");
     }
 
     #[test]
