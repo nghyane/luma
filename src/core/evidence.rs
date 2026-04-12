@@ -96,6 +96,18 @@ pub const EVIDENCE_PROMOTION_THRESHOLD: usize = 8_000;
 /// stays compact.
 pub const EVIDENCE_SUMMARY_CHARS: usize = 200;
 
+/// Head-of-blob preview size embedded inline alongside the summary at
+/// promote time.
+///
+/// The preview pays +~2K bytes per oversized tool result in exchange for
+/// ~1 saved round-trip when the model needs the top of the file to
+/// reason. Preview is written **once** (no post-promote mutation) so the
+/// prompt-cache prefix stays stable across subsequent turns — a
+/// time-based clear would break the prefix every clear and erase any
+/// latency gain from caching. Model can still pull the tail via
+/// `Read { path: "artifact://ev/{id}" }` when the preview is not enough.
+pub const EVIDENCE_PREVIEW_CHARS: usize = 2_000;
+
 /// A ready-to-persist record, separated from [`EvidenceRecord`] so that
 /// [`classify`] stays a pure function over `(tool_name, args, result)` and
 /// [`ingest`] owns id generation, blob I/O, and turn bookkeeping.
@@ -103,6 +115,11 @@ pub const EVIDENCE_SUMMARY_CHARS: usize = 200;
 pub struct EvidenceDraft {
     pub kind: EvidenceKind,
     pub summary: String,
+    /// Head-of-blob preview (≤ [`EVIDENCE_PREVIEW_CHARS`]) the caller
+    /// splices into the in-transcript tool_result alongside the summary.
+    /// Empty when the blob is itself short enough that a preview adds
+    /// nothing.
+    pub preview: String,
     /// Full blob to persist. `None` means "keep inline" — the caller should
     /// not have invoked ingest.
     pub blob: String,
@@ -206,9 +223,28 @@ pub fn classify(tool_name: &str, args: &serde_json::Value, result: &str) -> Opti
     Some(EvidenceDraft {
         kind,
         summary: build_summary(tool_name, args, result),
+        preview: head_preview(result, EVIDENCE_PREVIEW_CHARS),
         blob: result.to_owned(),
         related_files: extract_related_files(tool_name, args),
     })
+}
+
+/// Return the first `max_chars` characters of `blob`, trimmed back to
+/// the last newline so the preview never stops mid-line. Returns an
+/// empty string when the blob is short enough that the full content
+/// fits the threshold — the caller then skips the preview section.
+fn head_preview(blob: &str, max_chars: usize) -> String {
+    let total = blob.chars().count();
+    if total <= max_chars {
+        return String::new();
+    }
+    let mut out: String = blob.chars().take(max_chars).collect();
+    // Cut back to the last full line break so we never split a line
+    // (and never a UTF-8 codepoint, since we indexed by chars).
+    if let Some(pos) = out.rfind('\n') {
+        out.truncate(pos);
+    }
+    out
 }
 
 /// Whether a shell command is a verification invocation (build/test/lint).
@@ -416,6 +452,41 @@ mod tests {
     }
 
     #[test]
+    fn preview_is_empty_when_blob_fits_threshold() {
+        let short = "line\n".repeat(10);
+        assert!(short.chars().count() < EVIDENCE_PREVIEW_CHARS);
+        assert_eq!(head_preview(&short, EVIDENCE_PREVIEW_CHARS), "");
+    }
+
+    #[test]
+    fn preview_truncates_at_line_boundary() {
+        // 4000 chars total; cap at 100 → we expect ~100 chars cut back
+        // to the nearest '\n' boundary, and certainly never ending in
+        // the middle of a line.
+        let blob: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let preview = head_preview(&blob, 100);
+        assert!(!preview.is_empty());
+        assert!(preview.chars().count() <= 100);
+        assert!(
+            preview.ends_with(|c: char| c != '\n') && preview.contains('\n'),
+            "preview must include at least one complete line and stop before the next \\n"
+        );
+    }
+
+    #[test]
+    fn classify_oversized_result_carries_preview() {
+        let args = serde_json::json!({"path": "/tmp/big.rs"});
+        let blob = "body line\n".repeat(EVIDENCE_PREVIEW_CHARS);
+        let draft = classify("Read", &args, &blob).unwrap();
+        assert!(!draft.preview.is_empty());
+        assert!(draft.preview.chars().count() <= EVIDENCE_PREVIEW_CHARS);
+        assert!(
+            draft.preview.chars().count() < draft.blob.chars().count(),
+            "preview must be a strict head, not the full blob"
+        );
+    }
+
+    #[test]
     fn classify_read_with_offset_limit_tags_partial_range() {
         let args = serde_json::json!({"path": "/tmp/x.rs", "offset": 1, "limit": 300});
         let draft = classify("Read", &args, "line\n".repeat(302).as_str()).unwrap();
@@ -481,6 +552,7 @@ mod tests {
         let draft = EvidenceDraft {
             kind: EvidenceKind::ReadExcerpt,
             summary: "src/main.rs (200 lines)".into(),
+            preview: String::new(),
             blob: "line 1\nline 2\n".into(),
             related_files: vec!["src/main.rs".into()],
         };
@@ -533,6 +605,7 @@ mod tests {
         let d = || EvidenceDraft {
             kind: EvidenceKind::Other,
             summary: "s".into(),
+            preview: String::new(),
             blob: "b".into(),
             related_files: vec![],
         };
@@ -549,6 +622,7 @@ mod tests {
         let draft = EvidenceDraft {
             kind: EvidenceKind::Other,
             summary: "s".into(),
+            preview: String::new(),
             blob: "b".into(),
             related_files: vec![],
         };

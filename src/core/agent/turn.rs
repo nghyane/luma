@@ -431,11 +431,26 @@ fn maybe_promote_to_evidence(
         return (text, None);
     };
     let summary_template = draft.summary.clone();
+    let preview = draft.preview.clone();
     match session
         .evidence
         .ingest(evidence_dir, turn_index, tool_use_id, draft)
     {
-        Ok(id) => (summary_template.replace("{id}", &id), Some(id)),
+        Ok(id) => {
+            // Splice: summary line (advertises the artifact URI) + a
+            // head-of-blob preview so the model has enough context to
+            // reason *this* turn, then a concrete pull hint for the
+            // tail. Written once at promote time and never mutated —
+            // the prompt-cache prefix stays stable across every
+            // subsequent turn (cache_read >> cache_write on latency).
+            let header = summary_template.replace("{id}", &id);
+            let content = if preview.is_empty() {
+                header
+            } else {
+                format!("{header}\n\n{preview}\n\n[… pull artifact://ev/{id} for the rest]")
+            };
+            (content, Some(id))
+        }
         Err(e) => {
             crate::dbg_log!("evidence ingest failed for {tool_use_id}: {e}");
             if text.len() > SAFETY_FALLBACK_CAP {
@@ -713,15 +728,28 @@ mod tests {
             name: "Read".into(),
             input: serde_json::json!({"path": "/tmp/big.rs"}),
         }];
-        let big = "x".repeat(EVIDENCE_PROMOTION_THRESHOLD + 1);
+        // Use readable multi-line content so the preview has something
+        // real to splice; a flat "x" repeat collapses to a single line
+        // and defeats the line-boundary trim in `head_preview`.
+        let line = "fn main() { println!(\"hello\"); }\n";
+        let repeats = EVIDENCE_PROMOTION_THRESHOLD.div_ceil(line.len()) + 1;
+        let big: String = line.repeat(repeats);
         let (content, evidence_id) =
             maybe_promote_to_evidence(&mut session, tmp.path(), 2, &tool_uses, "tc_1", big.clone());
         let id = evidence_id.expect("promoted");
         assert!(
             content.len() < big.len(),
-            "summary must be shorter than blob"
+            "inline content must be shorter than blob"
         );
-        assert!(content.contains("/tmp/big.rs"));
+        assert!(content.contains("/tmp/big.rs"), "header preserved");
+        assert!(
+            content.contains(&format!("artifact://ev/{id}")),
+            "pull URI advertised so the agent can fetch the tail"
+        );
+        assert!(
+            content.contains("fn main()"),
+            "head preview is spliced so the model can reason this turn"
+        );
         assert_eq!(session.evidence.records.len(), 1);
         let rec = &session.evidence.records[0];
         assert_eq!(rec.id, id);
