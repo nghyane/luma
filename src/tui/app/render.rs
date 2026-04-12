@@ -316,9 +316,9 @@ impl super::App {
         lines.push(Line::new(smallvec![
             Span::deco_colored("╹".to_owned(), palette::ACCENT, palette::BG),
             Span::deco_colored(
-                "▀".repeat((self.regions.input.width as usize).saturating_sub(1)),
-                palette::SURFACE,
+                "▄".repeat((self.regions.input.width as usize).saturating_sub(1)),
                 palette::BG,
+                palette::SURFACE,
             ),
         ]));
         lines
