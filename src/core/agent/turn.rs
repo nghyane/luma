@@ -265,7 +265,8 @@ async fn run_turn(
         }
 
         // First attempt: provider default max_tokens.
-        let mut result = stream_with_retry(&ctx, &session.messages, None).await?;
+        let prepared = crate::core::context_plan::build_prepared_messages(&session.messages);
+        let mut result = stream_with_retry(&ctx, &prepared, None).await?;
 
         // Escalate once if the first call hit max_tokens before finishing,
         // but only if the provider actually honors an override. For providers
@@ -281,7 +282,7 @@ async fn run_turn(
                     max_attempts: 2,
                 })
                 .await;
-            result = stream_with_retry(&ctx, &session.messages, Some(ESCALATED_MAX_TOKENS)).await?;
+            result = stream_with_retry(&ctx, &prepared, Some(ESCALATED_MAX_TOKENS)).await?;
         }
 
         let StreamResponse {
