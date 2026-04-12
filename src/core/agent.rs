@@ -41,7 +41,7 @@ pub fn spawn(
 
 async fn agent_loop(
     mut config: AgentConfig,
-    registry: Registry,
+    mut registry: Registry,
     mut cmd_rx: mpsc::Receiver<AgentCommand>,
     event_tx: crate::event_bus::Sender,
 ) {
@@ -153,15 +153,34 @@ async fn agent_loop(
                 config.model_id = model_id;
                 config.source = source;
             }
+            AgentCommand::SetContext {
+                system_prompt,
+                registry: new_registry,
+            } => {
+                config.system_prompt = system_prompt.clone();
+                registry = new_registry;
+                // Replace the leading system message in the transcript so
+                // the next turn picks up the new prompt. Keep everything
+                // else untouched — this is the whole point of hot-swap.
+                if let Some(first) = session.messages.first_mut()
+                    && first.role == Role::System
+                {
+                    first.content = vec![ContentBlock::Text {
+                        text: system_prompt,
+                    }];
+                } else if !system_prompt.is_empty() {
+                    session
+                        .messages
+                        .insert(0, Message::system(system_prompt));
+                }
+            }
             AgentCommand::SetThinking(level) => {
                 config.thinking = level;
             }
-            AgentCommand::Shutdown => {
-                session.save();
-                break;
-            }
         }
     }
+    // cmd channel closed — app is shutting down. Persist before exit.
+    session.save();
 }
 
 /// Ensure every `tool_use` in assistant messages has a matching `tool_result`.

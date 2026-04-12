@@ -122,14 +122,19 @@ pub enum AgentCommand {
     SetModel { model_id: String, source: String },
     /// Update thinking level on current provider.
     SetThinking(crate::core::types::ThinkingLevel),
+    /// Hot-swap the system prompt and tool registry without dropping the
+    /// session transcript. Used when the user switches agent mode so
+    /// context (history, doc, status) is preserved across the change.
+    SetContext {
+        system_prompt: String,
+        registry: crate::core::registry::Registry,
+    },
     /// Replace the current thread with a specific session.
     /// `is_new` is set by the caller (App) — true for `/new`, false for resume.
     LoadSession {
         session: crate::core::session::Session,
         is_new: bool,
     },
-    /// Shut down the agent loop.
-    Shutdown,
 }
 
 #[cfg(test)]

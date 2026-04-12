@@ -250,22 +250,48 @@ impl super::App {
         self.config.thinking = thinking_caps.coerce(self.config.thinking);
         crate::config::prefs::save_mode(self.config.mode);
         crate::config::prefs::save_thinking(self.config.thinking);
-        // Cancel in-flight turn before shutting down — prevents orphan streaming.
+        // Cancel any in-flight turn so the swap lands on a clean boundary.
         if let Some(c) = self.agent.cancel.take() {
             c.cancel();
         }
-        self.agent.state = super::state::RunState::Idle;
-        self.agent.is_loading_session = false;
-        if let Some(tx) = self.agent.tx.take() {
-            let _ = tx.try_send(AgentCommand::Shutdown);
-        }
+        self.hot_swap_context();
         self.enter_chat();
-        self.doc.clear();
-        self.view.clear();
         self.doc.divider_with_label(self.config.mode.as_str());
-        self.ui.status.reset_usage();
         self.update_status();
         self.sync_prompt_commands();
+    }
+
+    /// Rebuild system prompt + tool registry for the current mode/model and
+    /// send them to the live agent loop without dropping the transcript.
+    fn hot_swap_context(&mut self) {
+        let Some(model) = self.config.model.clone() else {
+            return;
+        };
+        let Some(tx) = &self.agent.tx else {
+            // No loop yet — next submit will spawn one with the new config.
+            return;
+        };
+        let skills = crate::config::skills::discover();
+        let skill_catalog = crate::config::skills::build_catalog(&skills);
+        let project_instructions = crate::config::instructions::discover();
+        let instructions_block =
+            crate::config::instructions::build_instructions(&project_instructions);
+        let style = crate::tool::ToolStyle::for_source(&model.source);
+        let base_prompt = crate::config::prompt::build(self.config.mode, style);
+        let system_prompt = format!(
+            "{base_prompt}\n{}{skill_catalog}{instructions_block}",
+            self.config.env_context
+        );
+        let registry = crate::tool::build_registry(style, Self::search_backend());
+        let _ = tx.try_send(AgentCommand::SetContext {
+            system_prompt,
+            registry,
+        });
+        // Keep model/provider identity in sync with the new mode default.
+        let _ = tx.try_send(AgentCommand::SetModel {
+            model_id: model.id.clone(),
+            source: model.source.clone(),
+        });
     }
 
     pub(super) fn resume_session(&mut self, picker_id: &str) {
