@@ -333,7 +333,11 @@ async fn run_turn(
             return Ok(());
         }
 
-        let tool_results = execute_tools(&tool_uses, registry, tx, cancel.clone()).await;
+        let tool_results = crate::core::session::scope_current_session(
+            &session.id,
+            execute_tools(&tool_uses, registry, tx, cancel.clone()),
+        )
+        .await;
         let aborted = cancel.is_cancelled();
 
         // Current turn index — points at the assistant message that just
@@ -404,12 +408,12 @@ fn maybe_promote_to_evidence(
     let Some(draft) = classify(&tu.name, &tu.input, &text) else {
         return (text, None);
     };
-    let summary = draft.summary.clone();
+    let summary_template = draft.summary.clone();
     match session
         .evidence
         .ingest(evidence_dir, turn_index, tool_use_id, draft)
     {
-        Ok(id) => (summary, Some(id)),
+        Ok(id) => (summary_template.replace("{id}", &id), Some(id)),
         Err(e) => {
             crate::dbg_log!("evidence ingest failed for {tool_use_id}: {e}");
             if text.len() > SAFETY_FALLBACK_CAP {

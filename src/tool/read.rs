@@ -5,7 +5,6 @@ use anyhow::{Result, bail};
 use std::fs;
 use std::future::Future;
 use std::io::{BufRead, BufReader, Read};
-use std::path::PathBuf;
 use std::pin::Pin;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -34,7 +33,7 @@ impl Tool for ReadTool {
             name: "Read".into(),
             description: concat!(
                 "Read a file or list a directory. Returns content with line numbers (e.g. '1: content').\n",
-                "- Path must be absolute.\n",
+                "- Path must be absolute, OR an artifact URI `artifact://{id}` to re-read a stored evidence blob from this session (the id appears in prior tool summaries as `stored as ev_xxx`).\n",
                 "- Default reads up to 2000 lines. Use offset/limit for large files.\n",
                 "- Files larger than 10MB require offset and limit parameters.\n",
                 "- Avoid tiny repeated slices (e.g. 30-line chunks). Read a larger window instead.\n",
@@ -67,9 +66,12 @@ impl Tool for ReadTool {
                 bail!("missing path argument");
             }
 
-            let path = PathBuf::from(path_str)
-                .canonicalize()
-                .unwrap_or_else(|_| PathBuf::from(path_str));
+            // URI schemes (artifact://) resolve to a concrete path in the
+            // session asset tree; plain paths pass through unchanged.
+            let path = match crate::core::session::resolve_resource_path(path_str) {
+                Ok(p) => p.canonicalize().unwrap_or(p),
+                Err(e) => bail!("{e}"),
+            };
 
             let meta = match fs::metadata(&path) {
                 Ok(m) => m,

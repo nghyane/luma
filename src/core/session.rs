@@ -185,6 +185,77 @@ pub fn session_evidence_dir(session_id: &str) -> PathBuf {
     session_assets_dir(session_id).join("evidence")
 }
 
+tokio::task_local! {
+    /// Id of the session whose turn is currently executing. Propagated
+    /// via [`scope_current_session`] so tools running deep in the stack
+    /// can resolve session-scoped URIs (`artifact://ev_xxx`) without
+    /// changing the `Tool` trait.
+    ///
+    /// Unset outside a turn — callers must handle `try_with` failure
+    /// gracefully (e.g. reject URIs that need a session context).
+    static CURRENT_SESSION: String;
+}
+
+/// Run `fut` with `session_id` exposed as the current session. The agent
+/// loop wraps its tool execution in this scope so tools observe the
+/// correct id even when executing concurrently across sessions (future
+/// flow).
+pub async fn scope_current_session<F, T>(session_id: &str, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    CURRENT_SESSION.scope(session_id.to_owned(), fut).await
+}
+
+/// Resolve a URI-style path to a concrete filesystem location.
+///
+/// Scheme registry (extensible — `skill://`, `session://` can slot in
+/// later without touching call sites):
+///
+/// * `artifact://{id}` — re-read a stored evidence blob from the
+///   current session's `evidence/` directory. Requires
+///   [`scope_current_session`] to be active.
+///
+/// Non-URI strings pass through unchanged so plain filesystem paths
+/// (the vast majority of tool calls) take no penalty.
+pub fn resolve_resource_path(path: &str) -> std::io::Result<PathBuf> {
+    let Some((scheme, rest)) = path.split_once("://") else {
+        return Ok(PathBuf::from(path));
+    };
+    match scheme {
+        "artifact" => resolve_artifact(rest),
+        other => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unknown URI scheme: {other}"),
+        )),
+    }
+}
+
+fn resolve_artifact(id: &str) -> std::io::Result<PathBuf> {
+    // Reject malformed ids early so path joins can't escape the
+    // evidence directory via '..' or absolute components.
+    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid artifact id: {id}"),
+        ));
+    }
+    let session_id = CURRENT_SESSION.try_with(|s| s.clone()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "artifact:// requires an active session",
+        )
+    })?;
+    let path = session_evidence_dir(&session_id).join(format!("{id}.txt"));
+    if !path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("artifact {id} not found in session {session_id}"),
+        ));
+    }
+    Ok(path)
+}
+
 /// Save image bytes to `sessions/{session_id}/images/{filename}`. Returns filename.
 pub fn save_image(session_id: &str, data: &[u8], ext: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -271,6 +342,46 @@ mod tests {
     fn list_sessions_empty() {
         // Just verify it doesn't panic
         let _ = list_sessions();
+    }
+
+    #[test]
+    fn resolve_plain_path_passes_through() {
+        let out = resolve_resource_path("/abs/path/file.rs").unwrap();
+        assert_eq!(out, PathBuf::from("/abs/path/file.rs"));
+    }
+
+    #[test]
+    fn resolve_unknown_scheme_is_error() {
+        let err = resolve_resource_path("weird://foo").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn resolve_artifact_without_session_scope_fails() {
+        // Outside scope_current_session — resolver must refuse.
+        let err = resolve_resource_path("artifact://ev_abc").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[tokio::test]
+    async fn resolve_artifact_rejects_path_traversal() {
+        scope_current_session("ses_nope", async {
+            for bad in ["", "../etc", "a/b", "a\\b", ".."] {
+                let uri = format!("artifact://{bad}");
+                let err = resolve_resource_path(&uri).unwrap_err();
+                assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{uri}");
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn resolve_artifact_missing_blob_reports_not_found() {
+        scope_current_session("ses_nope", async {
+            let err = resolve_resource_path("artifact://ev_does_not_exist").unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        })
+        .await;
     }
 
     #[test]

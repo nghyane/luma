@@ -141,12 +141,17 @@ impl EvidenceStore {
         }
         fs::rename(&tmp_path, &final_path)?;
 
+        // Summary is drafted at classify time before the id is known;
+        // substitute here so the in-transcript summary advertises the
+        // concrete artifact URI the agent can feed back to Read.
+        let summary = draft.summary.replace("{id}", &id);
+
         let chars = draft.blob.chars().count();
         self.records.push(EvidenceRecord {
             id: id.clone(),
             kind: draft.kind,
             tool_use_id: tool_use_id.to_owned(),
-            summary: draft.summary,
+            summary,
             blob_path: Some(format!("evidence/{filename}")),
             chars,
             turn_index,
@@ -305,19 +310,19 @@ fn build_summary(tool_name: &str, args: &serde_json::Value, result: &str) -> Str
                 let end = limit.map(|l| offset + l - 1);
                 match end {
                     Some(e) => format!(
-                        "{path} (partial: lines {offset}-{e}, {lines} lines stored as evidence)"
+                        "{path} (partial: lines {offset}-{e}, {lines} lines stored as {{id}})"
                     ),
                     None => format!(
-                        "{path} (partial: from line {offset}, {lines} lines stored as evidence)"
+                        "{path} (partial: from line {offset}, {lines} lines stored as {{id}})"
                     ),
                 }
             } else {
-                format!("{path} ({lines} lines, stored as evidence)")
+                format!("{path} ({lines} lines, stored as {{id}})")
             }
         }
         "Grep" | "GhSearch" => {
             let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
-            format!("grep {pattern:?}: {lines} lines, stored as evidence")
+            format!("grep {pattern:?}: {lines} lines, stored as {{id}}")
         }
         "Bash" | "exec_command" | "shell" => {
             let exit = result
@@ -331,9 +336,9 @@ fn build_summary(tool_name: &str, args: &serde_json::Value, result: &str) -> Str
                 .chars()
                 .take(60)
                 .collect();
-            format!("$ {cmd_preview} → exit {exit}, {lines} lines, stored as evidence")
+            format!("$ {cmd_preview} → exit {exit}, {lines} lines, stored as {{id}}")
         }
-        _ => format!("{tool_name}: {lines} lines, stored as evidence"),
+        _ => format!("{tool_name}: {lines} lines, stored as {{id}}"),
     };
     truncate_summary(&raw)
 }
@@ -492,6 +497,31 @@ mod tests {
         assert!(blob_rel.starts_with("evidence/"));
         let blob = std::fs::read_to_string(tmp.path().join(format!("{id}.txt"))).unwrap();
         assert_eq!(blob, "line 1\nline 2\n");
+    }
+
+    #[test]
+    fn ingest_substitutes_id_placeholder_in_summary() {
+        // build_summary writes `{id}` so the advertised artifact URI
+        // matches the id ingest eventually picks (chicken-and-egg).
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = EvidenceStore::default();
+        let args = serde_json::json!({"path": "/tmp/x.rs"});
+        let draft = classify("Read", &args, "line\n".repeat(42).as_str()).unwrap();
+        // Pre-ingest summary still carries the placeholder — caller is
+        // expected to use the returned id for any out-of-band rendering.
+        assert!(draft.summary.contains("{id}"));
+
+        let id = store.ingest(tmp.path(), 0, "tc_x", draft).unwrap();
+        let rec = &store.records[0];
+        assert!(
+            !rec.summary.contains("{id}"),
+            "placeholder must be substituted in stored summary"
+        );
+        assert!(
+            rec.summary.contains(&id),
+            "summary must advertise concrete id: {}",
+            rec.summary
+        );
     }
 
     #[test]
