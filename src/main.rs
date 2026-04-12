@@ -288,12 +288,12 @@ fn build_env_context() -> String {
         if let Ok(out) = Command::new(cmd).arg(flag).output()
             && out.status.success()
         {
-            let ver = String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .next()
-                .unwrap_or(cmd)
-                .to_owned();
-            tools.push(format!("{cmd} ({ver})"));
+            // Record presence only, not `--version` output. Version
+            // strings bump whenever the user updates a CLI and would
+            // otherwise invalidate the system-prompt cache prefix on
+            // every agent session after an upgrade. Agents that need a
+            // specific version can run `{tool} --version` via Bash.
+            tools.push((*cmd).to_owned());
         }
     }
 
@@ -311,17 +311,14 @@ fn build_env_context() -> String {
         "no".into()
     };
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    // Simple date from unix timestamp (no chrono dep)
-    let days = now / 86400;
-    let (year, month, day) = epoch_days_to_ymd(days);
-    let date = format!("{year}-{month:02}-{day:02}");
+    // Drop the Date line and volatile CLI version strings from the
+    // system-prompt <env> block: every midnight (or CLI upgrade) they
+    // invalidate the cached prefix Anthropic charges ~10× less to
+    // re-read. An agent that genuinely needs the date can call Bash
+    // `date` — one pull beats a daily cache rebuild on every session.
 
     format!(
-        "\n<env>\n  OS: {} {}\n  Shell: {shell}\n  CWD: {}\n  Git: {git_info}\n  Date: {date}\n  CLI: {}\n</env>\nShell commands execute in CWD by default — do not prefix `cd <cwd> && …`; paths inside CWD can be relative.",
+        "\n<env>\n  OS: {} {}\n  Shell: {shell}\n  CWD: {}\n  Git: {git_info}\n  CLI: {}\n</env>\nShell commands execute in CWD by default — do not prefix `cd <cwd> && …`; paths inside CWD can be relative.",
         std::env::consts::OS,
         std::env::consts::ARCH,
         cwd.display(),
@@ -348,23 +345,4 @@ fn cmd_stdout(cwd: &std::path::Path, cmd: &str, args: &[&str]) -> Option<String>
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
         .filter(|s| !s.is_empty())
-}
-
-/// Convert days-since-Unix-epoch to (year, month, day) using the civil
-/// calendar algorithm (Howard Hinnant). Handles negative dates correctly
-/// via signed era arithmetic, so dates before 1970 round-trip cleanly.
-fn epoch_days_to_ymd(days_since_epoch: u64) -> (i32, u32, u32) {
-    let z = days_since_epoch as i64 + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = mp + if mp < 10 { 3 } else { -9 };
-    // y is bounded by realistic input (days_since_epoch < ~100k years), fits i32.
-    #[allow(clippy::cast_possible_truncation)]
-    let year = (y + i64::from(m <= 2)) as i32;
-    (year, m as u32, d as u32)
 }
