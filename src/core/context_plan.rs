@@ -117,12 +117,27 @@ pub fn build_prepared_messages(input: PlanInput<'_>) -> Vec<Message> {
         return out;
     }
 
-    // Prepend evidence blocks so the anchor's original content (user
-    // text or tool_result blocks) remains after the retrieved context.
+    // Insert evidence after any leading tool_result blocks and before
+    // user text. Anthropic requires that a user turn following an
+    // assistant tool_use begin with the matching tool_result blocks;
+    // a leading text block trips "tool_use ids were found without
+    // tool_result blocks immediately after" (HTTP 400). When the tail
+    // has no tool_results (plain user text), the loop stops at index
+    // 0 and evidence lands at the front as before.
     let original = std::mem::take(&mut out[anchor].content);
+    let split = original
+        .iter()
+        .position(|b| !matches!(b, ContentBlock::ToolResult { .. }))
+        .unwrap_or(original.len());
     let mut merged = Vec::with_capacity(blocks.len() + original.len());
+    let mut iter = original.into_iter();
+    for _ in 0..split {
+        if let Some(b) = iter.next() {
+            merged.push(b);
+        }
+    }
     merged.extend(blocks);
-    merged.extend(original);
+    merged.extend(iter);
     out[anchor].content = merged;
     out
 }
@@ -574,6 +589,10 @@ mod tests {
         // tool_result user message is the tail. This is the hot path
         // for duplicate reads — the planner must decorate this user
         // message so the next stream() call sees the evidence.
+        //
+        // Evidence must land *after* the tool_result block. Anthropic
+        // rejects a user turn whose first block is text when it
+        // follows an assistant tool_use; tool_result must come first.
         let tmp = tempfile::tempdir().unwrap();
         write_blob(tmp.path(), "ev_1", "fn main() {}");
         let msgs = vec![
@@ -614,22 +633,100 @@ mod tests {
             ContentBlock::Text { text } => assert_eq!(text, "fix this"),
             _ => panic!(),
         }
-        // Tail user message: evidence block, then original tool_result.
+        // Tail user message: tool_result first (API requirement), then
+        // evidence block.
         let tail = &out[2];
         assert_eq!(tail.role, Role::User);
         assert_eq!(tail.content.len(), 2);
         match &tail.content[0] {
+            ContentBlock::ToolResult { tool_use_id, .. } => {
+                assert_eq!(tool_use_id, "tc_1")
+            }
+            _ => panic!("tool_result must come first after assistant tool_use"),
+        }
+        match &tail.content[1] {
             ContentBlock::Text { text } => {
                 assert!(text.contains("Retrieved evidence: ev_1"));
                 assert!(text.contains("fn main()"));
             }
-            _ => panic!("evidence must be prepended"),
+            _ => panic!("evidence must be appended after tool_result"),
+        }
+    }
+
+    #[test]
+    fn injects_after_all_tool_results_with_mixed_tail() {
+        // Multi-tool batch: user message carries several tool_result
+        // blocks plus trailing text. Evidence lands between the last
+        // tool_result and the trailing text.
+        let tmp = tempfile::tempdir().unwrap();
+        write_blob(tmp.path(), "ev_1", "body");
+        let tail = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "tc_1".into(),
+                    content: "r1".into(),
+                    is_error: false,
+                    evidence_id: None,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "tc_2".into(),
+                    content: "r2".into(),
+                    is_error: false,
+                    evidence_id: None,
+                },
+                ContentBlock::Text {
+                    text: "and one more thing".into(),
+                },
+            ],
+            origin: None,
+        };
+        let msgs = vec![
+            Message::user("start"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "tc_1".into(),
+                        name: "Read".into(),
+                        input: serde_json::json!({"path": "a.rs"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tc_2".into(),
+                        name: "Read".into(),
+                        input: serde_json::json!({"path": "b.rs"}),
+                    },
+                ],
+                origin: None,
+            },
+            tail,
+        ];
+        let store = EvidenceStore {
+            records: vec![rec("ev_1", 1, &["a.rs"], 12, true)],
+        };
+        let out = build_prepared_messages(PlanInput {
+            transcript: &msgs,
+            evidence: &store,
+            assets_dir: Some(tmp.path()),
+        });
+        let tail = out.last().unwrap();
+        // [tool_result tc_1, tool_result tc_2, evidence, trailing text]
+        assert_eq!(tail.content.len(), 4);
+        match &tail.content[0] {
+            ContentBlock::ToolResult { tool_use_id, .. } => assert_eq!(tool_use_id, "tc_1"),
+            _ => panic!("first block must be tool_result tc_1"),
         }
         match &tail.content[1] {
-            ContentBlock::ToolResult { tool_use_id, .. } => {
-                assert_eq!(tool_use_id, "tc_1")
-            }
-            _ => panic!("tool_result must survive"),
+            ContentBlock::ToolResult { tool_use_id, .. } => assert_eq!(tool_use_id, "tc_2"),
+            _ => panic!("second block must be tool_result tc_2"),
+        }
+        match &tail.content[2] {
+            ContentBlock::Text { text } => assert!(text.contains("Retrieved evidence: ev_1")),
+            _ => panic!("evidence must land after the tool_result cluster"),
+        }
+        match &tail.content[3] {
+            ContentBlock::Text { text } => assert_eq!(text, "and one more thing"),
+            _ => panic!("trailing user text must remain last"),
         }
     }
 
