@@ -351,6 +351,7 @@ async fn run_turn(
                 tool_use_id: id,
                 content: text,
                 is_error: false,
+                evidence_id: None,
             });
         }
         session.messages.push(Message {

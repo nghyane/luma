@@ -1,4 +1,5 @@
 /// Session — persistent conversation with JSON storage.
+use crate::core::evidence::EvidenceStore;
 use crate::core::types::Message;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -31,6 +32,12 @@ pub struct Session {
     pub usage: SessionUsage,
     #[serde(default)]
     pub turn_durations: Vec<f64>,
+    /// Oversized tool outputs promoted out of the transcript.
+    ///
+    /// Scaffolded empty until the ingest path lands; see
+    /// `docs/rfcs/evidence-backed-handoff.md` and [`crate::core::evidence`].
+    #[serde(default)]
+    pub evidence: EvidenceStore,
 }
 
 /// Summary for listing sessions (no messages loaded).
@@ -57,6 +64,7 @@ impl Session {
             messages: Vec::new(),
             usage: SessionUsage::default(),
             turn_durations: Vec::new(),
+            evidence: EvidenceStore::default(),
         }
     }
 
@@ -281,6 +289,8 @@ mod tests {
         let text = session.messages[1].text();
         assert!(text.contains("fn main()"));
         assert!(text.contains("what is this"));
+        // Sessions persisted before evidence landed must still deserialize.
+        assert!(session.evidence.records.is_empty());
     }
 
     /// Feasibility scan for the evidence-backed handoff RFC.

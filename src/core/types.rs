@@ -27,11 +27,19 @@ pub enum ContentBlock {
         input: serde_json::Value,
     },
     /// Tool execution result sent back to the model.
+    ///
+    /// `evidence_id` is an internal reference to the evidence store —
+    /// provider adapters translate this variant to their wire format by
+    /// hand (see `provider::claude::encode_block`, `openai::to_api_messages`,
+    /// `codex::build_input`) and must drop `evidence_id` on the way out
+    /// since it has no meaning to the model.
     ToolResult {
         tool_use_id: String,
         content: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence_id: Option<String>,
     },
     /// Extended-thinking block with signature. Both fields must round-trip
     /// verbatim on subsequent turns or the Anthropic backend rejects the
@@ -186,6 +194,7 @@ impl Message {
                 tool_use_id: id.into(),
                 content: content.into(),
                 is_error: false,
+                evidence_id: None,
             }],
             origin: None,
         }
@@ -382,10 +391,12 @@ mod tests {
                 tool_use_id,
                 content,
                 is_error,
+                evidence_id,
             } => {
                 assert_eq!(tool_use_id, "tc_1");
                 assert_eq!(content, "result");
                 assert!(!is_error);
+                assert!(evidence_id.is_none());
             }
             _ => panic!("expected ToolResult"),
         }
