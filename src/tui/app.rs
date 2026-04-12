@@ -276,6 +276,19 @@ impl App {
     );
 
     fn enter_terminal(term: &mut termina::PlatformTerminal) -> anyhow::Result<()> {
+        // Windows: force console code page to UTF-8 so box-drawing and
+        // decorative glyphs render correctly in legacy cmd.exe. Modern
+        // terminals (Windows Terminal, PowerShell 7) already default to
+        // UTF-8 so this is a no-op there.
+        #[cfg(windows)]
+        {
+            use std::process::{Command, Stdio};
+            let _ = Command::new("chcp")
+                .arg("65001")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
         term.set_panic_hook(|handle| {
             use std::io::Write;
             let _ = write!(handle, "{}", Self::VT_RESTORE);
