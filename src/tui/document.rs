@@ -94,15 +94,6 @@ impl Document {
         match msg.role {
             Role::System => {}
             Role::User => {
-                // Restore persisted tool artifacts from ToolResult blocks.
-                // These ride on user messages but are not visible prompt
-                // content — they pair with the preceding assistant's ToolUse.
-                for block in &msg.content {
-                    if let ContentBlock::ToolResult { artifact: Some(art), .. } = block {
-                        self.replay_tool_artifact(art);
-                    }
-                }
-
                 if !msg.has_visible_content() {
                     return;
                 }
@@ -127,23 +118,6 @@ impl Document {
                         crate::core::agent::format_tool_summary(name, input);
                     self.tool_history(name, &summary);
                 }
-            }
-        }
-    }
-
-    /// Attach a persisted artifact to the most recent tool block.
-    /// On resume this restores diffs for write/edit tools.
-    fn replay_tool_artifact(&mut self, artifact: &crate::core::types::FileChangeArtifact) {
-        // Walk backwards to find the last tool block and attach the artifact.
-        for block in self.blocks.iter_mut().rev() {
-            if let Block::Tool(tb) = block
-                && tb.is_done
-                && tb.artifact.is_none()
-            {
-                tb.artifact = Some(artifact.clone());
-                // Clear output since artifact replaces it (same as live path).
-                tb.output.clear();
-                return;
             }
         }
     }

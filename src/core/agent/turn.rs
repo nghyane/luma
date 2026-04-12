@@ -331,7 +331,7 @@ async fn run_turn(
         // Push all tool_result blocks as a single user message — even on
         // abort, so the model sees what happened on replay.
         let mut result_blocks: Vec<ContentBlock> = Vec::with_capacity(tool_results.len());
-        for (id, mut text, artifact) in tool_results {
+        for (id, mut text) in tool_results {
             if text.len() > MAX_RESULT_LEN {
                 text.truncate(MAX_RESULT_LEN);
                 text.push_str("\n[truncated]");
@@ -340,7 +340,6 @@ async fn run_turn(
                 tool_use_id: id,
                 content: text,
                 is_error: false,
-                artifact,
             });
         }
         session.messages.push(Message {
@@ -390,10 +389,10 @@ async fn execute_one(
     registry: &Registry,
     tx: &EventSender,
     cancel: tokio_util::sync::CancellationToken,
-) -> (String, String, Option<crate::core::types::FileChangeArtifact>) {
+) -> (String, String) {
     let skill = skill_name_from_read(&tu.name, &tu.input);
 
-    let (result, artifact) = match registry.get(&tu.name) {
+    let result = match registry.get(&tu.name) {
         Some(tool) => {
             if let Some(name) = &skill {
                 let _ = tx.send(Event::SkillStart(name.clone())).await;
@@ -426,11 +425,11 @@ async fn execute_one(
 
             match res {
                 Ok(exec) => {
-                    if let Some(ref artifact) = exec.artifact {
+                    if let Some(artifact) = exec.artifact {
                         let _ = tx
                             .send(Event::ToolArtifact {
                                 name: tu.name.clone(),
-                                artifact: Box::new(artifact.clone()),
+                                artifact: Box::new(artifact),
                             })
                             .await;
                     }
@@ -444,7 +443,7 @@ async fn execute_one(
                     if let Some(name) = &skill {
                         let _ = tx.send(Event::SkillEnd(format!("loaded {name}"))).await;
                     }
-                    (exec.result, exec.artifact)
+                    exec.result
                 }
                 Err(e) => {
                     let msg = format!("Error: {e}");
@@ -459,13 +458,13 @@ async fn execute_one(
                             .send(Event::SkillEnd(format!("failed to load {name}")))
                             .await;
                     }
-                    (msg, None)
+                    msg
                 }
             }
         }
-        None => (format!("Unknown tool: {}", tu.name), None),
+        None => format!("Unknown tool: {}", tu.name),
     };
-    (tu.id.clone(), result, artifact)
+    (tu.id.clone(), result)
 }
 
 /// Execute tool calls — concurrent when multiple, preserving order.
@@ -474,7 +473,7 @@ pub async fn execute_tools(
     registry: &Registry,
     tx: &EventSender,
     cancel: tokio_util::sync::CancellationToken,
-) -> Vec<(String, String, Option<crate::core::types::FileChangeArtifact>)> {
+) -> Vec<(String, String)> {
     if tool_uses.len() == 1 {
         return vec![execute_one(&tool_uses[0], registry, tx, cancel).await];
     }

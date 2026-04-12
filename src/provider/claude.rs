@@ -668,7 +668,6 @@ fn content_block_to_api(
             tool_use_id,
             content,
             is_error,
-            ..
         } => {
             let mut v = serde_json::json!({
                 "type": "tool_result",
