@@ -154,6 +154,53 @@ impl PromptBuffer {
         }
     }
 
+    /// Delete char at cursor (forward delete, Delete key). Returns true if something was deleted.
+    pub fn delete_forward(&mut self) -> bool {
+        if let Seg::Text(t) = &mut self.segs[self.seg] {
+            let len = t.chars().count();
+            if self.pos < len {
+                let start = char_to_byte(t, self.pos);
+                let end = char_to_byte(t, self.pos + 1);
+                t.replace_range(start..end, "");
+                return true;
+            }
+        }
+        // At end of current text seg: delete next non-text segment if any.
+        if self.seg + 1 < self.segs.len() {
+            let next = self.seg + 1;
+            if !matches!(&self.segs[next], Seg::Text(_)) {
+                self.segs.remove(next);
+                self.merge_adjacent_text();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Delete word before cursor (Ctrl+W).
+    pub fn kill_word_before(&mut self) -> bool {
+        self.ensure_text();
+        let Seg::Text(t) = &mut self.segs[self.seg] else {
+            return false;
+        };
+        if self.pos == 0 {
+            return false;
+        }
+        let chars: Vec<char> = t.chars().collect();
+        let mut i = self.pos;
+        while i > 0 && chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        let start = char_to_byte(t, i);
+        let end = char_to_byte(t, self.pos);
+        t.replace_range(start..end, "");
+        self.pos = i;
+        true
+    }
+
     /// Whether buffer has any content.
     pub fn is_empty(&self) -> bool {
         self.segs.iter().all(|s| match s {

@@ -251,9 +251,8 @@ impl App {
     /// VT sequences to enable TUI features (alternate screen, mouse, paste, etc).
     const VT_ENABLE: &str = concat!(
         "\x1b[?1049h", // enter alternate screen
-        "\x1b[?1000h", // enable mouse
-        "\x1b[?1002h", // enable mouse tracking (button events)
-        "\x1b[?1003h", // enable all mouse motion
+        "\x1b[?1000h", // enable mouse (button press/release)
+        "\x1b[?1002h", // enable mouse drag tracking
         "\x1b[?1006h", // SGR mouse mode
         "\x1b[?2004h", // enable bracketed paste
         "\x1b[?25l",   // hide cursor
@@ -265,13 +264,15 @@ impl App {
         "\x1b[?1007h",    // re-enable alternate scroll mode
         "\x1b[?2004l",    // disable bracketed paste
         "\x1b[?1006l",    // disable SGR mouse mode
-        "\x1b[?1003l",    // disable all mouse motion
-        "\x1b[?1002l",    // disable mouse tracking
+        "\x1b[?1002l",    // disable mouse drag tracking
         "\x1b[?1000l",    // disable mouse
         "\x1b[0 q",       // restore default cursor shape
         "\x1b]112\x1b\\", // restore default cursor color
         "\x1b[?25h",      // show cursor
+        "\x1b[0m",        // reset SGR attributes
         "\x1b[?1049l",    // leave alternate screen
+        "\x1b[2J",        // clear main screen (some terminals leave artifacts)
+        "\x1b[H",         // cursor to top-left
     );
 
     fn enter_terminal(term: &mut termina::PlatformTerminal) -> anyhow::Result<()> {

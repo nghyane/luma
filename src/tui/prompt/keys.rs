@@ -93,6 +93,11 @@ impl super::PromptState {
                 self.buf.kill_before();
                 PromptAction::Redraw
             }
+            KeyCode::Char('w') if ctrl => {
+                self.buf.kill_word_before();
+                self.comp.dropdown_idx = 0;
+                PromptAction::Redraw
+            }
             KeyCode::Escape => {
                 if self.buf.is_command() || self.buf.line_count() > 1 {
                     self.buf.clear();
@@ -106,6 +111,25 @@ impl super::PromptState {
                 self.comp.dropdown_idx = 0;
                 PromptAction::Redraw
             }
+            // Ctrl+H on legacy Windows consoles = Backspace (ASCII 0x08).
+            KeyCode::Char('h') if ctrl => {
+                self.buf.backspace();
+                self.comp.dropdown_idx = 0;
+                PromptAction::Redraw
+            }
+            KeyCode::Delete => {
+                self.buf.delete_forward();
+                self.comp.dropdown_idx = 0;
+                PromptAction::Redraw
+            }
+            KeyCode::Home => {
+                self.buf.home();
+                PromptAction::Redraw
+            }
+            KeyCode::End => {
+                self.buf.end();
+                PromptAction::Redraw
+            }
             KeyCode::Up => self.history_prev(),
             KeyCode::Down => self.history_next(),
             KeyCode::Left => {
@@ -116,7 +140,10 @@ impl super::PromptState {
                 self.buf.right();
                 PromptAction::Redraw
             }
-            KeyCode::Char(c) => {
+            // Plain printable char only. Reject any ctrl/alt-modified Char to
+            // avoid legacy control codes (Ctrl+H/I/J/M) or Alt-prefixed keys
+            // being inserted literally — common on Windows consoles.
+            KeyCode::Char(c) if !ctrl && !alt && c != '\0' => {
                 self.buf.insert(c);
                 self.comp.dropdown_idx = 0;
                 if c == '@' {

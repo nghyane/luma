@@ -10,6 +10,12 @@ use termina::event::{MouseButton, MouseEvent, MouseEventKind};
 
 impl super::App {
     pub(super) fn on_mouse(&mut self, ev: MouseEvent) -> Action {
+        // Ignore bare motion — we only care about drag (button-held motion),
+        // button press/release, and scroll. Keeps input queue responsive
+        // when terminal reports any-motion events.
+        if matches!(ev.kind, MouseEventKind::Moved) {
+            return Action::Continue;
+        }
         let r_row = self.regions.output.row;
         let r_height = self.regions.output.height;
         let r_width = self.regions.output.width;
