@@ -32,6 +32,10 @@ pub enum ContentBlock {
         content: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
+        /// Structured file-change artifact from write/edit/apply_patch tools.
+        /// Persisted so session resume can render diffs identically.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact: Option<FileChangeArtifact>,
     },
     /// Extended-thinking block with signature. Both fields must round-trip
     /// verbatim on subsequent turns or the Anthropic backend rejects the
@@ -195,6 +199,7 @@ impl Message {
                 tool_use_id: id.into(),
                 content: content.into(),
                 is_error: false,
+                artifact: None,
             }],
             origin: None,
         }
@@ -392,10 +397,12 @@ mod tests {
                 tool_use_id,
                 content,
                 is_error,
+                artifact,
             } => {
                 assert_eq!(tool_use_id, "tc_1");
                 assert_eq!(content, "result");
                 assert!(!is_error);
+                assert!(artifact.is_none());
             }
             _ => panic!("expected ToolResult"),
         }
