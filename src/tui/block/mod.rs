@@ -111,7 +111,17 @@ pub struct ToolBlock {
     pub summary: String,
     pub output: Vec<String>,
     pub artifact: Option<FileChangeArtifact>,
-    pub stream: Option<StreamBuf>,
+    /// Streamed tool-arg preview (e.g. `Write.content`, `apply_patch.patch`).
+    /// Fed by `tool_input` while the provider is still delivering the
+    /// tool's input JSON. Survives across `tool_start` so the content the
+    /// user already saw is never wiped.
+    ///
+    /// Boxed so `ToolBlock` stays small; allocation happens only when the
+    /// tool is actively streaming.
+    pub arg_preview: Option<Box<StreamBuf>>,
+    /// Streamed tool output (stdout/stderr) during execution. Created at
+    /// `tool_start` and consumed into `output` by `tool_output`.
+    pub stream: Option<Box<StreamBuf>>,
     pub is_done: bool,
     pub end_summary: String,
     pub is_expanded: bool,
@@ -125,7 +135,8 @@ impl ToolBlock {
             summary: summary.to_owned(),
             output: Vec::new(),
             artifact: None,
-            stream: Some(StreamBuf::new()),
+            arg_preview: Some(Box::new(StreamBuf::new())),
+            stream: None,
             is_done: false,
             end_summary: String::new(),
             is_expanded: false,
@@ -139,6 +150,7 @@ impl ToolBlock {
             summary: summary.to_owned(),
             output: Vec::new(),
             artifact: None,
+            arg_preview: None,
             stream: None,
             is_done: true,
             end_summary: String::new(),

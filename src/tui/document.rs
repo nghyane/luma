@@ -222,28 +222,33 @@ impl Document {
     /// Announce that a tool is about to execute with resolved arguments.
     /// Called by the agent turn loop once the provider's tool call is
     /// complete. Upgrades the summary of any existing pending block and
-    /// resets its stream buffer so subsequent [`Self::tool_output`] chunks
-    /// accumulate into the output phase cleanly.
+    /// initializes the output-phase stream buffer. Does **not** touch
+    /// `arg_preview` — the streamed arg content must remain visible.
     pub fn tool_start(&mut self, name: &str, summary: &str) {
         if let Some(tb) = self.find_active_tool_mut(name) {
             tb.summary = summary.to_owned();
-            tb.stream = Some(StreamBuf::new());
+            tb.stream = Some(Box::new(StreamBuf::new()));
             return;
         }
         self.commit_last();
-        let block = Block::Tool(ToolBlock::streaming(name, summary));
+        let mut block = ToolBlock::streaming(name, summary);
+        // No prior `tool_selected` — this is a non-streamable tool (no arg
+        // preview, but needs an output stream).
+        block.arg_preview = None;
+        block.stream = Some(Box::new(StreamBuf::new()));
+        let block = Block::Tool(block);
         self.auto_gap(&block);
         self.blocks.push(block);
     }
 
     /// Feed streamed argument characters into the active tool block's
-    /// stream buffer. Called while the provider is still delivering the
-    /// tool's input JSON.
+    /// arg preview buffer. Called while the provider is still delivering
+    /// the tool's input JSON.
     pub fn tool_input(&mut self, name: &str, chunk: &str) {
         if let Some(tb) = self.find_active_tool_mut(name)
-            && let Some(stream) = &mut tb.stream
+            && let Some(preview) = &mut tb.arg_preview
         {
-            stream.feed(chunk);
+            preview.feed(chunk);
         }
     }
 
@@ -282,6 +287,7 @@ impl Document {
             if tb.artifact.is_some() {
                 tb.output.clear();
             }
+            tb.arg_preview = None;
             tb.stream = None;
         }
     }
@@ -584,21 +590,25 @@ mod tests {
         let tb = active_tool(&doc, "Write").unwrap();
         assert!(!tb.is_done);
         assert!(tb.summary.is_empty());
-        assert!(tb.stream.as_ref().is_some_and(|s| s.is_empty()));
+        assert!(tb.arg_preview.as_ref().is_some_and(|s| s.is_empty()));
+        assert!(tb.stream.is_none());
 
         doc.tool_input("Write", "line one\n");
         doc.tool_input("Write", "line two\n");
         doc.tool_input("Write", "parti");
         let tb = active_tool(&doc, "Write").unwrap();
-        let stream = tb.stream.as_ref().unwrap();
-        assert_eq!(stream.committed, vec!["line one", "line two"]);
-        assert_eq!(stream.partial(), "parti");
+        let preview = tb.arg_preview.as_ref().unwrap();
+        assert_eq!(preview.committed, vec!["line one", "line two"]);
+        assert_eq!(preview.partial(), "parti");
 
-        // Orchestrator resolves the call and starts execution.
+        // Orchestrator resolves the call and starts execution. arg_preview
+        // survives (user keeps seeing content); stream is freshly created
+        // for output phase.
         doc.tool_start("Write", "/tmp/foo.txt");
         let tb = active_tool(&doc, "Write").unwrap();
         assert_eq!(tb.summary, "/tmp/foo.txt");
-        // Stream reset so output can accumulate cleanly.
+        let preview = tb.arg_preview.as_ref().expect("preview preserved");
+        assert_eq!(preview.committed, vec!["line one", "line two"]);
         assert!(tb.stream.as_ref().is_some_and(|s| s.is_empty()));
 
         doc.tool_artifact(
@@ -631,6 +641,9 @@ mod tests {
         assert!(tb.is_done);
         assert!(tb.artifact.is_some());
         assert_eq!(tb.end_summary, "Created /tmp/foo.txt");
+        // Both buffers released on tool_end.
+        assert!(tb.arg_preview.is_none());
+        assert!(tb.stream.is_none());
     }
 
     #[test]
@@ -690,6 +703,34 @@ mod tests {
             })
             .unwrap();
         assert!(tb.output.is_empty());
+    }
+
+    /// Regression: tool_start must not wipe arg_preview. Previously it
+    /// reset `stream` after the provider had already streamed the full
+    /// Write/apply_patch content into it, causing the content to appear
+    /// as a single block only at tool_end.
+    #[test]
+    fn tool_start_preserves_streamed_arg_preview() {
+        let mut doc = Document::new();
+        doc.tool_selected("Write");
+        doc.tool_input("Write", "fn main() {\n");
+        doc.tool_input("Write", "    println!(\"hi\");\n");
+        doc.tool_input("Write", "partial");
+
+        // tool_start fires once the provider finishes the tool_use block.
+        doc.tool_start("Write", "src/main.rs");
+
+        let tb = active_tool(&doc, "Write").unwrap();
+        let preview = tb.arg_preview.as_ref().expect("arg_preview survives");
+        let seen: String = preview
+            .committed
+            .iter()
+            .cloned()
+            .chain(std::iter::once(preview.partial().to_owned()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(seen.contains("fn main()"), "lost streamed content: {seen}");
+        assert!(seen.contains("partial"), "lost partial: {seen}");
     }
 
     #[test]

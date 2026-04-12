@@ -163,7 +163,9 @@ fn render_pending(tb: &ToolBlock, w: usize, spinner_frame: usize) -> Vec<Line> {
     let spinner = icon::SPINNER[spinner_frame % icon::SPINNER.len()];
     let char_w = crate::tui::text::display_width(spinner);
     let pad = icon::SPINNER_WIDTH.saturating_sub(char_w);
-    let has_content = !tb.output.is_empty() || tb.stream.as_ref().is_some_and(|s| !s.is_empty());
+    let has_content = !tb.output.is_empty()
+        || tb.stream.as_ref().is_some_and(|s| !s.is_empty())
+        || tb.arg_preview.as_ref().is_some_and(|s| !s.is_empty());
 
     let mut h = smallvec![Span::new(
         format!("{spinner}{}", " ".repeat(pad)),
@@ -193,7 +195,12 @@ fn render_pending_write(tb: &ToolBlock, result: &mut Vec<Line>) {
     for t in &tb.output {
         result.push(diff_line_lang(t, lang));
     }
-    if let Some(stream) = &tb.stream {
+    // Arg preview (streamed input) takes precedence — it carries the
+    // content the user is watching get written. Output-phase stream only
+    // matters for tools whose `ToolOutput` carries progress (not common
+    // for Write/Edit/apply_patch).
+    let active = tb.arg_preview.as_ref().or(tb.stream.as_ref());
+    if let Some(stream) = active {
         let total = stream.committed.len();
         if total > 0 {
             for line in &stream.committed[total.saturating_sub(TOOL_PREVIEW_LINES)..] {

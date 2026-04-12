@@ -126,10 +126,10 @@ fn tool_write_no_output_uses_inline() {
 
 #[test]
 fn tool_streaming_write_shows_content() {
-    let mut stream = StreamBuf::new();
-    stream.feed("  1 + fn main() {\n");
-    stream.feed("  2 +     println!(\"hi\");\n");
-    stream.feed("partial line");
+    let mut arg_preview = StreamBuf::new();
+    arg_preview.feed("  1 + fn main() {\n");
+    arg_preview.feed("  2 +     println!(\"hi\");\n");
+    arg_preview.feed("partial line");
     let tb = ToolBlock {
         name: "Write".into(),
         summary: "src/main.rs".into(),
@@ -138,7 +138,8 @@ fn tool_streaming_write_shows_content() {
             "  2 +     println!(\"hi\");".into(),
         ],
         artifact: None,
-        stream: Some(stream),
+        arg_preview: Some(Box::new(arg_preview)),
+        stream: None,
         is_done: false,
         end_summary: String::new(),
         is_expanded: false,
