@@ -10,12 +10,13 @@
 //! * [`thinking_capabilities`] — pure `(gateway, model_id)` → caps lookup
 //!   used by the TUI before any credential is resolved.
 
-use crate::config::auth::{AuthVendor, Credential};
+use crate::config::auth::{AuthKind, AuthVendor, Credential};
 use crate::core::provider::{Provider, ThinkingCapabilities};
 use crate::core::types::ThinkingLevel;
 use crate::provider::protocol::anthropic::AnthropicRuntime;
 use crate::provider::protocol::openai_chat::OpenAIChatRuntime;
 use crate::provider::protocol::openai_responses::OpenAIResponsesRuntime;
+use crate::provider::quirks::QuirkSet;
 
 /// Identifier for a transport gateway. One variant per distinct base URL
 /// plus auth surface.
@@ -45,6 +46,26 @@ impl GatewayId {
             Self::Anthropic => AuthVendor::Anthropic,
             Self::Codex | Self::OpenAI => AuthVendor::OpenAI,
         }
+    }
+}
+
+/// Quirks that apply to a `(gateway, auth_kind)` combination.
+///
+/// Anthropic OAuth (Claude Code) gets the full Claude Code surface:
+/// cache breakpoint, adaptive thinking, OAuth system rewrite, beta
+/// header, identity headers. Anthropic ApiKey skips OAuth-specific ones.
+/// OpenAI paths (Codex / direct) have no Anthropic quirks today.
+fn quirks_for(gateway: GatewayId, auth: AuthKind) -> QuirkSet {
+    match (gateway, auth) {
+        (GatewayId::Anthropic, AuthKind::OAuthBearer) => {
+            QuirkSet::CACHE_BREAKPOINT
+                | QuirkSet::ADAPTIVE_THINKING
+                | QuirkSet::OAUTH_SYSTEM_REWRITE
+                | QuirkSet::ANTHROPIC_BETAS
+                | QuirkSet::CLAUDE_IDENTITY
+        }
+        (GatewayId::Anthropic, _) => QuirkSet::CACHE_BREAKPOINT | QuirkSet::ADAPTIVE_THINKING,
+        (GatewayId::Codex, _) | (GatewayId::OpenAI, _) => QuirkSet::EMPTY,
     }
 }
 
@@ -110,12 +131,16 @@ pub fn build_provider(
     thinking: ThinkingLevel,
 ) -> Box<dyn Provider> {
     let mut provider: Box<dyn Provider> = match binding.gateway {
-        GatewayId::Anthropic => Box::new(AnthropicRuntime::new(
-            &binding.model_id,
-            &credential.token,
-            credential.auth_kind(),
-            &credential.label,
-        )),
+        GatewayId::Anthropic => {
+            let kind = credential.auth_kind();
+            Box::new(AnthropicRuntime::new(
+                &binding.model_id,
+                &credential.token,
+                kind,
+                quirks_for(GatewayId::Anthropic, kind),
+                &credential.label,
+            ))
+        }
         GatewayId::Codex => Box::new(OpenAIResponsesRuntime::new(
             &binding.model_id,
             &credential.token,

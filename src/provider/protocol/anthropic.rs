@@ -13,6 +13,7 @@ use crate::core::provider::{
 use crate::core::types::{ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage};
 use crate::event::Event;
 use crate::provider::json_stream::{JsonStringExtractor, streamable_arg_for};
+use crate::provider::quirks::QuirkSet;
 use crate::provider::quirks::adaptive_thinking::{
     build_thinking_config, is_adaptive_thinking_model,
 };
@@ -41,20 +42,29 @@ pub struct AnthropicRuntime {
     base_url: String,
     api_key: String,
     auth_kind: AuthKind,
+    quirks: QuirkSet,
     thinking: ThinkingLevel,
     account_label: String,
 }
 
 impl AnthropicRuntime {
-    /// Create from a credential token and its wire-level auth kind.
+    /// Create from a credential token, its wire-level auth kind, and the
+    /// set of quirks the gateway + auth combination needs applied.
     /// `account_label` is the pool entry name used for rate-limit / usage accounting.
-    pub fn new(model: &str, api_key: &str, auth_kind: AuthKind, account_label: &str) -> Self {
+    pub fn new(
+        model: &str,
+        api_key: &str,
+        auth_kind: AuthKind,
+        quirks: QuirkSet,
+        account_label: &str,
+    ) -> Self {
         Self {
             max_tokens: DEFAULT_MAX_TOKENS,
             model: model.to_owned(),
             base_url: BASE_URL.to_owned(),
             api_key: api_key.to_owned(),
             auth_kind,
+            quirks,
             thinking: ThinkingLevel::Off,
             account_label: account_label.to_owned(),
         }
@@ -82,7 +92,9 @@ impl AnthropicRuntime {
             api_tools.push(st.clone());
         }
 
-        apply_cache_breakpoint(&mut api_messages);
+        if self.quirks.contains(QuirkSet::CACHE_BREAKPOINT) {
+            apply_cache_breakpoint(&mut api_messages);
+        }
 
         let mut body = serde_json::json!({
             "model": self.model,
@@ -91,8 +103,9 @@ impl AnthropicRuntime {
             "stream": true,
         });
 
-        if let Some((thinking, output_config)) =
-            build_thinking_config(&self.model, self.thinking, effective_max_tokens)
+        if self.quirks.contains(QuirkSet::ADAPTIVE_THINKING)
+            && let Some((thinking, output_config)) =
+                build_thinking_config(&self.model, self.thinking, effective_max_tokens)
         {
             body["thinking"] = thinking;
             if let Some(output_config) = output_config {
@@ -100,7 +113,7 @@ impl AnthropicRuntime {
             }
         }
 
-        if matches!(self.auth_kind, AuthKind::OAuthBearer) {
+        if self.quirks.contains(QuirkSet::OAUTH_SYSTEM_REWRITE) {
             let first_user_text = messages
                 .iter()
                 .find(|m| m.role == Role::User)
@@ -208,9 +221,11 @@ impl Provider for AnthropicRuntime {
                 (auth_key, auth_header),
                 ("anthropic-version", "2023-06-01".into()),
             ];
-            if matches!(self.auth_kind, AuthKind::OAuthBearer) {
+            if self.quirks.contains(QuirkSet::ANTHROPIC_BETAS) {
                 let betas = build_betas(&self.model);
                 header_vec.push(("anthropic-beta", betas));
+            }
+            if self.quirks.contains(QuirkSet::CLAUDE_IDENTITY) {
                 header_vec.push(("x-app", "cli".into()));
                 header_vec.push(("User-Agent", user_agent));
                 header_vec.push(("X-Claude-Code-Session-Id", session_id));
@@ -789,6 +804,7 @@ mod tests {
             "claude-sonnet-4-6",
             "key",
             crate::config::auth::AuthKind::ApiKey,
+            crate::provider::quirks::QuirkSet::EMPTY,
             "acc",
         );
         let labels: Vec<_> = provider
@@ -806,6 +822,7 @@ mod tests {
             "claude-sonnet-4-5",
             "key",
             crate::config::auth::AuthKind::ApiKey,
+            crate::provider::quirks::QuirkSet::EMPTY,
             "acc",
         );
         let labels: Vec<_> = provider
