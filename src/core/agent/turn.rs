@@ -116,34 +116,9 @@ fn build_provider(
     auth: &crate::config::auth::Credential,
     session_id: &str,
 ) -> Box<dyn Provider> {
-    use crate::provider::claude::ClaudeProvider;
-    use crate::provider::codex::CodexProvider;
-    use crate::provider::openai::OpenAIProvider;
-
-    match config.source.as_str() {
-        "anthropic" => {
-            let mut p =
-                ClaudeProvider::new(&config.model_id, &auth.token, auth.is_oauth, &auth.label);
-            p.set_thinking(p.thinking_capabilities().coerce(config.thinking));
-            Box::new(p)
-        }
-        "codex" => {
-            let mut p = CodexProvider::new(
-                &config.model_id,
-                &auth.token,
-                auth.account_id.clone(),
-                session_id,
-                &auth.label,
-            );
-            p.set_thinking(p.thinking_capabilities().coerce(config.thinking));
-            Box::new(p)
-        }
-        _ => {
-            let mut p = OpenAIProvider::new(&config.model_id, &auth.token, &auth.label);
-            p.set_thinking(p.thinking_capabilities().coerce(config.thinking));
-            Box::new(p)
-        }
-    }
+    let reg = crate::provider::binding::BindingRegistry::builtin();
+    let binding = reg.resolve(&config.source, &config.model_id);
+    reg.build(&binding, auth, session_id, config.thinking)
 }
 
 /// Whether an error is a transient stream failure worth retrying.
