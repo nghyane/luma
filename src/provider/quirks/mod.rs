@@ -8,3 +8,4 @@
 
 pub mod cache_breakpoint;
 pub mod claude_identity;
+pub mod oauth_system_rewrite;
