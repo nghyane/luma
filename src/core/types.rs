@@ -33,9 +33,14 @@ pub enum ContentBlock {
     /// hand (see `provider::protocol::anthropic`, `openai_chat`,
     /// `codex::build_input`) and must drop `evidence_id` on the way out
     /// since it has no meaning to the model.
+    ///
+    /// `content` is either plain text (majority) or a sequence of
+    /// structured items (multimodal output from image-aware tools).
+    /// Shape matches Anthropic `tool_result.content` and OpenAI Responses
+    /// `function_call_output.output` byte-for-byte via serde `untagged`.
     ToolResult {
         tool_use_id: String,
-        content: String,
+        content: ToolResultBody,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -52,6 +57,79 @@ pub enum ContentBlock {
     /// Opaque thinking block redacted by the backend's safety layer.
     /// Must still be echoed back on later turns.
     RedactedThinking { data: String },
+}
+
+/// Body of a [`ContentBlock::ToolResult`].
+///
+/// Either plain text (majority of tools) or a sequence of structured items
+/// (multimodal output from image-aware tools such as `Read` on a PNG).
+///
+/// Serde `untagged` keeps the wire shape native — on the JSON side it is
+/// either `"content": "..."` or `"content": [...]`, matching Anthropic
+/// `tool_result.content` and OpenAI Responses `function_call_output.output`
+/// byte-for-byte without an extra tag layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ToolResultBody {
+    Text(String),
+    Items(Vec<ToolResultItem>),
+}
+
+/// Content item valid inside a tool result. Deliberately a subset of the
+/// message-level `ContentBlock` — only types the model can consume as
+/// tool output across Anthropic Messages and OpenAI Responses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolResultItem {
+    Text {
+        text: String,
+    },
+    /// Image attachment. `id` resolves to base64 at send time via the
+    /// provider's `ImageResolver`, same mechanism as `ContentBlock::Image`.
+    Image {
+        media_type: String,
+        id: String,
+    },
+}
+
+impl From<String> for ToolResultBody {
+    fn from(s: String) -> Self {
+        Self::Text(s)
+    }
+}
+
+impl From<&str> for ToolResultBody {
+    fn from(s: &str) -> Self {
+        Self::Text(s.to_owned())
+    }
+}
+
+impl ToolResultBody {
+    /// Flatten to plain text. Used by UI preview, evidence sizing, and
+    /// the OpenAI Chat fallback. Image items drop out; callers see only
+    /// the textual portion.
+    pub fn as_text(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Items(items) => {
+                let mut out = String::new();
+                for item in items {
+                    if let ToolResultItem::Text { text } = item {
+                        if !out.is_empty() && !text.is_empty() {
+                            out.push('\n');
+                        }
+                        out.push_str(text);
+                    }
+                }
+                out
+            }
+        }
+    }
+
+    /// Whether the body contains any image items.
+    pub fn has_images(&self) -> bool {
+        matches!(self, Self::Items(items) if items.iter().any(|i| matches!(i, ToolResultItem::Image { .. })))
+    }
 }
 
 /// A chat message in the conversation history.
@@ -187,7 +265,7 @@ impl Message {
     ///
     /// Tool results always ride on user messages in the Anthropic wire
     /// format; `Role::Tool` is gone from the unified schema.
-    pub fn tool_result(id: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn tool_result(id: impl Into<String>, content: impl Into<ToolResultBody>) -> Self {
         Self {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
@@ -394,7 +472,7 @@ mod tests {
                 evidence_id,
             } => {
                 assert_eq!(tool_use_id, "tc_1");
-                assert_eq!(content, "result");
+                assert_eq!(content.as_text(), "result");
                 assert!(!is_error);
                 assert!(evidence_id.is_none());
             }
@@ -506,5 +584,94 @@ mod tests {
             origin: None,
         };
         assert!(msg.has_visible_content());
+    }
+
+    #[test]
+    fn tool_result_body_text_serializes_as_string() {
+        let body = ToolResultBody::Text("hello".into());
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json, serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn tool_result_body_items_serializes_as_array() {
+        let body = ToolResultBody::Items(vec![
+            ToolResultItem::Text {
+                text: "Image:".into(),
+            },
+            ToolResultItem::Image {
+                media_type: "image/png".into(),
+                id: "abc".into(),
+            },
+        ]);
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!([
+                {"type": "text", "text": "Image:"},
+                {"type": "image", "media_type": "image/png", "id": "abc"}
+            ])
+        );
+    }
+
+    #[test]
+    fn tool_result_body_deserializes_untagged_string() {
+        let body: ToolResultBody = serde_json::from_str("\"hello\"").unwrap();
+        assert!(matches!(body, ToolResultBody::Text(s) if s == "hello"));
+    }
+
+    #[test]
+    fn tool_result_body_deserializes_untagged_array() {
+        let body: ToolResultBody =
+            serde_json::from_str(r#"[{"type":"text","text":"hi"}]"#).unwrap();
+        assert!(matches!(body, ToolResultBody::Items(_)));
+    }
+
+    #[test]
+    fn tool_result_legacy_string_content_roundtrip() {
+        // Old session files persisted `"content": "some text"` — the
+        // untagged `ToolResultBody::Text` variant MUST read them back.
+        let legacy = r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"tc_1","content":"legacy"}]}"#;
+        let msg: Message = serde_json::from_str(legacy).unwrap();
+        match &msg.content[0] {
+            ContentBlock::ToolResult { content, .. } => {
+                assert!(matches!(content, ToolResultBody::Text(s) if s == "legacy"));
+            }
+            _ => panic!("expected ToolResult"),
+        }
+    }
+
+    #[test]
+    fn tool_result_body_as_text_flattens_items() {
+        let body = ToolResultBody::Items(vec![
+            ToolResultItem::Text {
+                text: "line1".into(),
+            },
+            ToolResultItem::Image {
+                media_type: "image/png".into(),
+                id: "abc".into(),
+            },
+            ToolResultItem::Text {
+                text: "line2".into(),
+            },
+        ]);
+        assert_eq!(body.as_text(), "line1\nline2");
+    }
+
+    #[test]
+    fn tool_result_body_has_images_detects_image_item() {
+        let text = ToolResultBody::Text("no images".into());
+        assert!(!text.has_images());
+
+        let items_no_img = ToolResultBody::Items(vec![ToolResultItem::Text {
+            text: "t".into(),
+        }]);
+        assert!(!items_no_img.has_images());
+
+        let with_img = ToolResultBody::Items(vec![ToolResultItem::Image {
+            media_type: "image/png".into(),
+            id: "x".into(),
+        }]);
+        assert!(with_img.has_images());
     }
 }

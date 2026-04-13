@@ -19,6 +19,11 @@ pub struct ModelEntry {
     pub context_window: Option<u64>,
     #[serde(default)]
     pub max_output_tokens: Option<u64>,
+    /// Capability flags. Currently recognizes `"vision"`. Default empty
+    /// = text-only, so catalog entries without an explicit annotation
+    /// err on the safe side (tools fall back to metadata text).
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 /// Agent mode.
@@ -227,6 +232,7 @@ async fn scan_anthropic() -> Result<Vec<ModelEntry>> {
                         source: "anthropic".into(),
                         context_window: None,
                         max_output_tokens: None,
+                        capabilities: Vec::new(),
                     })
                 })
                 .collect()
@@ -264,6 +270,7 @@ async fn scan_codex() -> Result<Vec<ModelEntry>> {
                         source: "codex".into(),
                         context_window: m["context_window"].as_u64(),
                         max_output_tokens: m["max_output_tokens"].as_u64(),
+                        capabilities: Vec::new(),
                     })
                 })
                 .collect()
@@ -302,6 +309,7 @@ mod tests {
             source: "codex".into(),
             context_window: None,
             max_output_tokens: Some(123),
+            capabilities: Vec::new(),
         }]);
         let model = &models[0];
         assert_eq!(model.display_name.as_deref(), Some("GPT-5.4"));

@@ -42,6 +42,7 @@ impl Tool for WriteTool {
         args: serde_json::Value,
         output_tx: mpsc::Sender<String>,
         _cancel: CancellationToken,
+        _caps: crate::core::tool::ModelCaps,
     ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -63,7 +64,7 @@ impl Tool for WriteTool {
             // Skip write if content unchanged
             if old == content {
                 return Ok(ToolExecution {
-                    result: format!("{} is unchanged", path.display()),
+                    result: (format!("{} is unchanged", path.display())).into(),
                     artifact: Some(FileChangeArtifact {
                         files: vec![FileArtifact {
                             path: path.display().to_string(),
@@ -96,7 +97,7 @@ impl Tool for WriteTool {
             };
 
             Ok(ToolExecution {
-                result,
+                result: result.into(),
                 artifact: Some(FileChangeArtifact {
                     files: vec![FileArtifact {
                         path: path.display().to_string(),
@@ -130,15 +131,11 @@ mod tests {
         let (tx, _rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(
-                serde_json::json!({"path": file.to_str().unwrap(), "content": "hello"}),
-                tx,
-                cancel,
-            )
+            .execute(serde_json::json!({"path": file.to_str().unwrap(), "content": "hello"}), tx, cancel, Default::default())
             .await
             .unwrap();
 
-        assert!(result.result.contains("Created"));
+        assert!(result.result.as_text().contains("Created"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello");
     }
 
@@ -150,11 +147,7 @@ mod tests {
         let tool = WriteTool;
         let (tx, _rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
-        tool.execute(
-            serde_json::json!({"path": file.to_str().unwrap(), "content": "deep"}),
-            tx,
-            cancel,
-        )
+        tool.execute(serde_json::json!({"path": file.to_str().unwrap(), "content": "deep"}), tx, cancel, Default::default())
         .await
         .unwrap();
 

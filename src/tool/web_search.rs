@@ -70,6 +70,7 @@ impl Tool for WebSearchTool {
         args: serde_json::Value,
         output_tx: mpsc::Sender<String>,
         cancel: CancellationToken,
+        _caps: crate::core::tool::ModelCaps,
     ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let query = args["query"].as_str().unwrap_or("");
@@ -116,7 +117,7 @@ impl Tool for WebSearchTool {
                 output.push('\n');
             }
             Ok(ToolExecution {
-                result: output,
+                result: output.into(),
                 artifact: None,
             })
         })

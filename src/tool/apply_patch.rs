@@ -57,6 +57,7 @@ impl Tool for ApplyPatchTool {
         args: serde_json::Value,
         output_tx: mpsc::Sender<String>,
         _cancel: CancellationToken,
+        _caps: crate::core::tool::ModelCaps,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let patch_text = args["patch"].as_str().unwrap_or("");
@@ -69,7 +70,7 @@ impl Tool for ApplyPatchTool {
                     error: None,
                     status: ToolStatus::Done,
                 }),
-                result,
+                result: result.into(),
             })
         })
     }
@@ -292,8 +293,8 @@ mod tests {
         let args = serde_json::json!({"patch": patch});
         let (tx, _rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
-        let result = tool.execute(args, tx, cancel).await.unwrap();
-        assert!(result.result.contains("Success"));
+        let result = tool.execute(args, tx, cancel, Default::default()).await.unwrap();
+        assert!(result.result.as_text().contains("Success"));
         let content = std::fs::read_to_string(&file).unwrap();
         assert!(content.contains("println!(\"new\")"));
     }
@@ -315,8 +316,8 @@ mod tests {
         let args = serde_json::json!({"patch": patch});
         let (tx, _rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
-        let result = tool.execute(args, tx, cancel).await.unwrap();
-        assert!(result.result.contains("Success"));
+        let result = tool.execute(args, tx, cancel, Default::default()).await.unwrap();
+        assert!(result.result.as_text().contains("Success"));
         assert!(new_file.exists());
         let lib_content = std::fs::read_to_string(&existing).unwrap();
         assert!(lib_content.contains("use std::fs;"));

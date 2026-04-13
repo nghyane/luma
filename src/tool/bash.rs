@@ -87,6 +87,7 @@ impl Tool for BashTool {
         args: serde_json::Value,
         output_tx: mpsc::Sender<String>,
         cancel: CancellationToken,
+        _caps: crate::core::tool::ModelCaps,
     ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
@@ -131,11 +132,11 @@ impl Tool for BashTool {
             }
 
             Ok(ToolExecution {
-                result: if result_str.trim().is_empty() {
+                result: (if result_str.trim().is_empty() {
                     "(no output)".into()
                 } else {
                     result_str
-                },
+                }).into(),
                 artifact: None,
             })
         })
@@ -253,11 +254,10 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(serde_json::json!({"command": "echo hello"}), tx, cancel)
-            .await
+            .execute(serde_json::json!({"command": "echo hello"}), tx, cancel, Default::default()).await
             .unwrap();
 
-        assert!(result.result.contains("hello"));
+        assert!(result.result.as_text().contains("hello"));
         let chunk = rx.try_recv();
         assert!(chunk.is_ok());
     }
@@ -268,11 +268,10 @@ mod tests {
         let (tx, _rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(serde_json::json!({"command": "exit 42"}), tx, cancel)
-            .await
+            .execute(serde_json::json!({"command": "exit 42"}), tx, cancel, Default::default()).await
             .unwrap();
 
-        assert!(result.result.contains("[exit code: 42]"));
+        assert!(result.result.as_text().contains("[exit code: 42]"));
     }
 
     #[tokio::test]
@@ -281,8 +280,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(serde_json::json!({"command": "rm -rf /"}), tx, cancel)
-            .await;
+            .execute(serde_json::json!({"command": "rm -rf /"}), tx, cancel, Default::default()).await;
 
         assert!(result.is_err());
     }
@@ -301,11 +299,10 @@ mod tests {
         });
 
         let result = tool
-            .execute(serde_json::json!({"command": "sleep 10"}), tx, cancel)
-            .await
+            .execute(serde_json::json!({"command": "sleep 10"}), tx, cancel, Default::default()).await
             .unwrap();
 
-        assert!(result.result.contains("[aborted]"));
+        assert!(result.result.as_text().contains("[aborted]"));
     }
 
     #[tokio::test]
@@ -322,15 +319,11 @@ mod tests {
         });
 
         let result = tool
-            .execute(
-                serde_json::json!({"command": "ping -n 100 127.0.0.1"}),
-                tx,
-                cancel,
-            )
+            .execute(serde_json::json!({"command": "ping -n 100 127.0.0.1"}), tx, cancel, Default::default())
             .await
             .unwrap();
 
-        assert!(result.result.contains("[aborted]"));
+        assert!(result.result.as_text().contains("[aborted]"));
     }
 
     #[test]

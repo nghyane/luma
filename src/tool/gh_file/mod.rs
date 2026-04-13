@@ -62,6 +62,7 @@ impl Tool for GhFileTool {
         args: serde_json::Value,
         _output_tx: mpsc::Sender<String>,
         cancel: CancellationToken,
+        _caps: crate::core::tool::ModelCaps,
     ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let repo = normalize_repo(args["repo"].as_str().unwrap_or(""));
@@ -113,7 +114,7 @@ impl Tool for GhFileTool {
                     result.push_str(&e);
                 }
                 Ok(ToolExecution {
-                    result,
+                    result: result.into(),
                     artifact: None,
                 })
             } else {
@@ -126,7 +127,7 @@ impl Tool for GhFileTool {
                     }
                 }
                 Ok(ToolExecution {
-                    result,
+                    result: result.into(),
                     artifact: None,
                 })
             }

@@ -1,7 +1,9 @@
 /// Codex provider — OpenAI Responses API at chatgpt.com/backend-api/codex.
 use crate::config::auth::{CODEX_ORIGINATOR, codex_user_agent, resolve_installation_id};
 use crate::core::provider::{Provider, StopReason, StreamEvent, StreamRequest, StreamResponse};
-use crate::core::types::{ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage};
+use crate::core::types::{
+    ContentBlock, Message, Role, ThinkingLevel, ToolResultBody, ToolResultItem, ToolSchema, Usage,
+};
 use crate::event::Event;
 use crate::event_bus::Sender as EventSender;
 use crate::provider::json_stream::{JsonStringExtractor, streamable_arg_for};
@@ -58,9 +60,10 @@ impl OpenAIResponsesRuntime {
         messages: &[crate::core::types::Message],
         tools: &[crate::core::types::ToolSchema],
         server_tools: &[serde_json::Value],
+        resolve_image: &crate::core::provider::ImageResolver,
     ) -> serde_json::Value {
         let system = extract_system(messages);
-        let input = build_input(messages);
+        let input = build_input(messages, resolve_image);
         let mut api_tools = to_api_tools(tools);
         for st in server_tools {
             api_tools.push(st.clone());
@@ -140,13 +143,13 @@ impl Provider for OpenAIResponsesRuntime {
                 messages,
                 tools,
                 server_tools,
-                resolve_image: _,
+                resolve_image,
                 // Ignored — see `supports_max_tokens_override` impl above.
                 max_tokens_override: _,
                 tx,
                 cancel,
             } = req;
-            let body = self.build_request_body(messages, tools, server_tools);
+            let body = self.build_request_body(messages, tools, server_tools, resolve_image);
 
             // Headers match `codex-rs/core/src/client.rs` +
             // `codex-rs/login/src/auth/default_client.rs::default_headers`.
@@ -551,7 +554,50 @@ fn extract_system(messages: &[Message]) -> String {
         .join("\n\n")
 }
 
-fn build_input(messages: &[Message]) -> Vec<serde_json::Value> {
+/// Render `function_call_output.output` for Codex Responses wire.
+///
+/// `ToolResultBody::Text` → JSON string (matches Codex's text-only path
+/// byte-for-byte — this is the common case and must not drift).
+/// `ToolResultBody::Items` → array of `input_text` / `input_image` entries
+/// so image-producing tools (e.g. `Read` on a PNG) attach real bytes as
+/// data URLs. Unresolvable image ids (resolver returned empty string) are
+/// dropped so the request body stays valid — the text portion still lands,
+/// model sees a stripped result rather than a 400.
+fn tool_result_output_responses(
+    body: &ToolResultBody,
+    resolve: &crate::core::provider::ImageResolver,
+) -> serde_json::Value {
+    match body {
+        ToolResultBody::Text(s) => serde_json::json!(s),
+        ToolResultBody::Items(items) => {
+            let entries: Vec<serde_json::Value> = items
+                .iter()
+                .filter_map(|item| match item {
+                    ToolResultItem::Text { text } if !text.is_empty() => {
+                        Some(serde_json::json!({"type": "input_text", "text": text}))
+                    }
+                    ToolResultItem::Text { .. } => None,
+                    ToolResultItem::Image { media_type, id } => {
+                        let data = resolve(id);
+                        if data.is_empty() {
+                            return None;
+                        }
+                        Some(serde_json::json!({
+                            "type": "input_image",
+                            "image_url": format!("data:{media_type};base64,{data}"),
+                        }))
+                    }
+                })
+                .collect();
+            serde_json::json!(entries)
+        }
+    }
+}
+
+fn build_input(
+    messages: &[Message],
+    resolve: &crate::core::provider::ImageResolver,
+) -> Vec<serde_json::Value> {
     let mut input = Vec::new();
     for msg in messages {
         if msg.role == Role::System {
@@ -561,6 +607,12 @@ fn build_input(messages: &[Message]) -> Vec<serde_json::Value> {
             Role::User => {
                 // Tool results on a user message become `function_call_output`
                 // items — one per result block, unnested.
+                //
+                // `ToolResultBody::Text` serializes as `output: "string"` to
+                // match Codex wire for the common text-only case.
+                // `ToolResultBody::Items` serializes as an array with
+                // `input_text` / `input_image` entries so image-aware tools
+                // (e.g. Read on a PNG) attach real bytes.
                 let mut had_result = false;
                 for block in &msg.content {
                     if let ContentBlock::ToolResult {
@@ -569,10 +621,11 @@ fn build_input(messages: &[Message]) -> Vec<serde_json::Value> {
                         ..
                     } = block
                     {
+                        let output = tool_result_output_responses(content, resolve);
                         input.push(serde_json::json!({
                             "type": "function_call_output",
                             "call_id": tool_use_id,
-                            "output": content,
+                            "output": output,
                         }));
                         had_result = true;
                     }
@@ -836,7 +889,7 @@ mod tests {
             origin: None,
         }];
 
-        let input = build_input(&messages);
+        let input = build_input(&messages, &|_| String::new());
 
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["type"], "function_call_output");
@@ -852,5 +905,93 @@ mod tests {
             "evidence_id string leaked anywhere in payload: {}",
             input[0]
         );
+    }
+
+    #[test]
+    fn tool_result_text_body_serializes_as_plain_string_output() {
+        // Text-only tool results MUST ride as a plain string to match
+        // Codex's byte-for-byte wire for the common case. Regression
+        // guard against accidentally wrapping in a content-items array.
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: "ok".into(),
+                is_error: false,
+                evidence_id: None,
+            }],
+            origin: None,
+        }];
+        let input = build_input(&messages, &|_| String::new());
+        assert_eq!(input[0]["output"], serde_json::json!("ok"));
+    }
+
+    #[test]
+    fn tool_result_items_body_serializes_as_input_image_array() {
+        use crate::core::types::{ToolResultBody, ToolResultItem};
+
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: ToolResultBody::Items(vec![
+                    ToolResultItem::Text {
+                        text: "PNG 512x512".into(),
+                    },
+                    ToolResultItem::Image {
+                        media_type: "image/png".into(),
+                        id: "img_abc".into(),
+                    },
+                ]),
+                is_error: false,
+                evidence_id: None,
+            }],
+            origin: None,
+        }];
+        let input = build_input(&messages, &|id| {
+            assert_eq!(id, "img_abc");
+            "BASE64DATA".into()
+        });
+        let output = input[0]["output"].as_array().unwrap();
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0]["type"], "input_text");
+        assert_eq!(output[0]["text"], "PNG 512x512");
+        assert_eq!(output[1]["type"], "input_image");
+        // Responses API consumes images as data URLs in the `image_url`
+        // field — no separate base64/media_type split like Anthropic.
+        assert_eq!(
+            output[1]["image_url"],
+            "data:image/png;base64,BASE64DATA"
+        );
+    }
+
+    #[test]
+    fn tool_result_items_body_drops_unresolvable_images() {
+        use crate::core::types::{ToolResultBody, ToolResultItem};
+
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: ToolResultBody::Items(vec![
+                    ToolResultItem::Text {
+                        text: "txt".into(),
+                    },
+                    ToolResultItem::Image {
+                        media_type: "image/png".into(),
+                        id: "missing".into(),
+                    },
+                ]),
+                is_error: false,
+                evidence_id: None,
+            }],
+            origin: None,
+        }];
+        // Resolver returns empty for unknown id — image item dropped,
+        // text item preserved. Single-entry output array.
+        let input = build_input(&messages, &|_| String::new());
+        let output = input[0]["output"].as_array().unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0]["type"], "input_text");
     }
 }

@@ -62,6 +62,7 @@ impl Tool for GrepTool {
         args: serde_json::Value,
         output_tx: mpsc::Sender<String>,
         _cancel: CancellationToken,
+        _caps: crate::core::tool::ModelCaps,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let pattern_str = args["pattern"].as_str().unwrap_or("");
@@ -168,7 +169,7 @@ impl Tool for GrepTool {
 
             if lines.is_empty() {
                 return Ok(ToolExecution {
-                    result: "No matches found".to_owned(),
+                    result: ("No matches found".to_owned()).into(),
                     artifact: None,
                 });
             }
@@ -179,7 +180,7 @@ impl Tool for GrepTool {
                 result.push_str("\n(Results truncated. Use a more specific pattern or path.)");
             }
             Ok(ToolExecution {
-                result,
+                result: result.into(),
                 artifact: None,
             })
         })
@@ -207,10 +208,10 @@ mod tests {
         let tool = GrepTool;
         let args = serde_json::json!({"pattern": "fn main", "path": root.to_str().unwrap()});
         let result = tool
-            .execute(args, tx, CancellationToken::new())
+            .execute(args, tx, CancellationToken::new(), Default::default())
             .await
             .unwrap();
-        assert!(result.result.contains("fn main"));
+        assert!(result.result.as_text().contains("fn main"));
     }
 
     #[tokio::test]
@@ -222,10 +223,10 @@ mod tests {
         let args =
             serde_json::json!({"pattern": "ZZZZZ_NONEXISTENT", "path": dir.to_str().unwrap()});
         let result = tool
-            .execute(args, tx, CancellationToken::new())
+            .execute(args, tx, CancellationToken::new(), Default::default())
             .await
             .unwrap();
-        assert_eq!(result.result, "No matches found");
+        assert_eq!(result.result.as_text(), "No matches found");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -240,11 +241,11 @@ mod tests {
         let tool = GrepTool;
         let args = serde_json::json!({"pattern": "pub struct", "include": "*.rs", "path": root.to_str().unwrap()});
         let result = tool
-            .execute(args, tx, CancellationToken::new())
+            .execute(args, tx, CancellationToken::new(), Default::default())
             .await
             .unwrap();
-        assert!(result.result.contains("pub struct"));
-        assert!(!result.result.contains("main.py"));
+        assert!(result.result.as_text().contains("pub struct"));
+        assert!(!result.result.as_text().contains("main.py"));
     }
 
     #[tokio::test]
@@ -260,16 +261,16 @@ mod tests {
         let tool = GrepTool;
         let args = serde_json::json!({"pattern": "findme", "path": root.to_str().unwrap()});
         let result = tool
-            .execute(args, tx, CancellationToken::new())
+            .execute(args, tx, CancellationToken::new(), Default::default())
             .await
             .unwrap();
 
         assert!(
-            result.result.contains("keep.txt"),
+            result.result.as_text().contains("keep.txt"),
             "should include keep.txt: {result:?}"
         );
         assert!(
-            !result.result.contains("ignored.txt"),
+            !result.result.as_text().contains("ignored.txt"),
             "should exclude ignored.txt: {result:?}"
         );
     }

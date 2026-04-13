@@ -61,6 +61,7 @@ impl Tool for GhLsTool {
         args: serde_json::Value,
         _output_tx: mpsc::Sender<String>,
         cancel: CancellationToken,
+        _caps: crate::core::tool::ModelCaps,
     ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let repo = normalize_repo(args["repo"].as_str().unwrap_or(""));
@@ -109,7 +110,7 @@ impl Tool for GhLsTool {
                     .collect(),
                 None => {
                     return Ok(ToolExecution {
-                        result: format!("Could not resolve tree for {repo}@{git_ref}"),
+                        result: (format!("Could not resolve tree for {repo}@{git_ref}")).into(),
                         artifact: None,
                     });
                 }
@@ -117,7 +118,7 @@ impl Tool for GhLsTool {
 
             if entries.is_empty() {
                 return Ok(ToolExecution {
-                    result: format!("No entries found for {repo}@{git_ref}"),
+                    result: (format!("No entries found for {repo}@{git_ref}")).into(),
                     artifact: None,
                 });
             }
@@ -133,7 +134,7 @@ impl Tool for GhLsTool {
             }
 
             Ok(ToolExecution {
-                result,
+                result: result.into(),
                 artifact: None,
             })
         })

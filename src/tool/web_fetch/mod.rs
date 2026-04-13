@@ -59,6 +59,7 @@ impl Tool for WebFetchTool {
         args: serde_json::Value,
         _output_tx: mpsc::Sender<String>,
         cancel: CancellationToken,
+        _caps: crate::core::tool::ModelCaps,
     ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let url = args["url"].as_str().unwrap_or("");
@@ -100,12 +101,12 @@ impl Tool for WebFetchTool {
 
             if !objective.is_empty() {
                 Ok(ToolExecution {
-                    result: ranking::rank_excerpts(&markdown, objective),
+                    result: (ranking::rank_excerpts(&markdown, objective)).into(),
                     artifact: None,
                 })
             } else {
                 Ok(ToolExecution {
-                    result: clip_text(&markdown, MAX_OUTPUT_BYTES),
+                    result: (clip_text(&markdown, MAX_OUTPUT_BYTES)).into(),
                     artifact: None,
                 })
             }

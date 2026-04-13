@@ -6,7 +6,9 @@
 /// `src/utils/fingerprint.ts`, `src/constants/system.ts`, `src/utils/betas.ts`
 /// in `yasasbanukaofficial/claude-code`.
 use crate::core::provider::{Provider, StopReason, StreamEvent, StreamRequest, StreamResponse};
-use crate::core::types::{ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage};
+use crate::core::types::{
+    ContentBlock, Message, Role, ThinkingLevel, ToolResultBody, ToolResultItem, ToolSchema, Usage,
+};
 use crate::event::Event;
 use crate::provider::json_stream::{JsonStringExtractor, streamable_arg_for};
 use crate::provider::quirks::QuirkSet;
@@ -627,6 +629,48 @@ fn extract_system(messages: &[Message]) -> String {
         .join("\n\n")
 }
 
+/// Render `tool_result.content` for Anthropic wire.
+///
+/// `ToolResultBody::Text` → plain string (backward-compat shape used by all
+/// pre-multimodal tools). `ToolResultBody::Items` → array of typed blocks so
+/// the model can see images alongside text. Unresolvable image ids are
+/// dropped so the request body stays valid — tool text portion is still
+/// delivered, model sees a stripped-down result rather than a 400.
+fn tool_result_content_anthropic(
+    body: &ToolResultBody,
+    resolve: &crate::core::provider::ImageResolver,
+) -> serde_json::Value {
+    match body {
+        ToolResultBody::Text(s) => serde_json::json!(s),
+        ToolResultBody::Items(items) => {
+            let blocks: Vec<serde_json::Value> = items
+                .iter()
+                .filter_map(|item| match item {
+                    ToolResultItem::Text { text } if !text.is_empty() => {
+                        Some(serde_json::json!({"type": "text", "text": text}))
+                    }
+                    ToolResultItem::Text { .. } => None,
+                    ToolResultItem::Image { media_type, id } => {
+                        let data = resolve(id);
+                        if data.is_empty() {
+                            return None;
+                        }
+                        Some(serde_json::json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": data,
+                            }
+                        }))
+                    }
+                })
+                .collect();
+            serde_json::json!(blocks)
+        }
+    }
+}
+
 /// Convert a single `ContentBlock` to Anthropic wire JSON.
 ///
 /// Order-preserving: every call produces exactly one wire block so the
@@ -667,10 +711,11 @@ fn content_block_to_api(
             is_error,
             ..
         } => {
+            let content_json = tool_result_content_anthropic(content, resolve);
             let mut v = serde_json::json!({
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
-                "content": content,
+                "content": content_json,
             });
             if *is_error {
                 v["is_error"] = serde_json::json!(true);
@@ -1016,5 +1061,94 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn tool_result_text_body_serializes_as_string_content() {
+        use crate::core::types::{ContentBlock, Message, ToolResultBody};
+
+        let msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tc_1".into(),
+                content: ToolResultBody::Text("ok".into()),
+                is_error: false,
+                evidence_id: None,
+            }],
+            origin: None,
+        };
+        let api = to_api_messages(&[msg], &|_| String::new());
+        let tr = &api[0]["content"][0];
+        assert_eq!(tr["type"], "tool_result");
+        // Text body MUST round-trip to a JSON string (not an array),
+        // preserving wire compatibility with pre-multimodal callers.
+        assert_eq!(tr["content"], serde_json::json!("ok"));
+    }
+
+    #[test]
+    fn tool_result_items_body_serializes_as_block_array_with_image() {
+        use crate::core::types::{ContentBlock, Message, ToolResultBody, ToolResultItem};
+
+        let msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tc_1".into(),
+                content: ToolResultBody::Items(vec![
+                    ToolResultItem::Text {
+                        text: "PNG 512x512".into(),
+                    },
+                    ToolResultItem::Image {
+                        media_type: "image/png".into(),
+                        id: "img_abc".into(),
+                    },
+                ]),
+                is_error: false,
+                evidence_id: None,
+            }],
+            origin: None,
+        };
+        let api = to_api_messages(&[msg], &|id| {
+            assert_eq!(id, "img_abc");
+            "BASE64DATA".into()
+        });
+        let content = api[0]["content"][0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "PNG 512x512");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "BASE64DATA");
+    }
+
+    #[test]
+    fn tool_result_items_body_drops_unresolvable_images() {
+        // Resolver returns empty string for unknown ids. Serializing an
+        // unresolved image would produce `"data": ""` and a 400 response;
+        // the adapter MUST skip it so the text portion still lands.
+        use crate::core::types::{ContentBlock, Message, ToolResultBody, ToolResultItem};
+
+        let msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tc_1".into(),
+                content: ToolResultBody::Items(vec![
+                    ToolResultItem::Text {
+                        text: "txt".into(),
+                    },
+                    ToolResultItem::Image {
+                        media_type: "image/png".into(),
+                        id: "missing".into(),
+                    },
+                ]),
+                is_error: false,
+                evidence_id: None,
+            }],
+            origin: None,
+        };
+        let api = to_api_messages(&[msg], &|_| String::new());
+        let content = api[0]["content"][0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
     }
 }

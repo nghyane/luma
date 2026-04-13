@@ -3,7 +3,7 @@ use super::AgentConfig;
 use crate::core::provider::{Provider, StopReason, StreamResponse};
 use crate::core::registry::Registry;
 use crate::core::session::Session;
-use crate::core::types::{ContentBlock, Message, Role};
+use crate::core::types::{ContentBlock, Message, Role, ToolResultBody};
 use crate::event::Event;
 use crate::event_bus::Sender as EventSender;
 use crate::provider::protocol::anthropic::ESCALATED_MAX_TOKENS;
@@ -52,10 +52,14 @@ pub async fn run_chat_turn(
     let gateway = GatewayId::from_source(&config.source);
     let provider_kind = gateway.auth_vendor();
 
+    let caps = crate::core::tool::ModelCaps {
+        vision: config.capabilities.iter().any(|c| c == "vision"),
+    };
+
     let mut auth_cred = auth::resolve(provider_kind).await?;
     for attempt in 0..MAX_AUTH_RETRIES {
         let provider = build_provider(config, &auth_cred, &session.id);
-        let outcome = run_turn(session, &*provider, registry, tx, cancel.clone()).await;
+        let outcome = run_turn(session, &*provider, registry, tx, cancel.clone(), caps).await;
         let err = match outcome {
             Ok(()) => return Ok(()),
             Err(e) => e,
@@ -223,6 +227,7 @@ async fn run_turn(
     registry: &Registry,
     tx: &EventSender,
     cancel: tokio_util::sync::CancellationToken,
+    caps: crate::core::tool::ModelCaps,
 ) -> Result<()> {
     let schemas = registry.schemas();
     let server_schemas = provider.server_tool_schemas(registry.server_capabilities());
@@ -312,7 +317,7 @@ async fn run_turn(
 
         let tool_results = crate::core::session::scope_current_session(
             &session.id,
-            execute_tools(&tool_uses, registry, tx, cancel.clone()),
+            execute_tools(&tool_uses, registry, tx, cancel.clone(), caps),
         )
         .await;
         let aborted = cancel.is_cancelled();
@@ -328,14 +333,14 @@ async fn run_turn(
         // `EVIDENCE_PROMOTION_THRESHOLD` spill to the evidence store and
         // keep only a summary inline.
         let mut result_blocks: Vec<ContentBlock> = Vec::with_capacity(tool_results.len());
-        for (id, text) in tool_results {
+        for (id, body) in tool_results {
             let (content, evidence_id) = maybe_promote_to_evidence(
                 session,
                 &evidence_dir,
                 turn_index,
                 &tool_uses,
                 &id,
-                text,
+                body,
             );
             result_blocks.push(ContentBlock::ToolResult {
                 tool_use_id: id,
@@ -372,15 +377,55 @@ fn maybe_promote_to_evidence(
     turn_index: usize,
     tool_uses: &[ToolUseRef],
     tool_use_id: &str,
-    mut text: String,
-) -> (String, Option<String>) {
+    body: ToolResultBody,
+) -> (ToolResultBody, Option<String>) {
     use crate::core::evidence::{EVIDENCE_PROMOTION_THRESHOLD, classify};
+    use crate::core::types::ToolResultItem;
+
+    // Evidence promotion operates on the textual portion only. Image
+    // items (and any other non-text item types) ride through unchanged:
+    // they have independent token costs and cannot be summarized into
+    // a text preview sensibly.
+    let (mut text, images): (String, Vec<ToolResultItem>) = match body {
+        ToolResultBody::Text(s) => (s, Vec::new()),
+        ToolResultBody::Items(items) => {
+            let mut text = String::new();
+            let mut imgs = Vec::new();
+            for item in items {
+                match item {
+                    ToolResultItem::Text { text: t } => {
+                        if !text.is_empty() && !t.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(&t);
+                    }
+                    img @ ToolResultItem::Image { .. } => imgs.push(img),
+                }
+            }
+            (text, imgs)
+        }
+    };
+
+    // Rebuild a body from `(text, images)` — single spot so every early
+    // return keeps image items attached.
+    let rebuild = |text: String, images: Vec<ToolResultItem>| -> ToolResultBody {
+        if images.is_empty() {
+            ToolResultBody::Text(text)
+        } else {
+            let mut items = Vec::with_capacity(1 + images.len());
+            if !text.is_empty() {
+                items.push(ToolResultItem::Text { text });
+            }
+            items.extend(images);
+            ToolResultBody::Items(items)
+        }
+    };
 
     if text.len() < EVIDENCE_PROMOTION_THRESHOLD {
-        return (text, None);
+        return (rebuild(text, images), None);
     }
     let Some(tu) = tool_uses.iter().find(|t| t.id == tool_use_id) else {
-        return (text, None);
+        return (rebuild(text, images), None);
     };
     // A Read call pulling an `artifact://…` URI is the agent re-reading
     // a resource that already lives outside the transcript (either a
@@ -402,10 +447,10 @@ fn maybe_promote_to_evidence(
             .and_then(|v| v.as_str())
             .is_some_and(|p| p.starts_with("artifact://"))
     {
-        return (text, None);
+        return (rebuild(text, images), None);
     }
     let Some(draft) = classify(&tu.name, &tu.input, &text) else {
-        return (text, None);
+        return (rebuild(text, images), None);
     };
     let summary_template = draft.summary.clone();
     let preview = draft.preview.clone();
@@ -414,19 +459,13 @@ fn maybe_promote_to_evidence(
         .ingest(evidence_dir, turn_index, tool_use_id, draft)
     {
         Ok(id) => {
-            // Splice: summary line (advertises the artifact URI) + a
-            // head-of-blob preview so the model has enough context to
-            // reason *this* turn, then a concrete pull hint for the
-            // tail. Written once at promote time and never mutated —
-            // the prompt-cache prefix stays stable across every
-            // subsequent turn (cache_read >> cache_write on latency).
             let header = summary_template.replace("{id}", &id);
             let content = if preview.is_empty() {
                 header
             } else {
                 format!("{header}\n\n{preview}\n\n[… pull artifact://ev/{id} for the rest]")
             };
-            (content, Some(id))
+            (rebuild(content, images), Some(id))
         }
         Err(e) => {
             crate::dbg_log!("evidence ingest failed for {tool_use_id}: {e}");
@@ -434,7 +473,7 @@ fn maybe_promote_to_evidence(
                 text.truncate(SAFETY_FALLBACK_CAP);
                 text.push_str(crate::core::tool::TRUNCATION_MARKER);
             }
-            (text, None)
+            (rebuild(text, images), None)
         }
     }
 }
@@ -475,10 +514,11 @@ async fn execute_one(
     registry: &Registry,
     tx: &EventSender,
     cancel: tokio_util::sync::CancellationToken,
-) -> (String, String) {
+    caps: crate::core::tool::ModelCaps,
+) -> (String, ToolResultBody) {
     let skill = skill_name_from_read(&tu.name, &tu.input);
 
-    let result = match registry.get(&tu.name) {
+    let result: ToolResultBody = match registry.get(&tu.name) {
         Some(tool) => {
             if let Some(name) = &skill {
                 let _ = tx.send(Event::SkillStart(name.clone())).await;
@@ -506,7 +546,7 @@ async fn execute_one(
                 }
             });
 
-            let res = tool.execute(tu.input.clone(), output_tx, cancel).await;
+            let res = tool.execute(tu.input.clone(), output_tx, cancel, caps).await;
             fwd_handle.await.ok();
 
             match res {
@@ -519,7 +559,7 @@ async fn execute_one(
                             })
                             .await;
                     }
-                    let end_summary = format_tool_result(&tu.name, &exec.result);
+                    let end_summary = format_tool_result(&tu.name, &exec.result.as_text());
                     let _ = tx
                         .send(Event::ToolEnd {
                             name: tu.name.clone(),
@@ -544,11 +584,11 @@ async fn execute_one(
                             .send(Event::SkillEnd(format!("failed to load {name}")))
                             .await;
                     }
-                    msg
+                    msg.into()
                 }
             }
         }
-        None => format!("Unknown tool: {}", tu.name),
+        None => format!("Unknown tool: {}", tu.name).into(),
     };
     (tu.id.clone(), result)
 }
@@ -559,13 +599,14 @@ pub async fn execute_tools(
     registry: &Registry,
     tx: &EventSender,
     cancel: tokio_util::sync::CancellationToken,
-) -> Vec<(String, String)> {
+    caps: crate::core::tool::ModelCaps,
+) -> Vec<(String, ToolResultBody)> {
     if tool_uses.len() == 1 {
-        return vec![execute_one(&tool_uses[0], registry, tx, cancel).await];
+        return vec![execute_one(&tool_uses[0], registry, tx, cancel, caps).await];
     }
     let futures: Vec<_> = tool_uses
         .iter()
-        .map(|tu| execute_one(tu, registry, tx, cancel.clone()))
+        .map(|tu| execute_one(tu, registry, tx, cancel.clone(), caps))
         .collect();
     futures::future::join_all(futures).await
 }
@@ -602,6 +643,7 @@ mod tests {
             _args: serde_json::Value,
             _output_tx: mpsc::Sender<String>,
             _cancel: CancellationToken,
+            _caps: crate::core::tool::ModelCaps,
         ) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<ToolExecution>> + Send + '_>>
         {
             let counter = self.counter;
@@ -609,7 +651,7 @@ mod tests {
                 counter.fetch_add(1, Ordering::SeqCst);
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 Ok(ToolExecution {
-                    result: format!("done_{}", counter.load(Ordering::SeqCst)),
+                    result: format!("done_{}", counter.load(Ordering::SeqCst)).into(),
                     artifact: None,
                 })
             })
@@ -641,7 +683,7 @@ mod tests {
         ];
 
         let start = std::time::Instant::now();
-        let results = execute_tools(&calls, &registry, &tx, cancel).await;
+        let results = execute_tools(&calls, &registry, &tx, cancel, Default::default()).await;
         let elapsed = start.elapsed();
 
         assert_eq!(results.len(), 2);
@@ -689,7 +731,7 @@ mod tests {
             "tc_1",
             "short".into(),
         );
-        assert_eq!(content, "short");
+        assert_eq!(content.as_text(), "short");
         assert!(evidence_id.is_none());
         assert!(session.evidence.records.is_empty());
     }
@@ -711,20 +753,27 @@ mod tests {
         let line = "fn main() { println!(\"hello\"); }\n";
         let repeats = EVIDENCE_PROMOTION_THRESHOLD.div_ceil(line.len()) + 1;
         let big: String = line.repeat(repeats);
-        let (content, evidence_id) =
-            maybe_promote_to_evidence(&mut session, tmp.path(), 2, &tool_uses, "tc_1", big.clone());
+        let (content, evidence_id) = maybe_promote_to_evidence(
+            &mut session,
+            tmp.path(),
+            2,
+            &tool_uses,
+            "tc_1",
+            big.clone().into(),
+        );
         let id = evidence_id.expect("promoted");
+        let content_text = content.as_text();
         assert!(
-            content.len() < big.len(),
+            content_text.len() < big.len(),
             "inline content must be shorter than blob"
         );
-        assert!(content.contains("/tmp/big.rs"), "header preserved");
+        assert!(content_text.contains("/tmp/big.rs"), "header preserved");
         assert!(
-            content.contains(&format!("artifact://ev/{id}")),
+            content_text.contains(&format!("artifact://ev/{id}")),
             "pull URI advertised so the agent can fetch the tail"
         );
         assert!(
-            content.contains("fn main()"),
+            content_text.contains("fn main()"),
             "head preview is spliced so the model can reason this turn"
         );
         assert_eq!(session.evidence.records.len(), 1);
@@ -759,10 +808,10 @@ mod tests {
             3,
             &tool_uses,
             "tc_pull",
-            big.clone(),
+            big.clone().into(),
         );
         assert!(evidence_id.is_none(), "pull must not re-promote");
-        assert_eq!(content, big, "content must be returned verbatim");
+        assert_eq!(content.as_text(), big, "content must be returned verbatim");
         assert!(
             session.evidence.records.is_empty(),
             "no new evidence record from a pull"
@@ -787,9 +836,9 @@ mod tests {
             1,
             &tool_uses,
             "tc_skill",
-            big.clone(),
+            big.clone().into(),
         );
         assert!(evidence_id.is_none(), "skill pull must not promote");
-        assert_eq!(content, big);
+        assert_eq!(content.as_text(), big);
     }
 }

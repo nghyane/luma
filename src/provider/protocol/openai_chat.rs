@@ -362,6 +362,13 @@ fn to_api_messages(
             Role::User => {
                 // Tool results on user messages → one `{role:"tool"}` entry
                 // per block (OpenAI wire format — no nesting).
+                //
+                // OpenAI Chat Completions `role: "tool"` content is string-
+                // only; image items from multimodal tool output cannot ride
+                // here. Flatten via `as_text()` and append a note so the
+                // model can distinguish "no images" from "images omitted by
+                // gateway". Switch to Responses or Anthropic gateway to see
+                // the actual bytes.
                 let mut had_tool_result = false;
                 for block in &msg.content {
                     if let ContentBlock::ToolResult {
@@ -370,9 +377,19 @@ fn to_api_messages(
                         ..
                     } = block
                     {
+                        let text = if content.has_images() {
+                            format!(
+                                "{}\n\n[image attachment(s) omitted — OpenAI Chat \
+                                 Completions does not support images in tool results; \
+                                 switch to Anthropic or Responses gateway]",
+                                content.as_text()
+                            )
+                        } else {
+                            content.as_text()
+                        };
                         out.push(serde_json::json!({
                             "role": "tool",
-                            "content": content,
+                            "content": text,
                             "tool_call_id": tool_use_id,
                         }));
                         had_tool_result = true;
@@ -502,5 +519,66 @@ mod tests {
             "evidence_id string leaked anywhere in payload: {}",
             api[0]
         );
+    }
+
+    /// OpenAI Chat `role: "tool"` content is string-only — image items in
+    /// `ToolResultBody::Items` MUST flatten to text here. The adapter
+    /// appends a note so the model can tell "no images" from "images
+    /// dropped by gateway", and so the user knows to switch gateway to
+    /// see the actual bytes.
+    #[test]
+    fn tool_result_with_image_items_flattens_to_text_with_note() {
+        use crate::core::types::{ToolResultBody, ToolResultItem};
+
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: ToolResultBody::Items(vec![
+                    ToolResultItem::Text {
+                        text: "PNG 512x512".into(),
+                    },
+                    ToolResultItem::Image {
+                        media_type: "image/png".into(),
+                        id: "img_abc".into(),
+                    },
+                ]),
+                is_error: false,
+                evidence_id: None,
+            }],
+            origin: None,
+        }];
+
+        let api = to_api_messages(&messages, &|_| "IGNORED".into());
+
+        assert_eq!(api.len(), 1);
+        assert_eq!(api[0]["role"], "tool");
+        let content = api[0]["content"].as_str().unwrap();
+        assert!(content.contains("PNG 512x512"), "text kept: {content}");
+        assert!(
+            content.contains("image attachment") && content.contains("omitted"),
+            "note absent: {content}"
+        );
+        // Bytes/id MUST NOT leak into the text content.
+        assert!(!content.contains("img_abc"));
+        assert!(!content.contains("IGNORED"));
+    }
+
+    #[test]
+    fn tool_result_text_body_still_sends_plain_string() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: "hello".into(),
+                is_error: false,
+                evidence_id: None,
+            }],
+            origin: None,
+        }];
+        let api = to_api_messages(&messages, &|_| String::new());
+        assert_eq!(api[0]["content"].as_str(), Some("hello"));
+        // No "omitted" note for text-only results.
+        assert!(!api[0]["content"].as_str().unwrap().contains("omitted"));
     }
 }

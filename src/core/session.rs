@@ -207,6 +207,14 @@ where
     CURRENT_SESSION.scope(session_id.to_owned(), fut).await
 }
 
+/// Return the session id currently in scope, or `None` if called outside
+/// a `scope_current_session` frame. Tools that need session-scoped
+/// storage (e.g. saving an attached image to `sessions/{id}/images/`)
+/// MUST handle the `None` case and skip the operation.
+pub fn current_session_id() -> Option<String> {
+    CURRENT_SESSION.try_with(|s| s.clone()).ok()
+}
+
 /// Result of resolving a URI-style path to a filesystem location.
 ///
 /// Separate from a bare `PathBuf` because some resource types need
@@ -610,11 +618,10 @@ mod tests {
                             content,
                             ..
                         } => {
-                            let chars = content.chars().count();
+                            let text = content.as_text();
+                            let chars = text.chars().count();
                             tool_result_sizes.push(chars);
-                            if content.contains("[truncated]")
-                                || content.contains("middle truncated")
-                            {
+                            if text.contains("[truncated]") || text.contains("middle truncated") {
                                 already_truncated += 1;
                             }
                             if chars >= 32_000 {

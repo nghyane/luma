@@ -61,6 +61,7 @@ impl Tool for GhSearchTool {
         args: serde_json::Value,
         _output_tx: mpsc::Sender<String>,
         cancel: CancellationToken,
+        _caps: crate::core::tool::ModelCaps,
     ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let repo = normalize_repo(args["repo"].as_str().unwrap_or(""));
@@ -95,7 +96,7 @@ impl Tool for GhSearchTool {
 
             if items.is_empty() {
                 return Ok(ToolExecution {
-                    result: format!("No results for \"{query}\" in {repo}"),
+                    result: (format!("No results for \"{query}\" in {repo}")).into(),
                     artifact: None,
                 });
             }
@@ -108,7 +109,7 @@ impl Tool for GhSearchTool {
             }
 
             Ok(ToolExecution {
-                result,
+                result: result.into(),
                 artifact: None,
             })
         })

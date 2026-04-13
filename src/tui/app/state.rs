@@ -68,6 +68,11 @@ pub struct AgentHandle {
     /// pending changes are committed right before the next `Chat`
     /// instead of eagerly on every mode/model toggle.
     pub last_sent: Option<SentConfig>,
+    /// Timestamp of the most recent `paste_clipboard_image()` call.
+    /// Used to debounce duplicate triggers when a single user action
+    /// produces both a raw `Ctrl+V` keystroke and an empty bracketed
+    /// paste event (observed on iTerm2 and some macOS terminals).
+    pub last_clipboard_paste: Option<std::time::Instant>,
 }
 
 /// Snapshot of the fields the agent loop cares about. Compared against
@@ -92,6 +97,7 @@ impl AgentHandle {
             abort_countdown: 0,
             is_loading_session: false,
             last_sent: None,
+            last_clipboard_paste: None,
         }
     }
 }

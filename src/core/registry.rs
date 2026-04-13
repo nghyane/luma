@@ -92,6 +92,7 @@ mod tests {
             _args: serde_json::Value,
             _output_tx: mpsc::Sender<String>,
             _cancel: CancellationToken,
+            _caps: crate::core::tool::ModelCaps,
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = anyhow::Result<ToolExecution>> + Send + '_>,
         > {

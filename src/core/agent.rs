@@ -18,6 +18,10 @@ pub struct AgentConfig {
     pub source: String,
     pub system_prompt: String,
     pub thinking: ThinkingLevel,
+    /// Capability flags from the model catalog (e.g. `"vision"`). Passed
+    /// through to tool execution so tools can branch on what the model
+    /// can consume.
+    pub capabilities: Vec<String>,
 }
 
 /// Spawn the agent loop task. Returns a command sender.

@@ -81,6 +81,7 @@ impl Tool for MultiEditTool {
         args: serde_json::Value,
         output_tx: mpsc::Sender<String>,
         _cancel: CancellationToken,
+        _caps: crate::core::tool::ModelCaps,
     ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -162,7 +163,7 @@ impl Tool for MultiEditTool {
 
             if content == original {
                 return Ok(ToolExecution {
-                    result: format!("{} is unchanged", path.display()),
+                    result: (format!("{} is unchanged", path.display())).into(),
                     artifact: Some(FileChangeArtifact {
                         files: vec![FileArtifact {
                             path: path.display().to_string(),
@@ -188,14 +189,14 @@ impl Tool for MultiEditTool {
             let (adds, dels) = crate::tool::diff::diff_stats(&diff);
 
             Ok(ToolExecution {
-                result: format!(
+                result: (format!(
                     "Edited {} ({} edit{}, {} replacement{}, +{adds} -{dels})",
                     path.display(),
                     edits.len(),
                     if edits.len() > 1 { "s" } else { "" },
                     total_replacements,
                     if total_replacements > 1 { "s" } else { "" }
-                ),
+                )).into(),
                 artifact: Some(FileChangeArtifact {
                     files: vec![FileArtifact {
                         path: path.display().to_string(),
@@ -220,7 +221,7 @@ mod tests {
         let tool = MultiEditTool;
         let (tx, _rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
-        tool.execute(args, tx, cancel).await
+        tool.execute(args, tx, cancel, Default::default()).await
     }
 
     #[tokio::test]
@@ -240,7 +241,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(result.result.contains("3 edits"));
+        assert!(result.result.as_text().contains("3 edits"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "1 2 3");
     }
 
@@ -261,7 +262,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(result.result.contains("Edited"));
+        assert!(result.result.as_text().contains("Edited"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "gamma");
     }
 
@@ -317,7 +318,7 @@ mod tests {
         }))
         .await
         .unwrap();
-        assert!(ok.result.contains("3 replacement"));
+        assert!(ok.result.as_text().contains("3 replacement"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "y y y\n");
     }
 

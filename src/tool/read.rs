@@ -14,11 +14,21 @@ const MAX_LINE_LEN: usize = 2000;
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB — reject larger files without offset/limit
 
 /// Common binary file extensions — skip these entirely.
+/// Image extensions (png/jpg/jpeg/gif/webp/bmp/ico/avif) are handled by
+/// the image branch below, not rejected outright.
 const BINARY_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "avif", "mp3", "mp4", "wav", "ogg", "flac",
-    "avi", "mkv", "mov", "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "wasm", "pyc", "class", "o",
-    "so", "dylib", "dll", "exe", "ttf", "otf", "woff", "woff2", "eot", "sqlite", "db",
+    "mp3", "mp4", "wav", "ogg", "flac", "avi", "mkv", "mov", "zip", "tar", "gz", "bz2", "xz", "7z",
+    "rar", "wasm", "pyc", "class", "o", "so", "dylib", "dll", "exe", "ttf", "otf", "woff", "woff2",
+    "eot", "sqlite", "db",
 ];
+
+/// Image extensions this tool can attach to the model or describe as metadata.
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+
+/// Maximum size for image reads. Anthropic caps uploads at 5 MB; going
+/// larger triggers provider-side reject. Resize is deferred to a future
+/// RFC — for now the tool bails with guidance.
+const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
 
 /// Reads files with line numbers or lists directory contents.
 pub struct ReadTool;
@@ -63,6 +73,7 @@ impl Tool for ReadTool {
         args: serde_json::Value,
         _output_tx: mpsc::Sender<String>,
         _cancel: CancellationToken,
+        caps: crate::core::tool::ModelCaps,
     ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -109,9 +120,18 @@ impl Tool for ReadTool {
                     .collect();
                 entries.sort();
                 return Ok(ToolExecution {
-                    result: entries.join("\n"),
+                    result: (entries.join("\n")).into(),
                     artifact: None,
                 });
+            }
+
+            // Image branch — returns an image attachment (vision-capable
+            // model) or text metadata (text-only model). Sidesteps the
+            // BINARY_EXTENSIONS gate entirely.
+            if let Some(ext) = path.extension().and_then(|e| e.to_str())
+                && IMAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
+            {
+                return read_image(&path, ext, &meta, caps);
             }
 
             // Binary file check
@@ -199,7 +219,7 @@ impl Tool for ReadTool {
                     });
                 }
                 return Ok(ToolExecution {
-                    result: format!("(file has {total_lines} lines, offset {offset} is past end)"),
+                    result: (format!("(file has {total_lines} lines, offset {offset} is past end)")).into(),
                     artifact: None,
                 });
             }
@@ -222,7 +242,7 @@ impl Tool for ReadTool {
             }
 
             Ok(ToolExecution {
-                result,
+                result: result.into(),
                 artifact: None,
             })
         })
@@ -232,6 +252,107 @@ impl Tool for ReadTool {
 /// Public wrapper for edit tool "did you mean?" suggestions.
 pub fn suggest_similar_file(path: &std::path::Path) -> Option<String> {
     suggest_similar(path)
+}
+
+/// Read an image file into a `ToolExecution`.
+///
+/// Branches on `caps.vision`:
+/// - **Vision model**: save bytes into the session image store and return
+///   a `ToolResultBody::Items` with a short metadata `Text` item followed
+///   by an `Image` item referencing the saved id. The provider's
+///   `ImageResolver` pulls the bytes back as base64 at send time.
+/// - **Text-only model**: return metadata text only. The model sees file
+///   type/size/dimensions (when cheap to parse) and is explicitly told
+///   the visual content cannot be included, so it can describe to the
+///   user or fall back to OCR via Bash instead of hallucinating.
+///
+/// Oversize files bail with a clear message rather than silently
+/// truncating — a malformed/huge image would exceed provider limits and
+/// produce a 4xx far from the tool call site.
+fn read_image(
+    path: &std::path::Path,
+    ext: &str,
+    meta: &std::fs::Metadata,
+    caps: crate::core::tool::ModelCaps,
+) -> Result<ToolExecution> {
+    use crate::core::types::{ToolResultBody, ToolResultItem};
+
+    if meta.len() > MAX_IMAGE_BYTES {
+        bail!(
+            "Image too large ({:.1} MB, max {} MB). Resize or crop before reading.",
+            meta.len() as f64 / 1_048_576.0,
+            MAX_IMAGE_BYTES / 1_048_576,
+        );
+    }
+
+    let data = fs::read(path)?;
+    if data.is_empty() {
+        bail!("Image file is empty: {}", path.display());
+    }
+
+    let media_type = media_type_from_ext(ext);
+    let size_kb = data.len().div_ceil(1024);
+    let dims = parse_png_dimensions(&data);
+    let dim_txt = dims
+        .map(|(w, h)| format!("{w}×{h} "))
+        .unwrap_or_default();
+
+    if !caps.vision {
+        // Drop the bytes — no need to save to the session store when
+        // nothing will reference them. Metadata alone goes back.
+        let text = format!(
+            "{media_type} image: {dim_txt}{size_kb} KB. \
+             This model does not support image input — describe the contents \
+             to the user or use Bash/OCR tools for text extraction.",
+        );
+        return Ok(ToolExecution {
+            result: text.into(),
+            artifact: None,
+        });
+    }
+
+    let session_id = crate::core::session::current_session_id()
+        .ok_or_else(|| anyhow::anyhow!("no active session — image cannot be attached"))?;
+    let id = crate::core::session::save_image(&session_id, &data, ext);
+
+    let text = format!("{media_type}: {dim_txt}{size_kb} KB (attached)");
+    Ok(ToolExecution {
+        result: ToolResultBody::Items(vec![
+            ToolResultItem::Text { text },
+            ToolResultItem::Image {
+                media_type: media_type.to_owned(),
+                id,
+            },
+        ]),
+        artifact: None,
+    })
+}
+
+/// Map a file extension (lowercase or not) to the closest image media type
+/// the providers understand. Unknown falls back to `image/png` — safer
+/// than refusing, since all modern gateways treat PNG as lingua franca.
+fn media_type_from_ext(ext: &str) -> &'static str {
+    match ext.to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        _ => "image/png",
+    }
+}
+
+/// Parse width/height from PNG header (IHDR chunk at offset 16-23).
+/// Returns `None` for any other format — JPEG/WebP require walking
+/// markers/RIFF chunks, which isn't worth pulling in an image crate for
+/// a nice-to-have metadata field.
+fn parse_png_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    if !data.starts_with(&[0x89, b'P', b'N', b'G']) || data.len() < 24 {
+        return None;
+    }
+    let w = u32::from_be_bytes(data[16..20].try_into().ok()?);
+    let h = u32::from_be_bytes(data[20..24].try_into().ok()?);
+    Some((w, h))
 }
 
 /// Count the lines taken up by a leading `---…---` YAML frontmatter
@@ -341,16 +462,12 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(
-                serde_json::json!({"path": file.to_str().unwrap()}),
-                tx,
-                cancel,
-            )
+            .execute(serde_json::json!({"path": file.to_str().unwrap()}), tx, cancel, Default::default())
             .await
             .unwrap();
 
-        assert!(result.result.contains("1: line1"));
-        assert!(result.result.contains("3: line3"));
+        assert!(result.result.as_text().contains("1: line1"));
+        assert!(result.result.as_text().contains("3: line3"));
     }
 
     #[tokio::test]
@@ -367,16 +484,12 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(
-                serde_json::json!({"path": file.to_str().unwrap(), "limit": 10}),
-                tx,
-                cancel,
-            )
+            .execute(serde_json::json!({"path": file.to_str().unwrap(), "limit": 10}), tx, cancel, Default::default())
             .await
             .unwrap();
 
-        assert!(result.result.contains("hint: read 10 lines"));
-        assert!(result.result.contains("wider window"));
+        assert!(result.result.as_text().contains("hint: read 10 lines"));
+        assert!(result.result.as_text().contains("wider window"));
     }
 
     #[tokio::test]
@@ -390,15 +503,11 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(
-                serde_json::json!({"path": file.to_str().unwrap(), "limit": 200}),
-                tx,
-                cancel,
-            )
+            .execute(serde_json::json!({"path": file.to_str().unwrap(), "limit": 200}), tx, cancel, Default::default())
             .await
             .unwrap();
 
-        assert!(!result.result.contains("hint:"));
+        assert!(!result.result.as_text().contains("hint:"));
     }
 
     #[tokio::test]
@@ -411,16 +520,12 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(
-                serde_json::json!({"path": dir.path().to_str().unwrap()}),
-                tx,
-                cancel,
-            )
+            .execute(serde_json::json!({"path": dir.path().to_str().unwrap()}), tx, cancel, Default::default())
             .await
             .unwrap();
 
-        assert!(result.result.contains("a.txt"));
-        assert!(result.result.contains("sub/"));
+        assert!(result.result.as_text().contains("a.txt"));
+        assert!(result.result.as_text().contains("sub/"));
     }
 
     #[tokio::test]
@@ -436,24 +541,22 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(
-                serde_json::json!({"path": file.to_str().unwrap(), "offset": 50, "limit": 5}),
-                tx,
-                cancel,
-            )
+            .execute(serde_json::json!({"path": file.to_str().unwrap(), "offset": 50, "limit": 5}), tx, cancel, Default::default())
             .await
             .unwrap();
 
-        assert!(result.result.contains("50: line 50"));
-        assert!(result.result.contains("54: line 54"));
-        assert!(result.result.contains("100 lines total"));
+        assert!(result.result.as_text().contains("50: line 50"));
+        assert!(result.result.as_text().contains("54: line 54"));
+        assert!(result.result.as_text().contains("100 lines total"));
     }
 
     #[tokio::test]
     async fn read_binary_rejected() {
+        // Non-image binary extensions remain rejected (images now have their
+        // own capability-aware branch; see `read_image_without_vision_returns_metadata`).
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("image.png");
-        std::fs::write(&file, b"\x89PNG\r\n").unwrap();
+        let file = dir.path().join("libfoo.dylib");
+        std::fs::write(&file, b"\x7fELF").unwrap();
 
         let tool = ReadTool;
         let (tx, _rx) = mpsc::channel(1);
@@ -463,11 +566,76 @@ mod tests {
                 serde_json::json!({"path": file.to_str().unwrap()}),
                 tx,
                 cancel,
+                Default::default(),
             )
             .await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("binary"));
+    }
+
+    #[tokio::test]
+    async fn read_image_without_vision_returns_metadata_only() {
+        // Minimal valid PNG: 8-byte signature + IHDR with 1×1 dimensions.
+        // Dimensions live at bytes 16-23 (big-endian u32 each), so parser
+        // picks them up and the metadata string mentions "1×1".
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("tiny.png");
+        let mut png = Vec::new();
+        png.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+        png.extend_from_slice(&[0, 0, 0, 13]); // IHDR length
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1u32.to_be_bytes()); // width
+        png.extend_from_slice(&1u32.to_be_bytes()); // height
+        png.extend_from_slice(&[8, 6, 0, 0, 0]); // bit depth / color type / rest
+        std::fs::write(&file, &png).unwrap();
+
+        let tool = ReadTool;
+        let (tx, _rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let caps = crate::core::tool::ModelCaps { vision: false };
+        let exec = tool
+            .execute(
+                serde_json::json!({"path": file.to_str().unwrap()}),
+                tx,
+                cancel,
+                caps,
+            )
+            .await
+            .expect("image read succeeds even without vision");
+
+        let text = exec.result.as_text();
+        assert!(text.contains("image/png"), "media type reported: {text}");
+        assert!(text.contains("1×1"), "dimensions reported: {text}");
+        assert!(
+            text.contains("does not support image input"),
+            "caller learns why bytes are not attached: {text}"
+        );
+        assert!(!exec.result.has_images());
+    }
+
+    #[tokio::test]
+    async fn read_image_too_large_bails() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("big.png");
+        // 6 MB > 5 MB cap. Contents don't need to be a valid PNG — the
+        // size check runs before any parsing.
+        std::fs::write(&file, vec![0u8; 6 * 1024 * 1024]).unwrap();
+
+        let tool = ReadTool;
+        let (tx, _rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let result = tool
+            .execute(
+                serde_json::json!({"path": file.to_str().unwrap()}),
+                tx,
+                cancel,
+                Default::default(),
+            )
+            .await;
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("too large"), "msg: {err}");
     }
 
     #[tokio::test]
@@ -479,11 +647,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(
-                serde_json::json!({"path": dir.path().join("mian.rs").to_str().unwrap()}),
-                tx,
-                cancel,
-            )
+            .execute(serde_json::json!({"path": dir.path().join("mian.rs").to_str().unwrap()}), tx, cancel, Default::default())
             .await;
 
         assert!(result.is_err());
@@ -512,17 +676,44 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(
-                serde_json::json!({"path": file.to_str().unwrap(), "limit": 5}),
-                tx,
-                cancel,
-            )
+            .execute(serde_json::json!({"path": file.to_str().unwrap(), "limit": 5}), tx, cancel, Default::default())
             .await
             .unwrap();
 
         assert!(
-            result.result.contains("50 lines total"),
+            result.result.as_text().contains("50 lines total"),
             "should show total: {result:?}"
         );
+    }
+
+    #[test]
+    fn parse_png_dimensions_reads_ihdr() {
+        let mut png = Vec::new();
+        png.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+        png.extend_from_slice(&[0, 0, 0, 13]);
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1920u32.to_be_bytes());
+        png.extend_from_slice(&1080u32.to_be_bytes());
+        png.extend_from_slice(&[8, 6, 0, 0, 0]);
+        assert_eq!(parse_png_dimensions(&png), Some((1920, 1080)));
+    }
+
+    #[test]
+    fn parse_png_dimensions_rejects_non_png() {
+        assert_eq!(parse_png_dimensions(b"\xff\xd8jpeg..."), None);
+        assert_eq!(parse_png_dimensions(b"short"), None);
+    }
+
+    #[test]
+    fn media_type_from_ext_covers_known_extensions() {
+        assert_eq!(media_type_from_ext("png"), "image/png");
+        assert_eq!(media_type_from_ext("PNG"), "image/png");
+        assert_eq!(media_type_from_ext("jpg"), "image/jpeg");
+        assert_eq!(media_type_from_ext("jpeg"), "image/jpeg");
+        assert_eq!(media_type_from_ext("gif"), "image/gif");
+        assert_eq!(media_type_from_ext("webp"), "image/webp");
+        assert_eq!(media_type_from_ext("bmp"), "image/bmp");
+        // Unknown falls back to PNG — safe default, every gateway understands it.
+        assert_eq!(media_type_from_ext("xyz"), "image/png");
     }
 }

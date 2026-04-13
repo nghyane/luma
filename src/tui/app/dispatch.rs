@@ -356,10 +356,18 @@ impl super::App {
     }
 
     /// Handle bracketed paste — detect image path vs text.
+    ///
+    /// Empty paste = clipboard had non-text content (typically a raw image
+    /// from a screenshot). Trigger the same async clipboard read as Ctrl+V
+    /// so users on terminals that forward Cmd+V as bracketed paste (iTerm2,
+    /// Terminal.app) can paste screenshots without learning a new shortcut.
+    /// Throttle vs the most recent raw-key trigger so iTerm2-style
+    /// double-events do not spawn two reads.
     pub(super) fn on_paste(&mut self, text: String) -> Action {
         crate::dbg_log!("paste: {}B", text.len());
         if text.is_empty() {
-            return Action::Continue;
+            self.paste_clipboard_image();
+            return Action::Render;
         }
         if let Some(path) = extract_image_path(&text) {
             self.paste_image_file(&path);
@@ -383,14 +391,106 @@ fn extract_image_path(text: &str) -> Option<String> {
         .trim_matches('\'')
         .trim_matches('"')
         .trim_start_matches("file://");
-    let path = std::path::Path::new(cleaned);
+    let unescaped = unescape_pasted_path(cleaned);
+    let path = std::path::Path::new(&unescaped);
     let is_image = path
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|ext| IMAGE_EXTENSIONS.contains(&ext.to_lowercase().as_str()));
     if is_image && path.is_file() {
-        Some(cleaned.to_owned())
+        Some(unescaped)
     } else {
         None
+    }
+}
+
+/// Undo terminal / shell-style backslash escaping in pasted file paths.
+///
+/// Preview and Finder commonly paste paths as `/a/b/My\ File.png`. Treat a
+/// backslash as escaping the next character so spaces and other escaped bytes
+/// round-trip to the real filesystem path.
+fn unescape_pasted_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut chars = path.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            } else {
+                out.push(ch);
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn extract_image_path_rejects_multiline() {
+        assert!(extract_image_path("line1\nline2").is_none());
+    }
+
+    #[test]
+    fn extract_image_path_rejects_non_image_extension() {
+        assert!(extract_image_path("/etc/hosts").is_none());
+    }
+
+    #[test]
+    fn extract_image_path_rejects_nonexistent_file() {
+        assert!(extract_image_path("/tmp/nonexistent_xyz_123.png").is_none());
+    }
+
+    #[test]
+    fn extract_image_path_accepts_png() {
+        let mut tmp = tempfile::Builder::new()
+            .suffix(".png")
+            .tempfile()
+            .unwrap();
+        tmp.write_all(b"fake").unwrap();
+        let path = tmp.path().to_str().unwrap().to_owned();
+        assert_eq!(extract_image_path(&path).as_deref(), Some(path.as_str()));
+    }
+
+    #[test]
+    fn extract_image_path_strips_file_scheme_and_quotes() {
+        let mut tmp = tempfile::Builder::new()
+            .suffix(".jpg")
+            .tempfile()
+            .unwrap();
+        tmp.write_all(b"fake").unwrap();
+        let path = tmp.path().to_str().unwrap().to_owned();
+        let wrapped = format!("\"file://{path}\"");
+        assert_eq!(extract_image_path(&wrapped).as_deref(), Some(path.as_str()));
+    }
+
+    #[test]
+    fn extract_image_path_case_insensitive_extension() {
+        let mut tmp = tempfile::Builder::new()
+            .suffix(".PNG")
+            .tempfile()
+            .unwrap();
+        tmp.write_all(b"fake").unwrap();
+        let path = tmp.path().to_str().unwrap().to_owned();
+        assert_eq!(extract_image_path(&path).as_deref(), Some(path.as_str()));
+    }
+
+    #[test]
+    fn extract_image_path_unescapes_backslash_escaped_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Khong co tieu de 8.png");
+        std::fs::write(&path, b"fake").unwrap();
+        let pasted = path.to_string_lossy().replace(' ', "\\ ");
+        assert_eq!(extract_image_path(&pasted).as_deref(), path.to_str());
+    }
+
+    #[test]
+    fn unescape_pasted_path_preserves_trailing_backslash() {
+        assert_eq!(unescape_pasted_path("abc\\"), "abc\\");
     }
 }

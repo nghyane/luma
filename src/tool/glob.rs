@@ -52,6 +52,7 @@ impl Tool for GlobTool {
         args: serde_json::Value,
         output_tx: mpsc::Sender<String>,
         _cancel: CancellationToken,
+        _caps: crate::core::tool::ModelCaps,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let pattern = args["pattern"].as_str().unwrap_or("**/*");
@@ -129,7 +130,7 @@ impl Tool for GlobTool {
                 result = "No files found".to_owned();
             }
             Ok(ToolExecution {
-                result,
+                result: result.into(),
                 artifact: None,
             })
         })
@@ -152,11 +153,11 @@ mod tests {
         let tool = GlobTool;
         let args = serde_json::json!({"pattern": "**/*.rs", "path": root.to_str().unwrap()});
         let result = tool
-            .execute(args, tx, CancellationToken::new())
+            .execute(args, tx, CancellationToken::new(), Default::default())
             .await
             .unwrap();
-        assert!(result.result.contains(".rs"));
-        assert!(!result.result.contains("readme.md"));
+        assert!(result.result.as_text().contains(".rs"));
+        assert!(!result.result.as_text().contains("readme.md"));
     }
 
     #[tokio::test]
@@ -165,10 +166,10 @@ mod tests {
         let tool = GlobTool;
         let args = serde_json::json!({"pattern": "**/*.nonexistent_ext"});
         let result = tool
-            .execute(args, tx, CancellationToken::new())
+            .execute(args, tx, CancellationToken::new(), Default::default())
             .await
             .unwrap();
-        assert_eq!(result.result, "No files found");
+        assert_eq!(result.result.as_text(), "No files found");
     }
 
     #[tokio::test]
@@ -176,7 +177,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(64);
         let tool = GlobTool;
         let args = serde_json::json!({"pattern": "**/*", "path": "/nonexistent_dir_xyz"});
-        let result = tool.execute(args, tx, CancellationToken::new()).await;
+        let result = tool.execute(args, tx, CancellationToken::new(), Default::default()).await;
         assert!(result.is_err());
     }
 
@@ -194,16 +195,16 @@ mod tests {
         let tool = GlobTool;
         let args = serde_json::json!({"pattern": "**/*", "path": root.to_str().unwrap()});
         let result = tool
-            .execute(args, tx, CancellationToken::new())
+            .execute(args, tx, CancellationToken::new(), Default::default())
             .await
             .unwrap();
 
         assert!(
-            result.result.contains("keep.rs"),
+            result.result.as_text().contains("keep.rs"),
             "should include keep.rs: {result:?}"
         );
         assert!(
-            !result.result.contains("skip.log"),
+            !result.result.as_text().contains("skip.log"),
             "should exclude skip.log: {result:?}"
         );
     }

@@ -81,6 +81,7 @@ impl Tool for EditTool {
         args: serde_json::Value,
         output_tx: mpsc::Sender<String>,
         _cancel: CancellationToken,
+        _caps: crate::core::tool::ModelCaps,
     ) -> Pin<Box<dyn Future<Output = Result<ToolExecution>> + Send + '_>> {
         Box::pin(async move {
             let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -118,7 +119,7 @@ impl Tool for EditTool {
                         let _ = output_tx.send(format!("{line}\n")).await;
                     }
                     return Ok(ToolExecution {
-                        result: format!("Created {}", path.display()),
+                        result: (format!("Created {}", path.display())).into(),
                         artifact: Some(FileChangeArtifact {
                             files: vec![FileArtifact {
                                 path: path.display().to_string(),
@@ -174,7 +175,7 @@ impl Tool for EditTool {
             // Skip write if nothing changed
             if updated == content {
                 return Ok(ToolExecution {
-                    result: format!("{} is unchanged", path.display()),
+                    result: (format!("{} is unchanged", path.display())).into(),
                     artifact: Some(FileChangeArtifact {
                         files: vec![FileArtifact {
                             path: path.display().to_string(),
@@ -200,12 +201,12 @@ impl Tool for EditTool {
             let (adds, dels) = crate::tool::diff::diff_stats(&diff);
 
             Ok(ToolExecution {
-                result: format!(
+                result: (format!(
                     "Edited {} ({} replacement{}, +{adds} -{dels})",
                     path.display(),
                     count,
                     if count > 1 { "s" } else { "" }
-                ),
+                )).into(),
                 artifact: Some(FileChangeArtifact {
                     files: vec![FileArtifact {
                         path: path.display().to_string(),
@@ -235,12 +236,9 @@ mod tests {
         let tool = EditTool;
         let (tx, _rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
-        let result = tool.execute(
-            serde_json::json!({"path": file.to_str().unwrap(), "old_string": "hello", "new_string": "hi"}),
-            tx, cancel,
-        ).await.unwrap();
+        let result = tool.execute(serde_json::json!({"path": file.to_str().unwrap(), "old_string": "hello", "new_string": "hi"}), tx, cancel, Default::default()).await.unwrap();
 
-        assert!(result.result.contains("Edited"));
+        assert!(result.result.as_text().contains("Edited"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "hi world");
     }
 
@@ -253,10 +251,7 @@ mod tests {
         let tool = EditTool;
         let (tx, _rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
-        let result = tool.execute(
-            serde_json::json!({"path": file.to_str().unwrap(), "old_string": "aaa", "new_string": "x"}),
-            tx, cancel,
-        ).await;
+        let result = tool.execute(serde_json::json!({"path": file.to_str().unwrap(), "old_string": "aaa", "new_string": "x"}), tx, cancel, Default::default()).await;
 
         assert!(result.is_err());
     }
@@ -270,12 +265,9 @@ mod tests {
         let tool = EditTool;
         let (tx, _rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
-        let result = tool.execute(
-            serde_json::json!({"path": file.to_str().unwrap(), "old_string": "aaa", "new_string": "x", "replace_all": true}),
-            tx, cancel,
-        ).await.unwrap();
+        let result = tool.execute(serde_json::json!({"path": file.to_str().unwrap(), "old_string": "aaa", "new_string": "x", "replace_all": true}), tx, cancel, Default::default()).await.unwrap();
 
-        assert!(result.result.contains("2 replacements"));
+        assert!(result.result.as_text().contains("2 replacements"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "x bbb x");
     }
 
@@ -287,12 +279,9 @@ mod tests {
         let tool = EditTool;
         let (tx, _rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
-        let result = tool.execute(
-            serde_json::json!({"path": file.to_str().unwrap(), "old_string": "", "new_string": "content"}),
-            tx, cancel,
-        ).await.unwrap();
+        let result = tool.execute(serde_json::json!({"path": file.to_str().unwrap(), "old_string": "", "new_string": "content"}), tx, cancel, Default::default()).await.unwrap();
 
-        assert!(result.result.contains("Created"));
+        assert!(result.result.as_text().contains("Created"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "content");
     }
 }

@@ -85,12 +85,25 @@ impl super::App {
     }
 
     /// Start async clipboard image read — result arrives via ClipboardImage event.
+    ///
+    /// Debounced 250ms: a single Cmd+V on iTerm2 fires both a raw key event
+    /// and an empty bracketed paste, both of which try to trigger a clipboard
+    /// read. Without throttling the user gets two image chips for one action.
     pub(super) fn paste_clipboard_image(&mut self) {
         if is_ssh_session() {
             self.doc
                 .info("image paste not supported over SSH — use a file path instead");
             return;
         }
+        let now = std::time::Instant::now();
+        if let Some(prev) = self.agent.last_clipboard_paste
+            && now.duration_since(prev) < std::time::Duration::from_millis(250)
+        {
+            crate::dbg_log!("clipboard paste debounced");
+            return;
+        }
+        self.agent.last_clipboard_paste = Some(now);
+
         let Some(tx) = self.tx.clone() else { return };
         tokio::task::spawn_blocking(move || {
             let result = read_clipboard_image().map(|data| {
@@ -104,7 +117,11 @@ impl super::App {
     /// Handle async clipboard image result.
     pub(super) fn on_clipboard_image(&mut self, result: Option<(String, Vec<u8>)>) {
         match result {
-            Some((media_type, data)) => self.ui.prompt.attach_image(media_type, data),
+            Some((media_type, data)) => {
+                let msg = format_attach_msg("image", &data);
+                self.ui.prompt.attach_image(media_type, data);
+                self.doc.info(&msg);
+            }
             None => self.doc.info("no image in clipboard"),
         }
     }
@@ -114,8 +131,14 @@ impl super::App {
             self.doc.info("cannot read image file");
             return;
         };
+        let name = std::path::Path::new(path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("image");
+        let msg = format_attach_msg(name, &data);
         let (media_type, _) = detect_image_format(&data);
         self.ui.prompt.attach_image(media_type.to_owned(), data);
+        self.doc.info(&msg);
     }
 
     pub(super) fn ensure_agent_loop(&mut self) {
@@ -144,6 +167,7 @@ impl super::App {
             source: model.source.clone(),
             system_prompt,
             thinking: self.config.thinking,
+            capabilities: model.capabilities.clone(),
         };
 
         let registry = crate::tool::build_registry(style, Self::search_backend());
@@ -337,6 +361,18 @@ fn is_ssh_session() -> bool {
     std::env::var("SSH_CONNECTION").is_ok() || std::env::var("SSH_TTY").is_ok()
 }
 
+/// Format attach confirmation message as `attached: <name> (<size>)`.
+/// Size shows `~KB` under 1 MB, `~MB` with one decimal above.
+fn format_attach_msg(name: &str, data: &[u8]) -> String {
+    let len = data.len();
+    let size = if len < 1024 * 1024 {
+        format!("{} KB", len.div_ceil(1024))
+    } else {
+        format!("{:.1} MB", len as f64 / (1024.0 * 1024.0))
+    };
+    format!("attached: {name} ({size})")
+}
+
 fn detect_image_format(data: &[u8]) -> (&'static str, &'static str) {
     if data.starts_with(&[0x89, b'P', b'N', b'G']) {
         ("image/png", "png")
@@ -411,6 +447,24 @@ mod tests {
     #[test]
     fn parse_file_refs_empty() {
         assert!(parse_file_refs("hello world").is_empty());
+    }
+
+    #[test]
+    fn format_attach_msg_kb_rounds_up() {
+        // 1 byte still shows 1 KB rather than 0 — div_ceil behavior.
+        assert_eq!(format_attach_msg("x.png", &[0; 1]), "attached: x.png (1 KB)");
+    }
+
+    #[test]
+    fn format_attach_msg_kb_under_mb() {
+        let data = vec![0u8; 512 * 1024];
+        assert_eq!(format_attach_msg("img", &data), "attached: img (512 KB)");
+    }
+
+    #[test]
+    fn format_attach_msg_mb_above_threshold() {
+        let data = vec![0u8; 2 * 1024 * 1024 + 512 * 1024];
+        assert_eq!(format_attach_msg("big.png", &data), "attached: big.png (2.5 MB)");
     }
 
     #[test]
