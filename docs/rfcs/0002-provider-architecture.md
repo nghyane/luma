@@ -604,4 +604,43 @@ là dấu hiệu kiến trúc sai.
 
 ## Implementation status
 
-Chưa bắt đầu. Sẽ cập nhật sau khi PR1 merge.
+Partial. PR1 quirks phase shipped (commits 1–7/11 of plan):
+
+- `51b3471` docs(rfcs): standardize format, add provider-architecture RFC
+- `5ea2e6c` refactor(provider): define StreamEvent and pull-based Protocol trait
+- `5f52a6b` refactor(provider): extract build_request_body helpers
+- `3c20817` refactor(provider): extract consume_chat_stream (openai)
+- `7458be0` refactor(provider/quirks): extract cache_breakpoint
+- `c0ef8a2` refactor(provider/quirks): extract claude_identity (user-agent,
+  session id, fingerprint)
+- `b9c2892` refactor(provider/quirks): extract oauth_system_rewrite
+  (system blocks, betas)
+- `f8c7e50` refactor(provider/quirks): extract adaptive_thinking
+
+State after commit 7:
+
+- `claude.rs` 1218 → 844 lines (-31%); all vendor-specific helpers live
+  under `src/provider/quirks/` with their original regression tests
+  moved verbatim.
+- `codex_session` quirk deferred: helpers (`CODEX_ORIGINATOR`,
+  `codex_user_agent`, `resolve_installation_id`) already live under
+  `config/auth`; will be re-wired during the cutover.
+- 563 tests pass; `cargo clippy -- -D warnings` clean on every commit.
+- Legacy `Provider::stream` signature unchanged; push-model intact.
+
+Remaining PR1 work (to be done in a dedicated session):
+
+- Commit 8: extract `Gateway` + `AuthScheme`. Value is low in
+  isolation; bundle with the cutover.
+- Commit 9 (cutover, ~2000 LOC): implement `Protocol` trait for
+  Anthropic Messages / OpenAI Chat / OpenAI Responses; add
+  `MessageAssembler`; migrate `Provider::stream` to pull-based
+  `BoxStream<Result<StreamEvent>>`; rewrite `ClaudeProvider` SSE loop
+  into an event emitter; add `ProviderRuntime`; catalog + registry;
+  rewrite `turn.rs` consume loop; delete legacy
+  `claude.rs`/`codex.rs`/`openai.rs`.
+- Commit 10: replace `AuthProvider` enum with `AuthKind`; thread
+  through `/connect`.
+
+PR2 (OpenCode Go) remains as documented: catalog-only change once PR1
+cutover lands.
