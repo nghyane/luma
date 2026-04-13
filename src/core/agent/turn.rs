@@ -85,13 +85,18 @@ pub async fn run_chat_turn(
         }
 
         // 401 / 403 — stale / revoked token (typed by the HTTP layer).
-        // For OAuth credentials, force a refresh and retry. For raw API
-        // keys (no refresh possible), surface the original error so the
-        // user sees the server's message instead of a generic retry loop.
+        // OAuth credentials get one force-refresh attempt; api keys
+        // surface an actionable error and leave the pool untouched
+        // (matches the ecosystem convention: gh/aws/stripe CLIs never
+        // auto-delete credentials on a single auth failure).
         if let Some(unauth) = err.downcast_ref::<crate::provider::retry::ProviderUnauthorized>() {
             if !auth_cred.is_oauth {
-                let _ = unauth; // consumed via Display in `err`
-                return Err(err);
+                anyhow::bail!(
+                    "{} key rejected ({}): {}. Run `luma login` to replace it.",
+                    unauth.provider,
+                    unauth.status,
+                    unauth.detail
+                );
             }
             let _ = tx
                 .send(Event::ToolOutput {
