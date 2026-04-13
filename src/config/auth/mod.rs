@@ -127,27 +127,6 @@ pub struct Credential {
     pub is_oauth: bool,
     pub account_id: Option<String>,
     pub label: String,
-    pub vendor: AuthVendor,
-}
-
-impl Credential {
-    /// Classify how this credential is transported on the wire.
-    ///
-    /// Anthropic OAuth carries `account_id` in some pool entries (profile
-    /// UUID) but does NOT use Codex session headers — so `account_id`
-    /// alone cannot distinguish OAuthBearer from CodexSession. We key off
-    /// `vendor` for that split.
-    pub fn auth_kind(&self) -> AuthKind {
-        match (self.is_oauth, self.vendor) {
-            (true, AuthVendor::OpenAI) => AuthKind::CodexSession,
-            (true, AuthVendor::Anthropic) => AuthKind::OAuthBearer,
-            // OpenCode Go keys (current) and any future OAuth tokens both
-            // go on the wire as `Authorization: Bearer <token>`; the
-            // proxy doesn't accept Anthropic's `x-api-key` shape.
-            (_, AuthVendor::OpenCodeGo) => AuthKind::OAuthBearer,
-            (false, _) => AuthKind::ApiKey,
-        }
-    }
 }
 
 /// UI-safe snapshot of a pooled account. No secrets.
@@ -301,10 +280,23 @@ pub async fn resolve(provider: AuthVendor) -> Result<Credential> {
     resolve_inner(provider, false).await
 }
 
-/// Force a refresh even if the cached token looks valid. Used after a 401
-/// from the provider — the server said this token is bad, so don't trust
-/// local state.
+/// Force-refresh the cached credential for `provider`. Bypasses the
+/// "still valid" cache check and runs through `try_refresh`. Use after a
+/// 401 response when the local TTL says the token should be fine — the
+/// server said this token is bad, so don't trust local state.
+///
+/// Returns an error immediately for credentials that have no refresh
+/// token (raw API keys); there is nothing to refresh and re-reading the
+/// same dead key would just loop.
 pub async fn force_refresh(provider: AuthVendor) -> Result<Credential> {
+    let entry = pick_candidate(provider)
+        .ok_or_else(|| anyhow::anyhow!("no {} account in pool", provider.as_str()))?;
+    if !entry.is_oauth || entry.refresh_token.is_none() {
+        anyhow::bail!(
+            "{} credential cannot be refreshed (api key) — re-add the key with `luma login`",
+            provider.as_str()
+        );
+    }
     resolve_inner(provider, true).await
 }
 
@@ -575,7 +567,6 @@ fn credential_from(e: &AccountEntry) -> Credential {
         is_oauth: e.is_oauth,
         account_id: e.account_id.clone(),
         label: e.label.clone(),
-        vendor: AuthVendor::from_str(&e.provider).unwrap_or(AuthVendor::Anthropic),
     }
 }
 

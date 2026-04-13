@@ -85,12 +85,10 @@ pub async fn run_chat_turn(
         }
 
         // 401 — stale / revoked token. Force a refresh and retry once.
-        // API keys have nothing to refresh; surface the error directly
-        // so users see the real cause instead of "exhausted auth retries".
+        // For credentials that can't be refreshed (raw API keys),
+        // `force_refresh` errors out immediately so the user sees the
+        // real cause instead of "exhausted auth retries".
         if is_auth_error(provider_kind.as_str(), &err) {
-            if !auth_cred.is_oauth {
-                return Err(err);
-            }
             let _ = tx
                 .send(Event::ToolOutput {
                     name: String::new(),

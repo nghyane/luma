@@ -52,6 +52,12 @@ impl QuirkSet {
     /// Empty set — no quirks enabled.
     pub const EMPTY: Self = Self(0);
 
+    /// Const-friendly OR for use in `const` contexts (e.g. `static`
+    /// gateway tables). Run-time composition uses the `BitOr` impl.
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
     /// Whether every flag in `other` is enabled in `self`.
     pub fn contains(self, other: Self) -> bool {
         (self.0 & other.0) == other.0
