@@ -180,6 +180,12 @@ pub async fn sync() -> Result<usize> {
         Ok(found) => models.extend(found),
         Err(_) => models.extend(builtin_models().into_iter().filter(|m| m.source == "codex")),
     }
+    // OpenCode Go has no list-models endpoint; ship the builtin set.
+    models.extend(
+        builtin_models()
+            .into_iter()
+            .filter(|m| m.source == "opencode-go"),
+    );
     let snapshot = Snapshot {
         models: normalize_models(overlay_metadata(models)),
     };

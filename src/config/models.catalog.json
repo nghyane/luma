@@ -89,5 +89,54 @@
     "source": "codex",
     "context_window": 200000,
     "max_output_tokens": 100000
+  },
+  {
+    "id": "kimi-k2.5",
+    "display_name": "Kimi K2.5",
+    "source": "opencode-go",
+    "context_window": 200000,
+    "max_output_tokens": 16000
+  },
+  {
+    "id": "glm-5",
+    "display_name": "GLM-5",
+    "source": "opencode-go",
+    "context_window": 200000,
+    "max_output_tokens": 16000
+  },
+  {
+    "id": "glm-5.1",
+    "display_name": "GLM-5.1",
+    "source": "opencode-go",
+    "context_window": 200000,
+    "max_output_tokens": 16000
+  },
+  {
+    "id": "mimo-v2-pro",
+    "display_name": "MiMo-V2-Pro",
+    "source": "opencode-go",
+    "context_window": 200000,
+    "max_output_tokens": 16000
+  },
+  {
+    "id": "mimo-v2-omni",
+    "display_name": "MiMo-V2-Omni",
+    "source": "opencode-go",
+    "context_window": 200000,
+    "max_output_tokens": 16000
+  },
+  {
+    "id": "minimax-m2.5",
+    "display_name": "MiniMax M2.5",
+    "source": "opencode-go",
+    "context_window": 200000,
+    "max_output_tokens": 16000
+  },
+  {
+    "id": "minimax-m2.7",
+    "display_name": "MiniMax M2.7",
+    "source": "opencode-go",
+    "context_window": 200000,
+    "max_output_tokens": 16000
   }
 ]

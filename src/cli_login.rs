@@ -101,10 +101,11 @@ fn pick_choice() -> Result<Choice> {
 
 fn run_picker(reader: &termina::EventReader) -> Result<Choice> {
     let mut selected: usize = 0;
-    // First render. `\r\n` because raw mode disables the LF→CRLF
-    // translation cooked mode provides — bare `\n` would cascade each
-    // line further right across the terminal.
-    write!(io::stderr(), "\r\n")?;
+    // Clear the whole screen and park the cursor at home (1,1) so the
+    // menu renders over any existing terminal content. Raw mode disables
+    // the LF→CRLF translation cooked mode provides, so every line break
+    // below MUST be `\r\n` — bare `\n` cascades each line further right.
+    write!(io::stderr(), "\x1b[2J\x1b[H")?;
     io::stderr().flush()?;
     render_menu(selected, false)?;
 
