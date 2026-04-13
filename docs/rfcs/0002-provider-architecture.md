@@ -604,43 +604,75 @@ là dấu hiệu kiến trúc sai.
 
 ## Implementation status
 
-Partial. PR1 quirks phase shipped (commits 1–7/11 of plan):
+PR1 structural landing complete. Remaining PR1 work is the pull-based
+streaming rewrite, tracked below.
+
+### Commits shipped
+
+Quirks phase (session 1):
 
 - `51b3471` docs(rfcs): standardize format, add provider-architecture RFC
 - `5ea2e6c` refactor(provider): define StreamEvent and pull-based Protocol trait
 - `5f52a6b` refactor(provider): extract build_request_body helpers
 - `3c20817` refactor(provider): extract consume_chat_stream (openai)
 - `7458be0` refactor(provider/quirks): extract cache_breakpoint
-- `c0ef8a2` refactor(provider/quirks): extract claude_identity (user-agent,
-  session id, fingerprint)
+- `c0ef8a2` refactor(provider/quirks): extract claude_identity
 - `b9c2892` refactor(provider/quirks): extract oauth_system_rewrite
-  (system blocks, betas)
 - `f8c7e50` refactor(provider/quirks): extract adaptive_thinking
 
-State after commit 7:
+Structural cutover (session 2):
 
-- `claude.rs` 1218 → 844 lines (-31%); all vendor-specific helpers live
-  under `src/provider/quirks/` with their original regression tests
-  moved verbatim.
-- `codex_session` quirk deferred: helpers (`CODEX_ORIGINATOR`,
-  `codex_user_agent`, `resolve_installation_id`) already live under
-  `config/auth`; will be re-wired during the cutover.
-- 563 tests pass; `cargo clippy -- -D warnings` clean on every commit.
-- Legacy `Provider::stream` signature unchanged; push-model intact.
+- `f797424` refactor(provider): introduce BindingRegistry scaffolding (9a)
+- `dce29f5` refactor(provider): structural cutover — ProviderRuntime +
+  protocol modules (9). Legacy `claude.rs`/`codex.rs`/`openai.rs` deleted;
+  moved verbatim into `protocol/{anthropic,openai_chat,openai_responses}.rs`.
+  `ProviderRuntime` is the sole `impl Provider` reachable from outside
+  `src/provider/`.
+- `b75cf02` refactor(auth): rename AuthProvider → AuthVendor, introduce
+  AuthKind (10). `AnthropicRuntime` consumes `AuthKind`; `AuthVendor`
+  names the pool bucket only.
 
-Remaining PR1 work (to be done in a dedicated session):
+### State after commit `b75cf02`
 
-- Commit 8: extract `Gateway` + `AuthScheme`. Value is low in
-  isolation; bundle with the cutover.
-- Commit 9 (cutover, ~2000 LOC): implement `Protocol` trait for
-  Anthropic Messages / OpenAI Chat / OpenAI Responses; add
-  `MessageAssembler`; migrate `Provider::stream` to pull-based
-  `BoxStream<Result<StreamEvent>>`; rewrite `ClaudeProvider` SSE loop
-  into an event emitter; add `ProviderRuntime`; catalog + registry;
-  rewrite `turn.rs` consume loop; delete legacy
-  `claude.rs`/`codex.rs`/`openai.rs`.
-- Commit 10: replace `AuthProvider` enum with `AuthKind`; thread
-  through `/connect`.
+- 566 tests pass; `cargo clippy -- -D warnings` clean.
+- File layout matches RFC §File layout.
+- `BindingRegistry::builtin()` hardcodes the three gateways; JSON catalog
+  deferred to PR2.
+- Push-model SSE decode preserved verbatim inside each protocol module
+  to protect the test suite — no behaviour drift across the cutover.
+
+### Remaining PR1 work
+
+To be done in dedicated sessions; each item is independently landable:
+
+1. **Pull migration + `MessageAssembler`** (~1500 LOC). Extract pure
+   `Protocol::encode_request` + `decode_stream` from each protocol
+   module; add `MessageAssembler`; rewrite `turn.rs` consume loop to
+   emit `Event::Token`/`Thinking`/`ToolInput`/`WebSearchStart`/
+   `WebSearchDone`/`ToolSelected`/`Usage` from the driver side. High
+   regression risk — do one protocol at a time, smoke-test between.
+2. **`QuirkSet` bitflag composition** (~200 LOC). Quirk modules are
+   already extracted (commits 5–8); wire them as `bitflags! QuirkSet`
+   applied in bit order from `ProviderRuntime` instead of being called
+   directly from `protocol/anthropic.rs`.
+3. **On-disk `AccountEntry` migration to typed `auth_kind`** (~200 LOC
+   + versioned migration). Today the pool file still keys by
+   `(provider, is_oauth, account_id)`; `AuthKind` is derived on read.
+   Bump `POOL_STORE_VERSION` to 3 and migrate.
+4. **`AnthropicRuntime` fingerprint/session storage** (unresolved Q1).
+   Currently process-global `OnceLock` in `quirks/claude_identity`.
+   Move into `ProviderState` gated by `RequestCtx` once pull migration
+   exposes per-runtime state.
+
+### Blocked on PR1
+
+- **PR2 OpenCode Go**: depends on pull migration landing (item 1). Until
+  then, a second Anthropic-protocol gateway has to pretend to be a
+  Claude vendor.
+- **Smoke test** (user-side): recommended after any landing that touches
+  decode paths. Present structural cutover moved SSE loops verbatim but
+  the AnthropicRuntime header path was rewritten on top of `AuthKind`;
+  not byte-verified against live traffic.
 
 PR2 (OpenCode Go) remains as documented: catalog-only change once PR1
 cutover lands.
