@@ -30,6 +30,32 @@ impl OpenAIProvider {
             account_label: account_label.to_owned(),
         }
     }
+
+    /// Build the OpenAI Chat Completions request body. Pure.
+    fn build_request_body(
+        &self,
+        messages: &[crate::core::types::Message],
+        tools: &[crate::core::types::ToolSchema],
+        server_tools: &[serde_json::Value],
+        resolve_image: &crate::core::provider::ImageResolver,
+        effective_max_tokens: u32,
+    ) -> serde_json::Value {
+        let api_messages = to_api_messages(messages, resolve_image);
+        let mut api_tools = to_api_tools(tools);
+        for st in server_tools {
+            api_tools.push(st.clone());
+        }
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": effective_max_tokens,
+            "messages": api_messages,
+            "stream": true,
+        });
+        if !api_tools.is_empty() {
+            body["tools"] = api_tools.into();
+        }
+        body
+    }
 }
 
 impl Provider for OpenAIProvider {
@@ -67,24 +93,13 @@ impl Provider for OpenAIProvider {
                 cancel,
             } = req;
             let effective_max_tokens = max_tokens_override.unwrap_or(self.max_tokens);
-            let api_messages = to_api_messages(messages, resolve_image);
-            let mut api_tools = to_api_tools(tools);
-
-            // Append server-side tools
-            for st in server_tools {
-                api_tools.push(st.clone());
-            }
-
-            let mut body = serde_json::json!({
-                "model": self.model,
-                "max_tokens": effective_max_tokens,
-                "messages": api_messages,
-                "stream": true,
-            });
-
-            if !api_tools.is_empty() {
-                body["tools"] = api_tools.into();
-            }
+            let body = self.build_request_body(
+                messages,
+                tools,
+                server_tools,
+                resolve_image,
+                effective_max_tokens,
+            );
 
             let auth_header = format!("Bearer {}", self.api_key);
             let headers = [("Authorization", auth_header.as_str())];

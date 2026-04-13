@@ -51,6 +51,54 @@ impl CodexProvider {
             account_label: account_label.to_owned(),
         }
     }
+
+    /// Build the OpenAI Responses API request body. Pure.
+    fn build_request_body(
+        &self,
+        messages: &[crate::core::types::Message],
+        tools: &[crate::core::types::ToolSchema],
+        server_tools: &[serde_json::Value],
+    ) -> serde_json::Value {
+        let system = extract_system(messages);
+        let input = build_input(messages);
+        let mut api_tools = to_api_tools(tools);
+        for st in server_tools {
+            api_tools.push(st.clone());
+        }
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "input": input,
+            "store": false,
+            "stream": true,
+        });
+        if !system.is_empty() {
+            body["instructions"] = system.into();
+        }
+        if !api_tools.is_empty() {
+            body["tools"] = api_tools.into();
+        }
+        if let Some(key) = &self.session_id {
+            body["prompt_cache_key"] = serde_json::json!(key);
+        }
+        if let Some(installation_id) = resolve_installation_id() {
+            body["client_metadata"] = serde_json::json!({
+                "x-codex-installation-id": installation_id,
+            });
+        }
+        let effort = match self.thinking {
+            ThinkingLevel::Off => None,
+            ThinkingLevel::Low => Some("low"),
+            ThinkingLevel::Medium => Some("medium"),
+            ThinkingLevel::High | ThinkingLevel::Max => Some("high"),
+        };
+        if let Some(effort) = effort {
+            body["reasoning"] = serde_json::json!({
+                "effort": effort,
+                "summary": "auto",
+            });
+        }
+        body
+    }
 }
 
 impl Provider for CodexProvider {
@@ -101,52 +149,7 @@ impl Provider for CodexProvider {
                 tx,
                 cancel,
             } = req;
-            let system = extract_system(messages);
-            let input = build_input(messages);
-            let mut api_tools = to_api_tools(tools);
-
-            // Append server-side tools
-            for st in server_tools {
-                api_tools.push(st.clone());
-            }
-
-            let mut body = serde_json::json!({
-                "model": self.model,
-                "input": input,
-                "store": false,
-                "stream": true,
-            });
-
-            if !system.is_empty() {
-                body["instructions"] = system.into();
-            }
-            if !api_tools.is_empty() {
-                body["tools"] = api_tools.into();
-            }
-            if let Some(key) = &self.session_id {
-                body["prompt_cache_key"] = serde_json::json!(key);
-            }
-            // `client_metadata.x-codex-installation-id` matches
-            // codex-rs/core/src/client.rs::build_responses_request.
-            if let Some(installation_id) = resolve_installation_id() {
-                body["client_metadata"] = serde_json::json!({
-                    "x-codex-installation-id": installation_id,
-                });
-            }
-
-            // Reasoning: map ThinkingLevel → effort + summary for Responses API
-            let effort = match self.thinking {
-                ThinkingLevel::Off => None,
-                ThinkingLevel::Low => Some("low"),
-                ThinkingLevel::Medium => Some("medium"),
-                ThinkingLevel::High | ThinkingLevel::Max => Some("high"),
-            };
-            if let Some(effort) = effort {
-                body["reasoning"] = serde_json::json!({
-                    "effort": effort,
-                    "summary": "auto",
-                });
-            }
+            let body = self.build_request_body(messages, tools, server_tools);
 
             // Headers match `codex-rs/core/src/client.rs` +
             // `codex-rs/login/src/auth/default_client.rs::default_headers`.

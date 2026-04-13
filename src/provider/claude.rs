@@ -49,6 +49,72 @@ impl ClaudeProvider {
             account_label: account_label.to_owned(),
         }
     }
+
+    /// Build the full Anthropic Messages request body.
+    ///
+    /// Pure function of provider config + request inputs. Mixes in
+    /// Claude-specific quirks (cache breakpoint, OAuth system rewrite,
+    /// mcp_noop tool injection, thinking config) which RFC 0002 will
+    /// later extract into middleware. For now this is an in-place
+    /// refactor to make the wire-body building testable in isolation.
+    fn build_request_body(
+        &self,
+        messages: &[Message],
+        tools: &[crate::core::types::ToolSchema],
+        server_tools: &[serde_json::Value],
+        resolve_image: &crate::core::provider::ImageResolver,
+        effective_max_tokens: u32,
+    ) -> serde_json::Value {
+        let system_text = extract_system(messages);
+        let mut api_messages = to_api_messages(messages, resolve_image);
+        let mut api_tools = to_api_tools(tools);
+
+        // Append server-side tools (e.g. web search)
+        for st in server_tools {
+            api_tools.push(st.clone());
+        }
+
+        apply_cache_breakpoint(&mut api_messages);
+
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": effective_max_tokens,
+            "messages": api_messages,
+            "stream": true,
+        });
+
+        if let Some((thinking, output_config)) =
+            build_thinking_config(&self.model, self.thinking, effective_max_tokens)
+        {
+            body["thinking"] = thinking;
+            if let Some(output_config) = output_config {
+                body["output_config"] = output_config;
+            }
+        }
+
+        if self.is_oauth {
+            let first_user_text = messages
+                .iter()
+                .find(|m| m.role == Role::User)
+                .map(|m| m.text())
+                .unwrap_or_default();
+            body["system"] = build_oauth_system(&system_text, &first_user_text);
+            if api_tools.is_empty() {
+                api_tools.push(serde_json::json!({
+                    "name": "mcp_noop", "description": "No-op",
+                    "input_schema": {"type": "object", "properties": {}}
+                }));
+            }
+        } else if !system_text.is_empty() {
+            body["system"] = system_text.into();
+        }
+
+        if !api_tools.is_empty() {
+            body["tools"] = api_tools.into();
+        }
+
+        body
+    }
 }
 
 impl Provider for ClaudeProvider {
@@ -110,53 +176,13 @@ impl Provider for ClaudeProvider {
                 cancel,
             } = req;
             let effective_max_tokens = max_tokens_override.unwrap_or(self.max_tokens);
-            let system_text = extract_system(messages);
-            let mut api_messages = to_api_messages(messages, resolve_image);
-            let mut api_tools = to_api_tools(tools);
-
-            // Append server-side tools (e.g. web search)
-            for st in server_tools {
-                api_tools.push(st.clone());
-            }
-
-            apply_cache_breakpoint(&mut api_messages);
-
-            let mut body = serde_json::json!({
-                "model": self.model,
-                "max_tokens": effective_max_tokens,
-                "messages": api_messages,
-                "stream": true,
-            });
-
-            if let Some((thinking, output_config)) =
-                build_thinking_config(&self.model, self.thinking, effective_max_tokens)
-            {
-                body["thinking"] = thinking;
-                if let Some(output_config) = output_config {
-                    body["output_config"] = output_config;
-                }
-            }
-
-            if self.is_oauth {
-                let first_user_text = messages
-                    .iter()
-                    .find(|m| m.role == Role::User)
-                    .map(|m| m.text())
-                    .unwrap_or_default();
-                body["system"] = build_oauth_system(&system_text, &first_user_text);
-                if api_tools.is_empty() {
-                    api_tools.push(serde_json::json!({
-                        "name": "mcp_noop", "description": "No-op",
-                        "input_schema": {"type": "object", "properties": {}}
-                    }));
-                }
-            } else if !system_text.is_empty() {
-                body["system"] = system_text.into();
-            }
-
-            if !api_tools.is_empty() {
-                body["tools"] = api_tools.into();
-            }
+            let body = self.build_request_body(
+                messages,
+                tools,
+                server_tools,
+                resolve_image,
+                effective_max_tokens,
+            );
 
             let auth_header = if self.is_oauth {
                 format!("Bearer {}", self.api_key)
