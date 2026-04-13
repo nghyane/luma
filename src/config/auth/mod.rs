@@ -141,9 +141,10 @@ impl Credential {
         match (self.is_oauth, self.vendor) {
             (true, AuthVendor::OpenAI) => AuthKind::CodexSession,
             (true, AuthVendor::Anthropic) => AuthKind::OAuthBearer,
-            // OpenCode Go ships only API keys today; treat a future
-            // oauth bit as bearer rather than widening the enum.
-            (true, AuthVendor::OpenCodeGo) => AuthKind::OAuthBearer,
+            // OpenCode Go keys (current) and any future OAuth tokens both
+            // go on the wire as `Authorization: Bearer <token>`; the
+            // proxy doesn't accept Anthropic's `x-api-key` shape.
+            (_, AuthVendor::OpenCodeGo) => AuthKind::OAuthBearer,
             (false, _) => AuthKind::ApiKey,
         }
     }
