@@ -179,11 +179,6 @@ pub trait Provider: Send + Sync {
     /// Provider display name (e.g. "claude", "openai").
     fn name(&self) -> &str;
 
-    /// Thinking levels surfaced by this provider for the current model.
-    fn thinking_capabilities(&self) -> ThinkingCapabilities {
-        ThinkingCapabilities::standard()
-    }
-
     /// Set thinking level. Called once after construction before boxing.
     fn set_thinking(&mut self, level: ThinkingLevel);
 

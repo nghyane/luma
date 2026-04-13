@@ -1,7 +1,5 @@
 /// OpenAI-compatible chat completions provider with SSE streaming.
-use crate::core::provider::{
-    Provider, StopReason, StreamEvent, StreamRequest, StreamResponse, ThinkingCapabilities,
-};
+use crate::core::provider::{Provider, StopReason, StreamEvent, StreamRequest, StreamResponse};
 use crate::core::types::{ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage};
 use crate::event::Event;
 use crate::provider::sse::{SseEventStream, post_sse};
@@ -65,9 +63,6 @@ impl Provider for OpenAIChatRuntime {
         "openai"
     }
 
-    fn thinking_capabilities(&self) -> ThinkingCapabilities {
-        ThinkingCapabilities::off_only()
-    }
     fn set_thinking(&mut self, _level: ThinkingLevel) {
         // OpenAI Chat Completions has no reasoning/thinking parameter.
     }

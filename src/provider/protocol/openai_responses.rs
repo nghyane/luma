@@ -1,8 +1,6 @@
 /// Codex provider — OpenAI Responses API at chatgpt.com/backend-api/codex.
 use crate::config::auth::{CODEX_ORIGINATOR, codex_user_agent, resolve_installation_id};
-use crate::core::provider::{
-    Provider, StopReason, StreamEvent, StreamRequest, StreamResponse, ThinkingCapabilities,
-};
+use crate::core::provider::{Provider, StopReason, StreamEvent, StreamRequest, StreamResponse};
 use crate::core::types::{ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage};
 use crate::event::Event;
 use crate::event_bus::Sender as EventSender;
@@ -108,9 +106,6 @@ impl Provider for OpenAIResponsesRuntime {
         "codex"
     }
 
-    fn thinking_capabilities(&self) -> ThinkingCapabilities {
-        ThinkingCapabilities::standard()
-    }
     fn set_thinking(&mut self, level: ThinkingLevel) {
         self.thinking = level;
     }

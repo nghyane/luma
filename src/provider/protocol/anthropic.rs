@@ -6,17 +6,12 @@
 /// `src/utils/fingerprint.ts`, `src/constants/system.ts`, `src/utils/betas.ts`
 /// in `yasasbanukaofficial/claude-code`.
 use crate::config::auth::AuthKind;
-use crate::core::provider::{
-    Provider, StopReason, StreamEvent, StreamRequest, StreamResponse, ThinkingCapabilities,
-    ThinkingOption,
-};
+use crate::core::provider::{Provider, StopReason, StreamEvent, StreamRequest, StreamResponse};
 use crate::core::types::{ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage};
 use crate::event::Event;
 use crate::provider::json_stream::{JsonStringExtractor, streamable_arg_for};
 use crate::provider::quirks::QuirkSet;
-use crate::provider::quirks::adaptive_thinking::{
-    build_thinking_config, is_adaptive_thinking_model,
-};
+use crate::provider::quirks::adaptive_thinking::build_thinking_config;
 use crate::provider::quirks::cache_breakpoint::apply_cache_breakpoint;
 use crate::provider::quirks::claude_identity::{claude_cli_user_agent, claude_session_id};
 use crate::provider::quirks::oauth_system_rewrite::{build_betas, build_oauth_system};
@@ -145,34 +140,6 @@ impl Provider for AnthropicRuntime {
         "claude"
     }
 
-    fn thinking_capabilities(&self) -> ThinkingCapabilities {
-        if is_adaptive_thinking_model(&self.model) {
-            ThinkingCapabilities::new(vec![
-                ThinkingOption {
-                    level: ThinkingLevel::Off,
-                    label: "off",
-                },
-                ThinkingOption {
-                    level: ThinkingLevel::Low,
-                    label: "low",
-                },
-                ThinkingOption {
-                    level: ThinkingLevel::Medium,
-                    label: "medium",
-                },
-                ThinkingOption {
-                    level: ThinkingLevel::High,
-                    label: "high",
-                },
-                ThinkingOption {
-                    level: ThinkingLevel::Max,
-                    label: "max",
-                },
-            ])
-        } else {
-            ThinkingCapabilities::standard()
-        }
-    }
     fn set_thinking(&mut self, level: ThinkingLevel) {
         self.thinking = level;
     }
@@ -798,44 +765,6 @@ mod tests {
         assert_eq!(parse_stop_reason("tool_use"), StopReason::ToolUse);
         assert_eq!(parse_stop_reason("refusal"), StopReason::Other);
         assert_eq!(parse_stop_reason(""), StopReason::Other);
-    }
-
-    #[test]
-    fn adaptive_thinking_capabilities_include_max() {
-        let provider = AnthropicRuntime::new(
-            "claude-sonnet-4-6",
-            "https://api.anthropic.com",
-            "key",
-            crate::config::auth::AuthKind::ApiKey,
-            crate::provider::quirks::QuirkSet::EMPTY,
-            "acc",
-        );
-        let labels: Vec<_> = provider
-            .thinking_capabilities()
-            .options()
-            .iter()
-            .map(|o| o.label)
-            .collect();
-        assert_eq!(labels, ["off", "low", "medium", "high", "max"]);
-    }
-
-    #[test]
-    fn non_adaptive_thinking_capabilities_stop_at_high() {
-        let provider = AnthropicRuntime::new(
-            "claude-sonnet-4-5",
-            "https://api.anthropic.com",
-            "key",
-            crate::config::auth::AuthKind::ApiKey,
-            crate::provider::quirks::QuirkSet::EMPTY,
-            "acc",
-        );
-        let labels: Vec<_> = provider
-            .thinking_capabilities()
-            .options()
-            .iter()
-            .map(|o| o.label)
-            .collect();
-        assert_eq!(labels, ["off", "low", "medium", "high"]);
     }
 
     #[test]
