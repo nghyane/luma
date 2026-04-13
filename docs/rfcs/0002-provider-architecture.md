@@ -604,8 +604,10 @@ là dấu hiệu kiến trúc sai.
 
 ## Implementation status
 
-PR1 structural landing complete. Remaining PR1 work is the pull-based
-streaming rewrite, tracked below.
+PR1 complete. PR2a (OpenCode Go infrastructure) shipped. PR2b (OpenCode
+Go user-facing: api-key auth, `/connect` UI, catalog entries) is the
+only remaining work and is gated on smoke-testing with a real OpenCode
+Go API key.
 
 ### Commits shipped
 
@@ -626,61 +628,130 @@ Structural cutover (session 2):
 - `dce29f5` refactor(provider): structural cutover — ProviderRuntime +
   protocol modules (9). Legacy `claude.rs`/`codex.rs`/`openai.rs` deleted;
   moved verbatim into `protocol/{anthropic,openai_chat,openai_responses}.rs`.
-  `ProviderRuntime` is the sole `impl Provider` reachable from outside
-  `src/provider/`.
 - `b75cf02` refactor(auth): rename AuthProvider → AuthVendor, introduce
-  AuthKind (10). `AnthropicRuntime` consumes `AuthKind`; `AuthVendor`
-  names the pool bucket only.
+  AuthKind (10). `AuthVendor` names the pool bucket; `AuthKind` describes
+  the wire-level auth scheme.
 - `5705b62` fix(auth): classify AuthKind by vendor, not `account_id`.
   Claude OAuth entries carry `profile.account_uuid` in `account_id`,
-  so the initial `(is_oauth, account_id.is_some())` split in b75cf02
-  misrouted Claude OAuth to `CodexSession` and dropped the Claude Code
-  headers — 401 on every turn. `Credential` now carries `vendor`; the
-  split keys off vendor.
+  so the initial `(is_oauth, account_id.is_some())` split misrouted
+  Claude OAuth to `CodexSession` and dropped the Claude Code headers
+  — 401 on every turn. `Credential` now carries `vendor`.
 
-### State after commit `5705b62`
+Cleanup of session-2 scaffolding (still session 2):
 
-- 566 tests pass; `cargo clippy -- -D warnings` clean.
+- `277220d` refactor(provider): drop ProviderRuntime enum +
+  BindingRegistry scaffold. Replaced 6 match blocks of dispatch
+  forwarding with `Box<dyn Provider>` returned directly from three
+  flat free functions in `binding.rs`. -163 LOC.
+- `13dae16` refactor(core/provider): drop dead Protocol trait
+  scaffolding. The `StreamEvent` / `ProtocolId` / `Protocol` trait
+  added in `5ea2e6c` carried `#[allow(dead_code)]` and no call sites;
+  deleted to be re-added at the shape pull migration actually needs.
+- `815d3c6` docs(provider): strip stale RFC narrative from module
+  comments. Comments now describe current shape, not in-flight plan.
+
+Pull migration (session 2):
+
+- `044ade8` refactor(provider/anthropic): pull-based SSE decoder.
+  `AnthropicDecoder` is pure (no I/O, no `tx.send`); exposes
+  `BoxStream<Result<StreamEvent>>` via `futures::stream::unfold`.
+  Consumer in `Provider::stream` translates `StreamEvent` → UI
+  `Event::*` and assembles `StreamResponse`. Re-introduced
+  `StreamEvent` in `core::provider` with the minimal nine-variant
+  shape Anthropic needs. +4 decoder unit tests.
+- `9261e2e` refactor(provider): pull migration for OpenAI Chat +
+  Responses. Same pattern as Anthropic: `ChatDecoder` /
+  `ResponsesDecoder` + `consume_*_stream` consumer. Codex's
+  structured failure / incomplete-reason handling preserved via
+  `decoder.finalize() -> Result`.
+
+Quirks composition (session 2):
+
+- `15f0178` refactor(provider/quirks): introduce QuirkSet bitflags.
+  Hand-rolled `u32` wrapper (no bitflags crate); five flags
+  (CACHE_BREAKPOINT, ADAPTIVE_THINKING, OAUTH_SYSTEM_REWRITE,
+  ANTHROPIC_BETAS, CLAUDE_IDENTITY). `binding::quirks_for(gateway,
+  auth_kind)` is the single policy site; `AnthropicRuntime` gates
+  each quirk on `self.quirks.contains(FLAG)` rather than branching
+  on `auth_kind`. Wire behaviour preserved.
+
+PR2a infrastructure (session 2):
+
+- `7ab50d5` refactor(provider): ProtocolId + per-binding base_url.
+  Decouple protocol from gateway. New `ProtocolId` enum
+  (AnthropicMessages / OpenAIChat / OpenAIResponses); `ModelBinding`
+  gains `protocol` + `base_url`. `build_provider` dispatches by
+  `binding.protocol`, not `binding.gateway`. `AnthropicRuntime` and
+  `OpenAIChatRuntime` accept `base_url` at construction. Hardcoded
+  `BASE_URL` consts removed. Codex Responses keeps its hardcoded
+  endpoint (chatgpt.com session headers are not transferable).
+
+### State after commit `7ab50d5`
+
+- 576 tests pass; `cargo clippy -- -D warnings` clean.
 - File layout matches RFC §File layout.
-- `BindingRegistry::builtin()` hardcodes the three gateways; JSON catalog
-  deferred to PR2.
-- Push-model SSE decode preserved verbatim inside each protocol module
-  to protect the test suite — no behaviour drift across the cutover.
-- Claude OAuth turn smoke-tested live after `5705b62`; Codex and OpenAI
-  direct not yet verified against live traffic.
+- Three flat free functions in `binding.rs` (no registry struct);
+  hardcoded gateways. Catalog JSON loader deferred until a fifth
+  gateway exists or a user explicitly needs custom catalogs.
+- Pull-based decoders in all three protocol modules. Per-decoder
+  unit tests exercise synthetic SSE frames.
+- `QuirkSet` decouples vendor quirks from wire protocol. PR2 OpenCode
+  Go can speak Anthropic Messages with `QuirkSet::EMPTY`.
+- `AuthKind` decouples wire auth from pool vendor.
+- `ModelBinding` carries `protocol` + `base_url`, ready for a single
+  gateway to serve multiple protocols on different endpoint paths.
+- 0 `#[allow(dead_code)]`, 0 TODO/FIXME, 0 stale RFC narrative.
+- Smoke-tested live: Claude OAuth (twice — after `5705b62` and after
+  `15f0178`). Codex + OpenAI direct not yet verified against live
+  traffic; recommended before relying on either path.
 
-### Remaining PR1 work
+### Remaining work — PR2b (OpenCode Go user-facing)
 
-To be done in dedicated sessions; each item is independently landable:
+Out of scope for the architecture refactor; tracked here so it doesn't
+get forgotten:
 
-1. **Pull migration + `MessageAssembler`** (~1500 LOC). Extract pure
-   `Protocol::encode_request` + `decode_stream` from each protocol
-   module; add `MessageAssembler`; rewrite `turn.rs` consume loop to
-   emit `Event::Token`/`Thinking`/`ToolInput`/`WebSearchStart`/
-   `WebSearchDone`/`ToolSelected`/`Usage` from the driver side. High
-   regression risk — do one protocol at a time, smoke-test between.
-2. **`QuirkSet` bitflag composition** (~200 LOC). Quirk modules are
-   already extracted (commits 5–8); wire them as `bitflags! QuirkSet`
-   applied in bit order from `ProviderRuntime` instead of being called
-   directly from `protocol/anthropic.rs`.
-3. **On-disk `AccountEntry` migration to typed `auth_kind`** (~200 LOC
-   + versioned migration). Today the pool file still keys by
-   `(provider, is_oauth, account_id)`; `AuthKind` is derived on read.
-   Bump `POOL_STORE_VERSION` to 3 and migrate.
-4. **`AnthropicRuntime` fingerprint/session storage** (unresolved Q1).
-   Currently process-global `OnceLock` in `quirks/claude_identity`.
-   Move into `ProviderState` gated by `RequestCtx` once pull migration
-   exposes per-runtime state.
+1. **`AuthVendor::OpenCodeGo` + api-key auth path** (~200 LOC). New
+   variant in `auth/mod.rs`. `resolve` skips refresh entirely when
+   `is_oauth == false`; `pick_candidate` and `attempt_auto_recover`
+   handle the no-refresh-token case gracefully. `load_local` returns
+   `None` (no upstream CLI to bootstrap from).
+2. **Pool storage for paste-key credentials** (~50 LOC). Verify every
+   `AccountEntry` path handles `is_oauth: false` with no
+   `refresh_token`. The struct already supports it; the persistence
+   tests need extending.
+3. **`/connect opencode-go` UI flow** (~150 LOC). Branch in
+   `tui/app/commands.rs`: when the gateway uses an api-key auth
+   scheme, prompt for the key in the TUI, validate via a probe
+   request, and upsert into the pool. No PKCE listener.
+4. **`GatewayId::OpenCodeGo` + binding entries** (~50 LOC). Add the
+   variant; populate `default_protocol` (no single answer — OpenCode
+   Go serves both, so bindings must override per-row). Add bindings
+   for at least `opencode-go/kimi-k2.5` (OpenAI Chat) and
+   `opencode-go/minimax-m2.7` (Anthropic Messages, `QuirkSet::EMPTY`).
+5. **Model-selection UX** (~100 LOC). `AgentConfig.source` today is
+   `"anthropic" | "codex" | "openai"`. Either accept the
+   `gateway/model_id` `display_id` format end-to-end, or add a model
+   picker that resolves bindings by display_id.
+6. **Smoke test** with a real OpenCode Go API key on at least one
+   binding per protocol.
 
-### Blocked on PR1
+PR2b is gated on (6) — landing the code without live verification
+just trades type-checked dead UI for shipped dead UI.
 
-- **PR2 OpenCode Go**: depends on pull migration landing (item 1). Until
-  then, a second Anthropic-protocol gateway has to pretend to be a
-  Claude vendor.
-- **Smoke test** (user-side): recommended after any landing that touches
-  decode paths. Present structural cutover moved SSE loops verbatim but
-  the AnthropicRuntime header path was rewritten on top of `AuthKind`;
-  not byte-verified against live traffic.
+### Future possibilities (deferred indefinitely)
 
-PR2 (OpenCode Go) remains as documented: catalog-only change once PR1
-cutover lands.
+- **Catalog JSON loader** (`models.catalog.json`). The data-driven
+  dispatch RFC originally proposed. Not needed today: three (or four,
+  with OpenCode Go) gateways fit comfortably in code, and no user has
+  asked for custom catalogs. Revisit when a fifth gateway lands or a
+  user explicitly needs to bring their own.
+- **On-disk `AccountEntry` migration to typed `auth_kind`** (~200 LOC
+  + versioned migration). Today the pool file still keys by
+  `(provider, is_oauth, account_id)` and `AuthKind` is derived on
+  read. Bump `POOL_STORE_VERSION` to 3 if/when a schema change is
+  forced for another reason.
+- **`AnthropicRuntime` fingerprint/session storage** (unresolved Q1).
+  Currently process-global `OnceLock` in `quirks/claude_identity`.
+  Move into per-runtime state when there's a concrete need (e.g. two
+  Anthropic-protocol bindings with different fingerprint policies in
+  the same process).
