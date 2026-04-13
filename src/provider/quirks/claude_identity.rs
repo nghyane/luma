@@ -4,8 +4,6 @@
 //! `src/utils/fingerprint.ts::computeFingerprint`. The fingerprint gates
 //! the backend's first-party client attribution — any drift from
 //! upstream hashing breaks the OAuth path.
-//!
-//! Extracted from `provider::claude` by RFC 0002.
 
 use crate::util::uuid_v4;
 

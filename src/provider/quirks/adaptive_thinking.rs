@@ -10,8 +10,6 @@
 //!   `thinking: {"type": "enabled", "budget_tokens": N}` and no
 //!   `output_config`.
 //! * `ThinkingLevel::Off` disables both fields.
-//!
-//! Extracted from `provider::claude` by RFC 0002.
 
 use crate::core::types::ThinkingLevel;
 

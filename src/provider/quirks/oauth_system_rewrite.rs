@@ -8,8 +8,6 @@
 //! Upstream references: `src/utils/api.ts::splitSysPromptPrefix`,
 //! `src/services/api/claude.ts::buildSystemPromptBlocks`,
 //! `src/utils/betas.ts::getAllModelBetas`.
-//!
-//! Extracted from `provider::claude` by RFC 0002.
 
 use crate::provider::quirks::claude_identity::{CLI_VERSION, compute_fingerprint};
 

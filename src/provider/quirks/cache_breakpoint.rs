@@ -6,9 +6,7 @@
 //! because they round-trip verbatim and their signatures break if
 //! annotated.
 //!
-//! Extracted from `provider::claude` by RFC 0002. Still invoked directly
-//! from `ClaudeProvider::build_request_body`; the quirks-middleware
-//! cutover happens in the final commit of PR1.
+//! Called from `protocol::anthropic::build_request_body`.
 
 /// Annotate the last mutable content block of the last message with an
 /// ephemeral cache breakpoint. No-op on empty input or when the last

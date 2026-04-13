@@ -122,9 +122,6 @@ impl Provider for OpenAIChatRuntime {
 }
 
 /// Drain an OpenAI Chat Completions SSE stream into a `StreamResponse`.
-///
-/// Extracted from `OpenAIChatRuntime::stream` for isolation. Still push-model
-/// (sends deltas via `EventSender`); RFC 0002 commit 5 migrates to pull.
 async fn consume_chat_stream(
     stream: &mut SseEventStream,
     tx: &EventSender,

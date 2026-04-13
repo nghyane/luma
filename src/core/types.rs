@@ -30,7 +30,7 @@ pub enum ContentBlock {
     ///
     /// `evidence_id` is an internal reference to the evidence store —
     /// provider adapters translate this variant to their wire format by
-    /// hand (see `provider::claude::encode_block`, `openai::to_api_messages`,
+    /// hand (see `provider::protocol::anthropic`, `openai_chat`,
     /// `codex::build_input`) and must drop `evidence_id` on the way out
     /// since it has no meaning to the model.
     ToolResult {

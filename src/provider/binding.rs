@@ -1,17 +1,14 @@
 //! Model binding — maps `(source, model_id)` to a concrete provider.
 //!
-//! RFC 0002 positions `ModelBinding` as the unit of registry lookup.
-//! Until a JSON catalog ships (PR2), builtin gateways are hardcoded and
-//! the binding layer is three thin free functions:
+//! `ModelBinding` is the unit of registry lookup. Builtin gateways are
+//! hardcoded; adding a catalog loader (JSON) is a future change.
+//!
+//! The binding layer is three flat free functions:
 //!
 //! * [`resolve`] — parse legacy `AgentConfig.source` into a `ModelBinding`.
 //! * [`build_provider`] — materialise a `Box<dyn Provider>` for a binding.
 //! * [`thinking_capabilities`] — pure `(gateway, model_id)` → caps lookup
 //!   used by the TUI before any credential is resolved.
-//!
-//! Keeping the surface flat avoids the enum-of-runtimes forwarding dance
-//! that was here previously; `Box<dyn Provider>` is the object-safe façade
-//! and there is exactly one `impl Provider` per wire protocol.
 
 use crate::config::auth::{AuthVendor, Credential};
 use crate::core::provider::{Provider, ThinkingCapabilities};

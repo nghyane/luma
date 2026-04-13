@@ -57,13 +57,11 @@ impl AnthropicRuntime {
         }
     }
 
-    /// Build the full Anthropic Messages request body.
+    /// Build the full Anthropic Messages request body. Pure.
     ///
-    /// Pure function of provider config + request inputs. Mixes in
-    /// Claude-specific quirks (cache breakpoint, OAuth system rewrite,
-    /// mcp_noop tool injection, thinking config) which RFC 0002 will
-    /// later extract into middleware. For now this is an in-place
-    /// refactor to make the wire-body building testable in isolation.
+    /// Delegates Claude-specific concerns (cache breakpoint, OAuth system
+    /// rewrite, mcp_noop tool injection, thinking config) to helpers in
+    /// `provider::quirks`.
     fn build_request_body(
         &self,
         messages: &[Message],
