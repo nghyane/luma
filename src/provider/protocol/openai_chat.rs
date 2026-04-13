@@ -9,8 +9,6 @@ use anyhow::Result;
 use futures::stream::{BoxStream, StreamExt};
 use std::collections::{HashMap, VecDeque};
 
-const BASE_URL: &str = "https://api.openai.com/v1";
-
 /// OpenAI chat completions provider (also works with Codex).
 pub struct OpenAIChatRuntime {
     model: String,
@@ -21,12 +19,15 @@ pub struct OpenAIChatRuntime {
 }
 
 impl OpenAIChatRuntime {
-    /// Create from model name, API key, and pool account label.
-    pub fn new(model: &str, api_key: &str, account_label: &str) -> Self {
+    /// Create from model name, gateway base URL, API key, and pool account
+    /// label. `base_url` must include the `/v1` prefix where applicable
+    /// (e.g. `https://api.openai.com/v1`); the runtime appends
+    /// `/chat/completions`.
+    pub fn new(model: &str, base_url: &str, api_key: &str, account_label: &str) -> Self {
         Self {
             model: model.to_owned(),
             max_tokens: crate::provider::protocol::anthropic::DEFAULT_MAX_TOKENS,
-            base_url: BASE_URL.to_owned(),
+            base_url: base_url.to_owned(),
             api_key: api_key.to_owned(),
             account_label: account_label.to_owned(),
         }

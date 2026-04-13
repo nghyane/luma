@@ -26,8 +26,6 @@ use anyhow::Result;
 use futures::stream::{BoxStream, StreamExt};
 use std::collections::VecDeque;
 
-const BASE_URL: &str = "https://api.anthropic.com";
-
 /// Default output token cap, matching claude-code's capped default.
 /// Caller can escalate to [`ESCALATED_MAX_TOKENS`] on first `max_tokens` hit.
 pub const DEFAULT_MAX_TOKENS: u32 = 8192;
@@ -50,9 +48,13 @@ pub struct AnthropicRuntime {
 impl AnthropicRuntime {
     /// Create from a credential token, its wire-level auth kind, and the
     /// set of quirks the gateway + auth combination needs applied.
+    /// `base_url` is the gateway's scheme+host with no trailing slash
+    /// (e.g. `https://api.anthropic.com`); the `/v1/messages` path is
+    /// appended internally.
     /// `account_label` is the pool entry name used for rate-limit / usage accounting.
     pub fn new(
         model: &str,
+        base_url: &str,
         api_key: &str,
         auth_kind: AuthKind,
         quirks: QuirkSet,
@@ -61,7 +63,7 @@ impl AnthropicRuntime {
         Self {
             max_tokens: DEFAULT_MAX_TOKENS,
             model: model.to_owned(),
-            base_url: BASE_URL.to_owned(),
+            base_url: base_url.to_owned(),
             api_key: api_key.to_owned(),
             auth_kind,
             quirks,
@@ -802,6 +804,7 @@ mod tests {
     fn adaptive_thinking_capabilities_include_max() {
         let provider = AnthropicRuntime::new(
             "claude-sonnet-4-6",
+            "https://api.anthropic.com",
             "key",
             crate::config::auth::AuthKind::ApiKey,
             crate::provider::quirks::QuirkSet::EMPTY,
@@ -820,6 +823,7 @@ mod tests {
     fn non_adaptive_thinking_capabilities_stop_at_high() {
         let provider = AnthropicRuntime::new(
             "claude-sonnet-4-5",
+            "https://api.anthropic.com",
             "key",
             crate::config::auth::AuthKind::ApiKey,
             crate::provider::quirks::QuirkSet::EMPTY,
