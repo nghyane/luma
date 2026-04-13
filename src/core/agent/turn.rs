@@ -84,11 +84,15 @@ pub async fn run_chat_turn(
             continue;
         }
 
-        // 401 — stale / revoked token. Force a refresh and retry once.
-        // For credentials that can't be refreshed (raw API keys),
-        // `force_refresh` errors out immediately so the user sees the
-        // real cause instead of "exhausted auth retries".
-        if is_auth_error(provider_kind.as_str(), &err) {
+        // 401 / 403 — stale / revoked token (typed by the HTTP layer).
+        // For OAuth credentials, force a refresh and retry. For raw API
+        // keys (no refresh possible), surface the original error so the
+        // user sees the server's message instead of a generic retry loop.
+        if let Some(unauth) = err.downcast_ref::<crate::provider::retry::ProviderUnauthorized>() {
+            if !auth_cred.is_oauth {
+                let _ = unauth; // consumed via Display in `err`
+                return Err(err);
+            }
             let _ = tx
                 .send(Event::ToolOutput {
                     name: String::new(),
@@ -102,15 +106,6 @@ pub async fn run_chat_turn(
         return Err(err);
     }
     anyhow::bail!("exhausted auth retries")
-}
-
-fn is_auth_error(provider: &str, err: &anyhow::Error) -> bool {
-    let msg = err.to_string();
-    crate::provider::retry::classify_auth_failure(provider, reqwest::StatusCode::UNAUTHORIZED, &msg)
-        .is_some()
-        || msg.contains("401")
-        || msg.contains("Unauthorized")
-        || msg.contains("unauthorized")
 }
 
 fn build_provider(

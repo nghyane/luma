@@ -1,4 +1,4 @@
-use crate::config::auth::{self, AuthFailureKind, UsageSnapshot};
+use crate::config::auth::{self, UsageSnapshot};
 use crate::event::Event;
 use crate::event_bus::Sender as EventSender;
 use anyhow::{Result, bail};
@@ -25,6 +25,18 @@ pub struct ProviderRateLimited {
     /// switching accounts may still help (different account), but retrying
     /// the *same* account won't.
     pub hard_quota: bool,
+}
+
+/// Auth failure surfaced by the HTTP layer (401 / 403). Typed so the
+/// turn-level loop can decide whether a refresh is even worth trying
+/// (OAuth) or whether to bail immediately (api key) without parsing
+/// error message strings.
+#[derive(Debug, thiserror::Error)]
+#[error("{provider} unauthorized ({status}): {detail}")]
+pub struct ProviderUnauthorized {
+    pub provider: String,
+    pub status: u16,
+    pub detail: String,
 }
 
 /// Format provider HTTP errors with clearer guidance for TUI.
@@ -218,15 +230,6 @@ fn extract_error_message(body: &str) -> String {
         .unwrap_or_else(|| body[..body.len().min(200)].to_owned())
 }
 
-pub fn classify_auth_failure(
-    provider: &str,
-    status: reqwest::StatusCode,
-    body: &str,
-) -> Option<AuthFailureKind> {
-    let provider = crate::config::auth::AuthVendor::from_str(provider)?;
-    provider.classify_auth_failure(status.as_u16(), &extract_error_message(body))
-}
-
 /// Parse provider rate-limit headers into a normalized `UsageSnapshot`.
 ///
 /// Supports Anthropic (`anthropic-ratelimit-*`) and OpenAI/Codex
@@ -357,6 +360,20 @@ where
 
         let body = resp.text().await.unwrap_or_default();
         let msg = extract_error_message(&body);
+
+        // 401 / 403: surface as typed `ProviderUnauthorized` so the turn
+        // loop can decide refresh vs bail without parsing the error
+        // string. The `detail` carries the server's message verbatim for
+        // user-facing diagnostics.
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(ProviderUnauthorized {
+                provider: provider.to_owned(),
+                status: status.as_u16(),
+                detail: msg,
+            }
+            .into());
+        }
+
         let retryable = status == reqwest::StatusCode::BAD_GATEWAY
             || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
             || status == reqwest::StatusCode::GATEWAY_TIMEOUT

@@ -31,7 +31,6 @@ mod pkce;
 mod policy;
 pub(crate) use codex_identity::{CODEX_ORIGINATOR, codex_user_agent, resolve_installation_id};
 pub use pkce::login;
-pub(crate) use policy::AuthFailureKind;
 
 // --- provider-specific OAuth config ---
 
