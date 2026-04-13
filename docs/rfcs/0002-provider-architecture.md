@@ -410,6 +410,8 @@ Single file `src/config/models.catalog.json` với schema:
 
 ### File layout
 
+The original plan:
+
 ```text
 src/provider/
   mod.rs                   // trait Provider (giữ), ProviderError
@@ -438,6 +440,59 @@ src/config/
   models.catalog.json
   auth/mod.rs              // AuthKind refactor
 ```
+
+As-built (see §Implementation status for why it diverged):
+
+```text
+src/provider/
+  mod.rs
+  binding.rs               // resolve, build_provider, ModelBinding, ProtocolId
+  gateway.rs               // trait Gateway, GatewayId
+  gateways/
+    mod.rs                 // GATEWAYS &[&dyn Gateway] + lookup()
+    anthropic.rs
+    codex.rs
+    openai.rs
+    opencode_go.rs
+  protocol/
+    mod.rs
+    anthropic.rs           // AnthropicRuntime + decode_anthropic_sse
+    openai_chat.rs         // OpenAIChatRuntime  + decode_chat_sse
+    openai_responses.rs    // OpenAIResponsesRuntime + decode_responses_sse
+  quirks/
+    mod.rs                 // QuirkSet bitflags
+    adaptive_thinking.rs
+    cache_breakpoint.rs
+    claude_identity.rs     // user-agent + session-id + fingerprint (merged)
+    oauth_system_rewrite.rs
+  sse.rs, json_stream.rs, retry.rs   // retry.rs also hosts typed errors
+
+src/config/
+  auth/mod.rs              // Credential, AuthVendor, upsert_api_key, …
+  auth/pkce.rs
+  auth/policy.rs           // build_refresh_request only
+  models.catalog.json      // builtin model metadata (no gateway/quirk data)
+
+src/cli_login.rs           // `luma login` arrow-key picker + api-key paste
+```
+
+Key differences from the original plan:
+
+- No `runtime.rs`, no `ProviderRuntime` enum. Dropped as scaffolding
+  (commit `277220d`).
+- No separate `gateway/defs.rs`; gateways are one file each under
+  `gateways/`.
+- No `config/registry.rs` / JSON catalog loader. Each gateway owns
+  its catalog (e.g. OpenCode Go's per-model protocol table lives in
+  `gateways/opencode_go.rs`).
+- `AuthKind` enum introduced in commit 10 and subsequently removed
+  (`dc5f26f`): wire header shape is a **protocol endpoint** concern,
+  not a credential one, so it lives at the runtime.
+- `claude_user_agent.rs` + `claude_fingerprint.rs` merged into
+  `claude_identity.rs` (single identity surface).
+- Quirks for `anthropic_betas` and `codex_session` are not standalone
+  files; they're flag constants in `QuirkSet` consumed inline by the
+  protocol runtime.
 
 ### Migration plan
 
@@ -686,72 +741,130 @@ PR2a infrastructure (session 2):
   `BASE_URL` consts removed. Codex Responses keeps its hardcoded
   endpoint (chatgpt.com session headers are not transferable).
 
-### State after commit `7ab50d5`
+PR2b OpenCode Go shipping (session 2):
 
-- 576 tests pass; `cargo clippy -- -D warnings` clean.
-- File layout matches RFC §File layout.
-- Three flat free functions in `binding.rs` (no registry struct);
-  hardcoded gateways. Catalog JSON loader deferred until a fifth
-  gateway exists or a user explicitly needs custom catalogs.
-- Pull-based decoders in all three protocol modules. Per-decoder
-  unit tests exercise synthetic SSE frames.
-- `QuirkSet` decouples vendor quirks from wire protocol. PR2 OpenCode
-  Go can speak Anthropic Messages with `QuirkSet::EMPTY`.
-- `AuthKind` decouples wire auth from pool vendor.
-- `ModelBinding` carries `protocol` + `base_url`, ready for a single
-  gateway to serve multiple protocols on different endpoint paths.
+- `e0ee004` feat(auth): OpenCode Go support + arrow-key login picker.
+  New `AuthVendor::OpenCodeGo`, `GatewayId::OpenCodeGo`, seven
+  builtin model bindings (glm-5/5.1, kimi-k2.5, mimo-v2-pro/omni,
+  minimax-m2.5/2.7). `resolve(opencode-go, model_id)` consults a
+  per-model table because the proxy serves both protocols on
+  distinct endpoint paths. `auth::upsert_api_key` stores paste-key
+  credentials with `is_oauth=false`, no refresh, no expiry. New
+  `cli_login` module drives an arrow-key provider picker (termina
+  raw mode) that dispatches to the PKCE flow for OAuth vendors and
+  to an inline paste prompt for api-key vendors. `/login` and
+  related TUI command surface removed; one login entry point.
+- `4a60d7a` fix: picker render uses `\r\n` (raw mode has no
+  LF→CRLF translation).
+- `484e583` fix: opencode-go models missing from picker after
+  `luma sync` (catalog JSON didn't include them, sync didn't scan
+  them — proxy has no list-models endpoint); picker also didn't
+  clear prior terminal content. Adds clear-screen on entry and
+  includes the seven builtin OpenCode Go rows when sync falls back
+  to the embedded catalog.
+- `314e3f5` → `dc5f26f` → `5f48cad` a sequence of root-cause fixes
+  for "exhausted auth retries" on OpenCode Go. See §Root causes
+  below.
+
+Architecture cleanup forced by PR2b surface (session 2):
+
+- `17a97bf` refactor(binding): collapse five scattered
+  match-by-GatewayId helpers (auth_vendor, default_protocol,
+  base_url, auth_kind_for, quirks_for) into one static
+  `GatewaySpec` table. Every per-gateway concern is one field on
+  one row. First attempt at centralising.
+- `1d155fb` refactor(provider): drop the spec table for a proper
+  `Gateway` trait + one-file-per-provider under
+  `provider/gateways/<name>.rs`. Each gateway owns its vendor,
+  base_url, quirks, protocol resolution, thinking caps, and
+  `build`. `binding.rs` is a 123-LOC dispatcher; adding a gateway
+  is a new file + one row in `GATEWAYS` + one `GatewayId` variant.
+  Registry-coverage test asserts every variant has a row.
+- `948af1a` refactor(provider): typed `ProviderUnauthorized`.
+  Replaces vendor-keyed keyword classifiers
+  (`classify_auth_failure`, `AuthFailureKind`, `is_auth_error`)
+  with a typed error raised by the HTTP layer on 401/403.
+  `turn.rs` downcasts the typed error; no more grepping for
+  "401" / "unauthorized" in message strings.
+- `948af1a`/`dc5f26f` additionally drop `Credential::auth_kind`
+  and `Gateway::auth_kind`. Wire header shape now lives at the
+  protocol runtime (`AnthropicRuntime` derives it from an `is_oauth`
+  bool). Root cause: header shape depends on **protocol endpoint**,
+  not gateway or credential — OpenCode Go's `/v1/chat/completions`
+  wants `Authorization: Bearer` while `/v1/messages` on the same
+  host wants `x-api-key`. Any enum tied to gateway-or-credential
+  alone could not express that.
+
+Fixes forced by live smoke-test of OpenCode Go:
+
+- `314e3f5` First misrouting: `Credential::auth_kind` derived
+  `CodexSession` for OpenCode Go api keys because the
+  `(is_oauth, account_id)` split shared with Codex misfired.
+- `dc5f26f` Second misrouting: after dropping `auth_kind`, discovered
+  via curl that OpenCode Go's two endpoints want different auth
+  headers. Forced header shape per protocol in `OpenCodeGo::build`.
+- `d8bd787` URL mismatch: `OpenAIChatRuntime` built
+  `{base_url}/chat/completions` while `AnthropicRuntime` built
+  `{base_url}/v1/messages`. OpenAI gateway was hiding the
+  inconsistency by hard-coding `/v1` into its base_url; OpenCode
+  Go didn't, so its OpenAI Chat path 404'd. Normalised: base_url
+  is scheme+host only, runtime owns the `/v1/<endpoint>` path.
+- `5f48cad` UX: 401 on an api key no longer tries to refresh or
+  delete. Matches gh/aws/stripe CLIs — a single auth failure
+  surfaces "`luma login` to replace it"; the pool is untouched.
+
+### State after commit `5f48cad`
+
+- 578 tests pass; `cargo clippy -- -D warnings` clean.
+- Every per-gateway concern lives in `src/provider/gateways/<name>.rs`.
+  Adding a gateway: new file + one row in `gateways::GATEWAYS` + one
+  `GatewayId` variant. Compiler enforces exhaustiveness; a registry
+  test asserts the mapping is total.
+- `binding.rs` (123 LOC) is a thin dispatcher. No per-gateway policy
+  survives there.
+- Pull-based decoders in all three protocol modules with synthetic
+  SSE unit tests.
+- `QuirkSet` decouples vendor quirks from wire protocol.
+- Typed error surface (`ProviderRateLimited`, `ProviderUnauthorized`,
+  `StreamInterrupted`) — no more keyword matching on error strings.
 - 0 `#[allow(dead_code)]`, 0 TODO/FIXME, 0 stale RFC narrative.
-- Smoke-tested live: Claude OAuth (twice — after `5705b62` and after
-  `15f0178`). Codex + OpenAI direct not yet verified against live
-  traffic; recommended before relying on either path.
+- Smoke-tested live:
+  - Claude OAuth turn (twice, after `5705b62` and `15f0178`).
+  - OpenCode Go: direct curl verified both endpoints reachable with
+    the auth headers the code now sends. End-to-end TUI turn from
+    a model selector pending user confirmation.
+  - Codex + OpenAI direct not yet verified against live traffic.
 
-### Remaining work — PR2b (OpenCode Go user-facing)
+### Remaining work
 
-Out of scope for the architecture refactor; tracked here so it doesn't
-get forgotten:
+Out of scope for this RFC; tracked here for continuity:
 
-1. **`AuthVendor::OpenCodeGo` + api-key auth path** (~200 LOC). New
-   variant in `auth/mod.rs`. `resolve` skips refresh entirely when
-   `is_oauth == false`; `pick_candidate` and `attempt_auto_recover`
-   handle the no-refresh-token case gracefully. `load_local` returns
-   `None` (no upstream CLI to bootstrap from).
-2. **Pool storage for paste-key credentials** (~50 LOC). Verify every
-   `AccountEntry` path handles `is_oauth: false` with no
-   `refresh_token`. The struct already supports it; the persistence
-   tests need extending.
-3. **`/connect opencode-go` UI flow** (~150 LOC). Branch in
-   `tui/app/commands.rs`: when the gateway uses an api-key auth
-   scheme, prompt for the key in the TUI, validate via a probe
-   request, and upsert into the pool. No PKCE listener.
-4. **`GatewayId::OpenCodeGo` + binding entries** (~50 LOC). Add the
-   variant; populate `default_protocol` (no single answer — OpenCode
-   Go serves both, so bindings must override per-row). Add bindings
-   for at least `opencode-go/kimi-k2.5` (OpenAI Chat) and
-   `opencode-go/minimax-m2.7` (Anthropic Messages, `QuirkSet::EMPTY`).
-5. **Model-selection UX** (~100 LOC). `AgentConfig.source` today is
-   `"anthropic" | "codex" | "openai"`. Either accept the
-   `gateway/model_id` `display_id` format end-to-end, or add a model
-   picker that resolves bindings by display_id.
-6. **Smoke test** with a real OpenCode Go API key on at least one
-   binding per protocol.
+- **Model-selection UX for `opencode-go/<model>` ids.** `AgentConfig.source`
+  still carries a single vendor string; users select an OpenCode Go
+  model by gateway + id through the model picker. Unifying to a
+  single `display_id` format is a cosmetic follow-up.
+- **On-disk `AccountEntry` migration to a typed auth_kind field.**
+  Today the pool file still keys by `(provider, is_oauth,
+  account_id)`. Bump `POOL_STORE_VERSION` to 3 only if a future
+  schema change forces it.
+- **`AnthropicRuntime` fingerprint/session storage** (unresolved Q1).
 
-PR2b is gated on (6) — landing the code without live verification
-just trades type-checked dead UI for shipped dead UI.
-
-### Future possibilities (deferred indefinitely)
-
-- **Catalog JSON loader** (`models.catalog.json`). The data-driven
-  dispatch RFC originally proposed. Not needed today: three (or four,
-  with OpenCode Go) gateways fit comfortably in code, and no user has
-  asked for custom catalogs. Revisit when a fifth gateway lands or a
-  user explicitly needs to bring their own.
-- **On-disk `AccountEntry` migration to typed `auth_kind`** (~200 LOC
-  + versioned migration). Today the pool file still keys by
-  `(provider, is_oauth, account_id)` and `AuthKind` is derived on
-  read. Bump `POOL_STORE_VERSION` to 3 if/when a schema change is
-  forced for another reason.
 - **`AnthropicRuntime` fingerprint/session storage** (unresolved Q1).
   Currently process-global `OnceLock` in `quirks/claude_identity`.
   Move into per-runtime state when there's a concrete need (e.g. two
   Anthropic-protocol bindings with different fingerprint policies in
   the same process).
+
+### Future possibilities (deferred indefinitely)
+
+- **Catalog JSON loader** (`models.catalog.json`). The data-driven
+  dispatch RFC originally proposed. Not needed today: four gateways
+  fit comfortably as one-file-per-provider impls under
+  `provider/gateways/`, and no user has asked for custom catalogs.
+  Revisit when a fifth gateway lands or a user explicitly needs to
+  bring their own.
+- **Inventory-based plugin registration.** Replaces the static
+  `GATEWAYS` array with runtime discovery via the `inventory`
+  crate. Evaluated and rejected (commit `1d155fb` discussion):
+  regression in compile-time exhaustiveness outweighs the "add a
+  file, not a line" ergonomics for a project with < 10 gateways.
