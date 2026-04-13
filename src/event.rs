@@ -81,19 +81,6 @@ pub enum Event {
     /// Async clipboard image result — None means no image found.
     ClipboardImage(Option<(String, Vec<u8>)>),
 
-    /// PKCE login produced an authorize URL. Surface it in the TUI so the
-    /// user can click/copy (the flow already tries to open the browser, but
-    /// we want a visible fallback in case that fails on SSH / WSL / etc.).
-    LoginUrl(String),
-    /// PKCE login completed successfully. The account is already in the pool.
-    LoginDone {
-        label: String,
-        email: Option<String>,
-        provider: String,
-    },
-    /// PKCE login failed — surface the reason to the user.
-    LoginFailed(String),
-
     Tick,
 }
 

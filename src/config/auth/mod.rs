@@ -30,7 +30,7 @@ mod codex_identity;
 mod pkce;
 mod policy;
 pub(crate) use codex_identity::{CODEX_ORIGINATOR, codex_user_agent, resolve_installation_id};
-pub use pkce::{login, login_with_reporter};
+pub use pkce::login;
 pub(crate) use policy::AuthFailureKind;
 
 // --- provider-specific OAuth config ---
@@ -73,6 +73,7 @@ const POOL_STORE_VERSION: u32 = 2;
 pub enum AuthVendor {
     Anthropic,
     OpenAI,
+    OpenCodeGo,
 }
 
 impl AuthVendor {
@@ -80,6 +81,7 @@ impl AuthVendor {
         match self {
             AuthVendor::Anthropic => "anthropic",
             AuthVendor::OpenAI => "openai",
+            AuthVendor::OpenCodeGo => "opencode-go",
         }
     }
 
@@ -87,6 +89,7 @@ impl AuthVendor {
         match s {
             "anthropic" => Some(Self::Anthropic),
             "openai" | "codex" => Some(Self::OpenAI),
+            "opencode-go" => Some(Self::OpenCodeGo),
             _ => None,
         }
     }
@@ -138,6 +141,9 @@ impl Credential {
         match (self.is_oauth, self.vendor) {
             (true, AuthVendor::OpenAI) => AuthKind::CodexSession,
             (true, AuthVendor::Anthropic) => AuthKind::OAuthBearer,
+            // OpenCode Go ships only API keys today; treat a future
+            // oauth bit as bearer rather than widening the enum.
+            (true, AuthVendor::OpenCodeGo) => AuthKind::OAuthBearer,
             (false, _) => AuthKind::ApiKey,
         }
     }
@@ -321,6 +327,46 @@ pub fn remove_account(label: &str) {
     with_pool_mut(|p| p.accounts.retain(|a| a.label != label));
 }
 
+/// Upsert a raw API key into the pool.
+///
+/// Used by `luma login` for gateways that do not speak OAuth (today:
+/// OpenCode Go). The entry is stored with `is_oauth: false`, no refresh
+/// token, and no expiry — `resolve` fast-paths this shape straight into
+/// a `Credential`.
+///
+/// The label is derived from `vendor` + a short key fingerprint so
+/// multiple keys on the same vendor stay distinguishable in the
+/// `/accounts` listing.
+pub fn upsert_api_key(vendor: AuthVendor, token: &str) -> String {
+    let label = derive_api_key_label(vendor, token);
+    let entry = AccountEntry {
+        label: label.clone(),
+        provider: vendor.as_str().to_owned(),
+        email: None,
+        access_token: token.to_owned(),
+        refresh_token: None,
+        account_id: None,
+        is_oauth: false,
+        expires_at: None,
+        scopes: None,
+        cooldown_until: None,
+        usage: UsageRec::default(),
+        needs_relogin: false,
+        disabled: false,
+    };
+    with_pool_mut(|p| upsert_by_label(p, entry));
+    label
+}
+
+fn derive_api_key_label(vendor: AuthVendor, token: &str) -> String {
+    // Short suffix is just for human disambiguation in /accounts — not
+    // security-critical. Strip any leading `sk-` to keep the suffix
+    // meaningful for keys that all share a common prefix.
+    let core = token.strip_prefix("sk-").unwrap_or(token);
+    let suffix: String = core.chars().take(6).collect();
+    format!("{}:key:{}", vendor.as_str(), suffix)
+}
+
 /// Toggle disabled state for an account. Disabled accounts are shown in
 /// `/accounts` but skipped by `resolve`.
 pub fn toggle_disabled(label: &str) {
@@ -427,7 +473,9 @@ async fn resolve_inner(provider: AuthVendor, force: bool) -> Result<Credential> 
         );
 
         // Fast path: cached token still valid and not forced.
-        if !force && !is_expired(entry.expires_at) {
+        // Raw API keys (non-oauth) also short-circuit here — no expiry,
+        // no refresh, `force` has no effect.
+        if !entry.is_oauth || (!force && !is_expired(entry.expires_at)) {
             crate::dbg_log!(
                 "auth resolve fast-path provider={} label={}",
                 provider.as_str(),
@@ -690,6 +738,9 @@ fn load_local(provider: AuthVendor) -> Option<AccountEntry> {
     match provider {
         AuthVendor::Anthropic => load_claude_local(),
         AuthVendor::OpenAI => load_codex_local(),
+        // OpenCode Go has no upstream CLI to bootstrap from; keys are
+        // pasted interactively via `luma login`.
+        AuthVendor::OpenCodeGo => None,
     }
 }
 

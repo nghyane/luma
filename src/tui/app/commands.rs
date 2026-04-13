@@ -3,7 +3,7 @@ use super::Action;
 use super::state::PickerMode;
 use crate::config::auth::{self, AccountHealth, AuthVendor};
 use crate::config::models::{self, AgentMode};
-use crate::event::{AgentCommand, Event};
+use crate::event::AgentCommand;
 use crate::tui::status::PoolHealth;
 use crate::tui::theme::palette;
 
@@ -112,14 +112,6 @@ impl super::App {
                 self.open_accounts_dialog();
                 Action::Render
             }
-            "login" | "login anthropic" | "login claude" => {
-                self.start_login(AuthVendor::Anthropic);
-                Action::Render
-            }
-            "login openai" | "login codex" => {
-                self.start_login(AuthVendor::OpenAI);
-                Action::Render
-            }
             "exit" => Action::Quit,
             _ => {
                 self.doc.warn(&format!("unknown command: /{cmd}"));
@@ -133,7 +125,7 @@ impl super::App {
         self.refresh_pool_health();
         let accounts = auth::list_accounts();
         if accounts.is_empty() {
-            self.doc.info("no accounts · run /login to add one");
+            self.doc.info("no accounts · run `luma login` to add one");
             return;
         }
         let items = accounts
@@ -142,6 +134,7 @@ impl super::App {
                 let provider = match a.provider {
                     AuthVendor::Anthropic => "claude",
                     AuthVendor::OpenAI => "codex",
+                    AuthVendor::OpenCodeGo => "opencode-go",
                 };
                 let status = match a.health {
                     AccountHealth::Ok if a.disabled => "off",
@@ -161,38 +154,6 @@ impl super::App {
             })
             .collect();
         self.ui.dialog.open("accounts", items);
-    }
-
-    /// Spawn a detached PKCE login flow for `provider`. Progress and the
-    /// final outcome are reported to the UI via the event bus.
-    pub(super) fn start_login(&mut self, provider: AuthVendor) {
-        let Some(tx) = self.tx.clone() else {
-            self.doc.error("internal: event bus not ready");
-            return;
-        };
-        self.doc
-            .info(&format!("{} login · opening browser…", provider.as_str()));
-        tokio::spawn(async move {
-            let tx_url = tx.clone();
-            let outcome = auth::login_with_reporter(provider, move |url| {
-                let _ = tx_url.try_send(Event::LoginUrl(url.to_owned()));
-            })
-            .await;
-            match outcome {
-                Ok(o) => {
-                    let _ = tx
-                        .send(Event::LoginDone {
-                            label: o.label,
-                            email: o.email,
-                            provider: o.provider.as_str().to_owned(),
-                        })
-                        .await;
-                }
-                Err(e) => {
-                    let _ = tx.send(Event::LoginFailed(e.to_string())).await;
-                }
-            }
-        });
     }
 
     /// Re-read the pool and push a fresh health summary into the status bar.
@@ -462,10 +423,7 @@ fn format_account_row(a: &crate::config::auth::AccountView) -> String {
         AccountHealth::NeedsRelogin => "○",
     };
     let who = a.email.as_deref().unwrap_or(a.label.as_str());
-    let provider = match a.provider {
-        AuthVendor::Anthropic => "anthropic",
-        AuthVendor::OpenAI => "openai",
-    };
+    let provider = a.provider.as_str();
     let status = match a.health {
         AccountHealth::Ok => "ok".to_owned(),
         AccountHealth::Cooldown { until_unix } => {

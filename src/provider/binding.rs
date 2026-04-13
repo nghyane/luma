@@ -25,6 +25,7 @@ pub enum GatewayId {
     Anthropic,
     Codex,
     OpenAI,
+    OpenCodeGo,
 }
 
 /// Identifier for a wire protocol. Decoupled from `GatewayId` so a
@@ -51,6 +52,7 @@ impl GatewayId {
         match source {
             "anthropic" => Self::Anthropic,
             "codex" => Self::Codex,
+            "opencode-go" => Self::OpenCodeGo,
             _ => Self::OpenAI,
         }
     }
@@ -60,15 +62,19 @@ impl GatewayId {
         match self {
             Self::Anthropic => AuthVendor::Anthropic,
             Self::Codex | Self::OpenAI => AuthVendor::OpenAI,
+            Self::OpenCodeGo => AuthVendor::OpenCodeGo,
         }
     }
 
-    /// Default wire protocol for this gateway. Overrideable per-binding
-    /// once a gateway serves multiple protocols (see RFC 0002 §Motivation
-    /// — OpenCode Go is the first such case).
+    /// Default wire protocol for this gateway. OpenCode Go has no single
+    /// answer — bindings for that gateway MUST set `protocol` explicitly
+    /// per model (some models serve OpenAI Chat, others Anthropic
+    /// Messages). This default is what `resolve()` uses when no catalog
+    /// entry matches, and is harmless there because OpenCode Go bindings
+    /// are always resolved via the catalog (see `resolve_opencode_go`).
     fn default_protocol(self) -> ProtocolId {
         match self {
-            Self::Anthropic => ProtocolId::AnthropicMessages,
+            Self::Anthropic | Self::OpenCodeGo => ProtocolId::AnthropicMessages,
             Self::Codex => ProtocolId::OpenAIResponses,
             Self::OpenAI => ProtocolId::OpenAIChat,
         }
@@ -81,6 +87,9 @@ impl GatewayId {
             Self::Anthropic => "https://api.anthropic.com",
             Self::Codex => "https://chatgpt.com/backend-api/codex",
             Self::OpenAI => "https://api.openai.com/v1",
+            // OpenCode Go exposes /v1/chat/completions + /v1/messages
+            // under the same /zen/go prefix.
+            Self::OpenCodeGo => "https://opencode.ai/zen/go",
         }
     }
 }
@@ -101,8 +110,37 @@ fn quirks_for(gateway: GatewayId, auth: AuthKind) -> QuirkSet {
                 | QuirkSet::CLAUDE_IDENTITY
         }
         (GatewayId::Anthropic, _) => QuirkSet::CACHE_BREAKPOINT | QuirkSet::ADAPTIVE_THINKING,
-        (GatewayId::Codex, _) | (GatewayId::OpenAI, _) => QuirkSet::EMPTY,
+        // OpenCode Go proxies Anthropic Messages but is NOT Claude Code —
+        // no OAuth system rewrite, no beta header, no identity headers.
+        // Plain bearer passthrough.
+        (GatewayId::Codex, _) | (GatewayId::OpenAI, _) | (GatewayId::OpenCodeGo, _) => {
+            QuirkSet::EMPTY
+        }
     }
+}
+
+/// OpenCode Go model catalog. Each entry declares the wire protocol the
+/// proxy uses for that model — the same gateway serves both Anthropic
+/// Messages (`/v1/messages`) and OpenAI Chat (`/v1/chat/completions`) on
+/// distinct endpoint paths. Source: <https://opencode.ai/docs/go/>.
+const OPENCODE_GO_MODELS: &[(&str, ProtocolId)] = &[
+    ("glm-5", ProtocolId::OpenAIChat),
+    ("glm-5.1", ProtocolId::OpenAIChat),
+    ("kimi-k2.5", ProtocolId::OpenAIChat),
+    ("mimo-v2-pro", ProtocolId::OpenAIChat),
+    ("mimo-v2-omni", ProtocolId::OpenAIChat),
+    ("minimax-m2.5", ProtocolId::AnthropicMessages),
+    ("minimax-m2.7", ProtocolId::AnthropicMessages),
+];
+
+/// Look up the wire protocol for a model id on OpenCode Go. Returns
+/// `None` for unknown models so callers can surface a clear error instead
+/// of silently defaulting to the wrong protocol.
+pub fn opencode_go_protocol(model_id: &str) -> Option<ProtocolId> {
+    OPENCODE_GO_MODELS
+        .iter()
+        .find(|(id, _)| *id == model_id)
+        .map(|(_, p)| *p)
 }
 
 /// A selected model on a selected gateway, carrying enough data for the
@@ -119,12 +157,24 @@ pub struct ModelBinding {
 }
 
 /// Parse `(source, model_id)` into a binding. Total over all inputs.
+///
+/// For OpenCode Go, the protocol depends on the model id (the proxy
+/// serves both Anthropic Messages and OpenAI Chat). Unknown OpenCode Go
+/// model ids fall back to `AnthropicMessages` — the binding will still
+/// build; the user will see a clear 404 from the proxy if the model
+/// name is wrong.
 pub fn resolve(source: &str, model_id: &str) -> ModelBinding {
     let gateway = GatewayId::from_source(source);
+    let protocol = match gateway {
+        GatewayId::OpenCodeGo => {
+            opencode_go_protocol(model_id).unwrap_or(ProtocolId::AnthropicMessages)
+        }
+        _ => gateway.default_protocol(),
+    };
     ModelBinding {
         gateway,
         model_id: model_id.to_owned(),
-        protocol: gateway.default_protocol(),
+        protocol,
         base_url: gateway.base_url().to_owned(),
     }
 }
@@ -163,7 +213,9 @@ pub fn thinking_capabilities(gateway: GatewayId, model_id: &str) -> ThinkingCapa
             ])
         }
         GatewayId::Anthropic | GatewayId::Codex => ThinkingCapabilities::standard(),
-        GatewayId::OpenAI => ThinkingCapabilities::off_only(),
+        // OpenCode Go models don't expose thinking controls in the
+        // proxy's published contract; surface off-only for now.
+        GatewayId::OpenAI | GatewayId::OpenCodeGo => ThinkingCapabilities::off_only(),
     }
 }
 

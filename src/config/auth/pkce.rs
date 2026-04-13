@@ -139,6 +139,12 @@ pub async fn login_with_reporter<F>(provider: AuthVendor, on_url: F) -> Result<L
 where
     F: FnOnce(&str),
 {
+    if matches!(provider, AuthVendor::OpenCodeGo) {
+        anyhow::bail!(
+            "opencode-go does not support OAuth; paste your API key via `luma login` instead"
+        );
+    }
+
     let verifier = gen_verifier();
     let challenge = gen_challenge(&verifier);
     let state = gen_state();
@@ -156,6 +162,7 @@ where
         AuthVendor::OpenAI => {
             ProviderFlow::codex(&challenge, &state, &build_redirect_uri(provider, port))
         }
+        AuthVendor::OpenCodeGo => unreachable!("guarded above"),
     };
 
     on_url(&flow.authorize_url);
@@ -202,6 +209,7 @@ async fn bind_listener(provider: AuthVendor) -> Result<tokio::net::TcpListener> 
     let port = match provider {
         AuthVendor::Anthropic => 0,
         AuthVendor::OpenAI => CODEX_CALLBACK_PORT,
+        AuthVendor::OpenCodeGo => anyhow::bail!("opencode-go does not use PKCE"),
     };
     tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
@@ -226,6 +234,7 @@ fn build_redirect_uri(provider: AuthVendor, port: u16) -> String {
     match provider {
         AuthVendor::Anthropic => format!("http://localhost:{port}/callback"),
         AuthVendor::OpenAI => format!("http://localhost:{port}/auth/callback"),
+        AuthVendor::OpenCodeGo => unreachable!("opencode-go does not use PKCE"),
     }
 }
 
@@ -558,6 +567,7 @@ async fn exchange_code(flow: &ProviderFlow, code: &str, verifier: &str) -> Resul
                 .and_then(|c| c.get("exp").and_then(|v| v.as_u64()));
             (email, account_id, expires_at)
         }
+        AuthVendor::OpenCodeGo => unreachable!("opencode-go does not use PKCE"),
     };
 
     let scopes = json

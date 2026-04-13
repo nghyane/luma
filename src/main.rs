@@ -21,6 +21,7 @@ macro_rules! dbg_log {
     };
 }
 
+mod cli_login;
 mod config;
 mod core;
 mod event;
@@ -76,11 +77,9 @@ async fn main() {
             for provider in [
                 config::auth::AuthVendor::Anthropic,
                 config::auth::AuthVendor::OpenAI,
+                config::auth::AuthVendor::OpenCodeGo,
             ] {
-                let name = match provider {
-                    config::auth::AuthVendor::Anthropic => "anthropic",
-                    config::auth::AuthVendor::OpenAI => "openai",
-                };
+                let name = provider.as_str();
                 match config::auth::resolve(provider).await {
                     Ok(auth) => println!(
                         "{name}: {} (ok)",
@@ -91,27 +90,9 @@ async fn main() {
             }
         }
         Some("login") => {
-            let provider = match args.get(2).map(std::string::String::as_str) {
-                Some("anthropic" | "claude") | None => config::auth::AuthVendor::Anthropic,
-                Some("openai" | "codex") => config::auth::AuthVendor::OpenAI,
-                Some(other) => {
-                    eprintln!("unknown provider: {other}\nusage: luma login [anthropic|openai]");
-                    std::process::exit(1);
-                }
-            };
-            match config::auth::login(provider).await {
-                Ok(outcome) => {
-                    let who = outcome.email.as_deref().unwrap_or(outcome.label.as_str());
-                    println!(
-                        "signed in as {who} ({}) · provider: {}",
-                        outcome.label,
-                        outcome.provider.as_str()
-                    );
-                }
-                Err(e) => {
-                    eprintln!("login failed: {e}");
-                    std::process::exit(1);
-                }
+            if let Err(e) = cli_login::run(args.get(2).map(std::string::String::as_str)).await {
+                eprintln!("{e}");
+                std::process::exit(1);
             }
         }
         Some("accounts") => {
@@ -144,7 +125,7 @@ async fn main() {
         Some("version" | "--version" | "-v") => println!("luma {}", env!("CARGO_PKG_VERSION")),
         Some("help" | "--help" | "-h") => {
             println!(
-                "luma - lightweight coding agent\n\nusage:\n  luma                     start TUI\n  luma sync                sync models\n  luma auth                show resolved auth per provider\n  luma login [provider]    add an account to the pool (anthropic|openai)\n  luma accounts            list accounts in the pool\n  luma update              update to latest\n  luma version             show version"
+                "luma - lightweight coding agent\n\nusage:\n  luma                     start TUI\n  luma sync                sync models\n  luma auth                show resolved auth per provider\n  luma login [provider]    add an account (anthropic|openai|opencode-go); omit for picker\n  luma accounts            list accounts in the pool\n  luma update              update to latest\n  luma version             show version"
             );
         }
         Some(unknown) => {

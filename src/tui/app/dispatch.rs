@@ -223,30 +223,6 @@ impl super::App {
                     .provider_retry(&provider, delay_secs, attempt, max_attempts);
                 Action::Render
             }
-            Event::LoginUrl(url) => {
-                self.doc
-                    .info(&format!("open this URL to sign in:\n  {url}"));
-                Action::Render
-            }
-            Event::LoginDone {
-                label,
-                email,
-                provider,
-            } => {
-                let who = email.as_deref().unwrap_or(label.as_str());
-                self.doc
-                    .info(&format!("signed in as {who} ({provider} · {label})"));
-                self.refresh_pool_health();
-                // Rebuild dialog if open so the new account appears immediately.
-                if self.ui.dialog.is_active {
-                    self.open_accounts_dialog();
-                }
-                Action::Render
-            }
-            Event::LoginFailed(msg) => {
-                self.doc.error(&format!("login failed: {msg}"));
-                Action::Render
-            }
             Event::Usage(usage) => {
                 if usage.cache_read.is_some() || usage.cache_write.is_some() {
                     self.ui.status.set_cache(

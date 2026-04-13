@@ -56,6 +56,10 @@ impl AuthVendor {
                     None
                 }
             }
+            (Self::OpenCodeGo, _) => {
+                // API-key gateway: any 401/403 is terminal unauthorized.
+                Some(AuthFailureKind::Unauthorized)
+            }
         }
     }
 
@@ -97,6 +101,11 @@ impl AuthVendor {
                     body: body.to_string(),
                     content_type: "application/json",
                 }
+            }
+            Self::OpenCodeGo => {
+                // OpenCode Go uses long-lived API keys — no refresh flow.
+                // Callers MUST gate build_refresh_request on is_oauth.
+                unreachable!("opencode-go does not use OAuth refresh")
             }
         }
     }
