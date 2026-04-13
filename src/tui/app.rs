@@ -135,7 +135,7 @@ impl App {
             return ThinkingCapabilities::standard();
         };
         let gateway = crate::provider::binding::GatewayId::from_source(model.source.as_str());
-        crate::provider::runtime::ProviderRuntime::thinking_caps_for(gateway, &model.id)
+        crate::provider::binding::thinking_capabilities(gateway, &model.id)
     }
 
     pub fn new(env_context: String) -> Self {

@@ -115,9 +115,9 @@ fn build_provider(
     auth: &crate::config::auth::Credential,
     session_id: &str,
 ) -> Box<dyn Provider> {
-    let reg = crate::provider::binding::BindingRegistry::builtin();
-    let binding = reg.resolve(&config.source, &config.model_id);
-    reg.build(&binding, auth, session_id, config.thinking)
+    use crate::provider::binding;
+    let binding = binding::resolve(&config.source, &config.model_id);
+    binding::build_provider(&binding, auth, session_id, config.thinking)
 }
 
 /// Whether an error is a transient stream failure worth retrying.

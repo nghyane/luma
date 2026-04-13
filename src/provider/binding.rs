@@ -1,23 +1,27 @@
-//! Gateway / binding scaffolding introduced by RFC 0002 commit 9a.
+//! Model binding — maps `(source, model_id)` to a concrete provider.
 //!
-//! This is a structural-only step: it names the concepts (`Gateway`,
-//! `AuthScheme`, `ModelBinding`, `BindingRegistry`) and centralises the
-//! `source` → concrete `Provider` dispatch that used to live inline in
-//! `core::agent::turn::build_provider`. Wire behaviour is unchanged;
-//! commits 9b/9c will plug `Protocol` impls + a pull-based
-//! `ProviderRuntime` behind this same surface.
+//! RFC 0002 positions `ModelBinding` as the unit of registry lookup.
+//! Until a JSON catalog ships (PR2), builtin gateways are hardcoded and
+//! the binding layer is three thin free functions:
 //!
-//! Builtin bindings are hardcoded for now (see RULES §II.10 / decision
-//! taken with RFC 0002 §Catalog — JSON loader is deferred to PR2).
+//! * [`resolve`] — parse legacy `AgentConfig.source` into a `ModelBinding`.
+//! * [`build_provider`] — materialise a `Box<dyn Provider>` for a binding.
+//! * [`thinking_capabilities`] — pure `(gateway, model_id)` → caps lookup
+//!   used by the TUI before any credential is resolved.
+//!
+//! Keeping the surface flat avoids the enum-of-runtimes forwarding dance
+//! that was here previously; `Box<dyn Provider>` is the object-safe façade
+//! and there is exactly one `impl Provider` per wire protocol.
 
-use crate::config::auth::Credential;
-use crate::core::provider::Provider;
+use crate::config::auth::{AuthVendor, Credential};
+use crate::core::provider::{Provider, ThinkingCapabilities};
 use crate::core::types::ThinkingLevel;
+use crate::provider::protocol::anthropic::AnthropicRuntime;
+use crate::provider::protocol::openai_chat::OpenAIChatRuntime;
+use crate::provider::protocol::openai_responses::OpenAIResponsesRuntime;
 
 /// Identifier for a transport gateway. One variant per distinct base URL
-/// plus auth surface. Values are stable strings so they can appear in
-/// `AgentConfig.source` and future catalog files without a mapping table.
-#[allow(dead_code)]
+/// plus auth surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GatewayId {
     Anthropic,
@@ -26,19 +30,10 @@ pub enum GatewayId {
 }
 
 impl GatewayId {
-    #[allow(dead_code)]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Anthropic => "anthropic",
-            Self::Codex => "codex",
-            Self::OpenAI => "openai",
-        }
-    }
-
     /// Parse the `source` string currently stored in `AgentConfig`.
     ///
-    /// Anything we don't recognise maps to `OpenAI` to preserve the old
-    /// `_ => OpenAIProvider` fallback in `build_provider`.
+    /// Unknown sources fall through to `OpenAI`, preserving the legacy
+    /// default branch of `build_provider`.
     pub fn from_source(source: &str) -> Self {
         match source {
             "anthropic" => Self::Anthropic,
@@ -47,12 +42,8 @@ impl GatewayId {
         }
     }
 
-    /// Which auth-pool bucket this gateway's credentials live in. Decouples
-    /// the provider / binding layer from the vendor-keyed pool: callers
-    /// ask `gateway.auth_vendor()` instead of hardcoding
-    /// `AuthVendor::Anthropic` / `AuthVendor::OpenAI` at the call site.
-    pub fn auth_vendor(self) -> crate::config::auth::AuthVendor {
-        use crate::config::auth::AuthVendor;
+    /// Which auth-pool bucket this gateway's credentials live in.
+    pub fn auth_vendor(self) -> AuthVendor {
         match self {
             Self::Anthropic => AuthVendor::Anthropic,
             Self::Codex | Self::OpenAI => AuthVendor::OpenAI,
@@ -60,114 +51,90 @@ impl GatewayId {
     }
 }
 
-/// How a gateway authenticates. Intentionally coarse today — only the
-/// three schemes we actually ship. Extended in PR2 when OpenCode Go lands.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthScheme {
-    /// `x-api-key: <token>` or `Authorization: Bearer <token>` depending
-    /// on whether the credential is an OAuth token (Claude).
-    AnthropicApiKeyOrOAuth,
-    /// OpenAI Responses with ChatGPT-account session headers (Codex).
-    CodexSession,
-    /// `Authorization: Bearer <token>` against OpenAI-compatible APIs.
-    OpenAIBearer,
-}
-
-/// Transport + auth definition. Protocol and quirks intentionally live
-/// outside this struct (RFC 0002 §Gateway: "Gateway MUST NOT chứa logic
-/// protocol").
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct Gateway {
-    pub id: GatewayId,
-    pub base_url: &'static str,
-    pub auth: AuthScheme,
-}
-
-/// A `(gateway, model_id)` pair the user can select. This is the unit of
-/// registry lookup. Protocol / quirks / thinking caps are derived today
-/// from the hardcoded dispatch; commits 9b/9c will move them here as
-/// explicit fields.
+/// A `(gateway, model_id)` pair the user can select. Unit of registry lookup.
 #[derive(Debug, Clone)]
 pub struct ModelBinding {
     pub gateway: GatewayId,
     pub model_id: String,
 }
 
-impl ModelBinding {
-    #[allow(dead_code)]
-    pub fn display_id(&self) -> String {
-        format!("{}/{}", self.gateway.as_str(), self.model_id)
+/// Parse `(source, model_id)` into a binding. Total over all inputs.
+pub fn resolve(source: &str, model_id: &str) -> ModelBinding {
+    ModelBinding {
+        gateway: GatewayId::from_source(source),
+        model_id: model_id.to_owned(),
     }
 }
 
-/// Hardcoded registry of builtin gateways and the dispatch table used to
-/// materialise a concrete `Provider` from a `(binding, credential)` pair.
+/// Thinking capabilities for a model on a given gateway. Pure.
 ///
-/// Kept intentionally small: three gateways, one `build` function. The
-/// alternative (dyn `Protocol` + composed `Quirk`s) arrives with the
-/// Protocol extraction in commit 9b.
-pub struct BindingRegistry {
-    #[allow(dead_code)]
-    gateways: [Gateway; 3],
+/// Called by the TUI status line before any credential is resolved, so it
+/// intentionally does not construct a runtime.
+pub fn thinking_capabilities(gateway: GatewayId, model_id: &str) -> ThinkingCapabilities {
+    use crate::core::provider::ThinkingOption;
+    use crate::provider::quirks::adaptive_thinking::is_adaptive_thinking_model;
+
+    match gateway {
+        GatewayId::Anthropic if is_adaptive_thinking_model(model_id) => {
+            ThinkingCapabilities::new(vec![
+                ThinkingOption {
+                    level: ThinkingLevel::Off,
+                    label: "off",
+                },
+                ThinkingOption {
+                    level: ThinkingLevel::Low,
+                    label: "low",
+                },
+                ThinkingOption {
+                    level: ThinkingLevel::Medium,
+                    label: "medium",
+                },
+                ThinkingOption {
+                    level: ThinkingLevel::High,
+                    label: "high",
+                },
+                ThinkingOption {
+                    level: ThinkingLevel::Max,
+                    label: "max",
+                },
+            ])
+        }
+        GatewayId::Anthropic | GatewayId::Codex => ThinkingCapabilities::standard(),
+        GatewayId::OpenAI => ThinkingCapabilities::off_only(),
+    }
 }
 
-impl BindingRegistry {
-    pub fn builtin() -> Self {
-        Self {
-            gateways: [
-                Gateway {
-                    id: GatewayId::Anthropic,
-                    base_url: "https://api.anthropic.com",
-                    auth: AuthScheme::AnthropicApiKeyOrOAuth,
-                },
-                Gateway {
-                    id: GatewayId::Codex,
-                    base_url: "https://chatgpt.com/backend-api/codex",
-                    auth: AuthScheme::CodexSession,
-                },
-                Gateway {
-                    id: GatewayId::OpenAI,
-                    base_url: "https://api.openai.com",
-                    auth: AuthScheme::OpenAIBearer,
-                },
-            ],
-        }
-    }
-
-    /// Lookup the gateway metadata by id. Infallible — every `GatewayId`
-    /// variant has a builtin entry.
-    #[allow(dead_code)]
-    pub fn gateway(&self, id: GatewayId) -> &Gateway {
-        self.gateways
-            .iter()
-            .find(|g| g.id == id)
-            .expect("builtin registry missing gateway variant")
-    }
-
-    /// Resolve a binding from the legacy `(source, model_id)` shape.
-    pub fn resolve(&self, source: &str, model_id: &str) -> ModelBinding {
-        ModelBinding {
-            gateway: GatewayId::from_source(source),
-            model_id: model_id.to_owned(),
-        }
-    }
-
-    /// Build a ready-to-stream provider. Thinking level is coerced to the
-    /// provider's supported set, matching the old `build_provider`
-    /// behaviour in `turn.rs` byte-for-byte.
-    pub fn build(
-        &self,
-        binding: &ModelBinding,
-        credential: &Credential,
-        session_id: &str,
-        thinking: ThinkingLevel,
-    ) -> Box<dyn Provider> {
-        Box::new(crate::provider::runtime::ProviderRuntime::build(
-            binding, credential, session_id, thinking,
-        ))
-    }
+/// Build a ready-to-stream provider. Thinking level is coerced to the
+/// gateway's supported set before the provider is returned.
+pub fn build_provider(
+    binding: &ModelBinding,
+    credential: &Credential,
+    session_id: &str,
+    thinking: ThinkingLevel,
+) -> Box<dyn Provider> {
+    let mut provider: Box<dyn Provider> = match binding.gateway {
+        GatewayId::Anthropic => Box::new(AnthropicRuntime::new(
+            &binding.model_id,
+            &credential.token,
+            credential.auth_kind(),
+            &credential.label,
+        )),
+        GatewayId::Codex => Box::new(OpenAIResponsesRuntime::new(
+            &binding.model_id,
+            &credential.token,
+            credential.account_id.clone(),
+            session_id,
+            &credential.label,
+        )),
+        GatewayId::OpenAI => Box::new(OpenAIChatRuntime::new(
+            &binding.model_id,
+            &credential.token,
+            &credential.label,
+        )),
+    };
+    let coerced = provider.thinking_capabilities().coerce(thinking);
+    provider.set_thinking(coerced);
+    provider
 }
 
 #[cfg(test)]
@@ -175,28 +142,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gateway_id_roundtrips_through_source_string() {
+    fn gateway_id_from_source_covers_known_and_fallback() {
         assert_eq!(GatewayId::from_source("anthropic"), GatewayId::Anthropic);
         assert_eq!(GatewayId::from_source("codex"), GatewayId::Codex);
         assert_eq!(GatewayId::from_source("openai"), GatewayId::OpenAI);
         assert_eq!(GatewayId::from_source("unknown"), GatewayId::OpenAI);
-        assert_eq!(GatewayId::Anthropic.as_str(), "anthropic");
     }
 
     #[test]
-    fn builtin_registry_has_all_three_gateways() {
-        let reg = BindingRegistry::builtin();
-        assert_eq!(reg.gateway(GatewayId::Anthropic).id, GatewayId::Anthropic);
-        assert_eq!(reg.gateway(GatewayId::Codex).id, GatewayId::Codex);
-        assert_eq!(reg.gateway(GatewayId::OpenAI).id, GatewayId::OpenAI);
+    fn auth_vendor_maps_codex_and_openai_to_same_bucket() {
+        assert_eq!(GatewayId::Anthropic.auth_vendor(), AuthVendor::Anthropic);
+        assert_eq!(GatewayId::Codex.auth_vendor(), AuthVendor::OpenAI);
+        assert_eq!(GatewayId::OpenAI.auth_vendor(), AuthVendor::OpenAI);
     }
 
     #[test]
-    fn resolve_preserves_model_id_and_display_format() {
-        let reg = BindingRegistry::builtin();
-        let b = reg.resolve("anthropic", "claude-sonnet-4-6");
-        assert_eq!(b.gateway, GatewayId::Anthropic);
-        assert_eq!(b.model_id, "claude-sonnet-4-6");
-        assert_eq!(b.display_id(), "anthropic/claude-sonnet-4-6");
+    fn thinking_caps_adaptive_for_claude_sonnet_4_6() {
+        let labels: Vec<_> = thinking_capabilities(GatewayId::Anthropic, "claude-sonnet-4-6")
+            .options()
+            .iter()
+            .map(|o| o.label)
+            .collect();
+        assert_eq!(labels, ["off", "low", "medium", "high", "max"]);
+    }
+
+    #[test]
+    fn thinking_caps_openai_is_off_only() {
+        let labels: Vec<_> = thinking_capabilities(GatewayId::OpenAI, "gpt-5")
+            .options()
+            .iter()
+            .map(|o| o.label)
+            .collect();
+        assert_eq!(labels, ["off"]);
     }
 }

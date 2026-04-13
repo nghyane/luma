@@ -57,10 +57,6 @@ impl AnthropicRuntime {
         }
     }
 
-    fn is_oauth(&self) -> bool {
-        matches!(self.auth_kind, AuthKind::OAuthBearer)
-    }
-
     /// Build the full Anthropic Messages request body.
     ///
     /// Pure function of provider config + request inputs. Mixes in
@@ -103,7 +99,7 @@ impl AnthropicRuntime {
             }
         }
 
-        if self.is_oauth() {
+        if matches!(self.auth_kind, AuthKind::OAuthBearer) {
             let first_user_text = messages
                 .iter()
                 .find(|m| m.role == Role::User)
