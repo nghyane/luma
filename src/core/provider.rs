@@ -124,6 +124,41 @@ pub struct StreamResponse {
     pub stop_reason: StopReason,
 }
 
+/// Normalized event emitted by a `Protocol` decoder.
+///
+/// Shape is driven by what the Anthropic decoder currently needs; new
+/// variants land only when a second protocol demands them. The consumer
+/// (see `Provider::stream` impls) translates these into UI `Event`s and
+/// assembles the final `StreamResponse`.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// Incremental assistant text.
+    TextDelta(String),
+    /// Incremental reasoning / chain-of-thought text.
+    ThinkingDelta(String),
+    /// Tool call started — model chose a tool.
+    ToolSelected { name: String },
+    /// Incremental tool-argument chunk (already JSON-string-decoded via
+    /// the tool's streamable_arg extractor).
+    ToolInput { name: String, chunk: String },
+    /// Server-side web search started; `query` is best-effort (Anthropic
+    /// streams it piecewise; decoder emits this once the first non-empty
+    /// chunk is available).
+    WebSearchStart { query: String },
+    /// Server-side web search completed. `results` may be empty if the
+    /// backend's result block had no renderable hits.
+    WebSearchDone {
+        results: Vec<crate::event::SearchHit>,
+    },
+    /// Running token usage snapshot. Emitted multiple times; last wins.
+    UsageUpdate(Usage),
+    /// A content block has been committed in document order. The
+    /// assembler appends to `Vec<ContentBlock>` in emission order.
+    BlockComplete(crate::core::types::ContentBlock),
+    /// Terminal event. Decoder MUST NOT emit further events after this.
+    Done { stop: StopReason },
+}
+
 /// Resolves image id → base64 data. Passed to providers so they don't touch filesystem.
 pub type ImageResolver = dyn Fn(&str) -> String + Send + Sync;
 

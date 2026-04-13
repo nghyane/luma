@@ -7,7 +7,8 @@
 /// in `yasasbanukaofficial/claude-code`.
 use crate::config::auth::AuthKind;
 use crate::core::provider::{
-    Provider, StopReason, StreamRequest, StreamResponse, ThinkingCapabilities, ThinkingOption,
+    Provider, StopReason, StreamEvent, StreamRequest, StreamResponse, ThinkingCapabilities,
+    ThinkingOption,
 };
 use crate::core::types::{ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage};
 use crate::event::Event;
@@ -18,9 +19,11 @@ use crate::provider::quirks::adaptive_thinking::{
 use crate::provider::quirks::cache_breakpoint::apply_cache_breakpoint;
 use crate::provider::quirks::claude_identity::{claude_cli_user_agent, claude_session_id};
 use crate::provider::quirks::oauth_system_rewrite::{build_betas, build_oauth_system};
-use crate::provider::sse::post_sse;
+use crate::provider::sse::{SseEventStream, post_sse};
 use crate::util::uuid_v4;
 use anyhow::Result;
+use futures::stream::{BoxStream, StreamExt};
+use std::collections::VecDeque;
 
 const BASE_URL: &str = "https://api.anthropic.com";
 
@@ -220,23 +223,11 @@ impl Provider for AnthropicRuntime {
 
             // --- Stream state ---------------------------------------------
             //
-            // `blocks` is the authoritative ordered content for the assistant
-            // message being assembled. Each Anthropic SSE `content_block_start`
-            // opens a pending block; deltas append to it; `content_block_stop`
-            // commits it into `blocks` in document order. This preserves the
-            // interleaving required for thinking signature validation.
-            //
-            // `PendingBlock` carries mutable state that's only valid between
-            // open and close of a single block — after commit, the data
-            // becomes immutable inside `blocks`.
-            let mut blocks: Vec<ContentBlock> = Vec::new();
-            let mut pending: Option<PendingBlock> = None;
-            let mut web_search_query_sent = false;
-            let mut usage = Usage::default();
-            let mut saw_message_stop = false;
-            let mut stop_reason = String::new();
-
-            let mut stream = post_sse(
+            // Decoder converts Anthropic's wire SSE into normalized
+            // `StreamEvent`s (see `decode_anthropic_sse`). The consumer
+            // loop below drains that stream, forwards UI events to
+            // `tx`, and accumulates the final message.
+            let sse = post_sse(
                 "claude",
                 &self.account_label,
                 &format!("{}/v1/messages", self.base_url),
@@ -247,228 +238,56 @@ impl Provider for AnthropicRuntime {
             )
             .await?;
 
-            while let Some(event_result) = stream.next().await {
-                let event = event_result?;
-                let data = &event.data;
+            let mut events = decode_anthropic_sse(sse, tools.to_vec());
+            let mut blocks: Vec<ContentBlock> = Vec::new();
+            let mut usage = Usage::default();
+            let mut stop_reason = StopReason::default();
+            let mut saw_done = false;
 
-                match data["type"].as_str().unwrap_or("") {
-                    "content_block_start" => {
-                        let block = &data["content_block"];
-                        let block_type = block["type"].as_str().unwrap_or("");
-                        match block_type {
-                            "text" => {
-                                pending = Some(PendingBlock::Text {
-                                    text: String::new(),
-                                });
-                            }
-                            "thinking" => {
-                                pending = Some(PendingBlock::Thinking {
-                                    thinking: block["thinking"].as_str().unwrap_or("").to_owned(),
-                                    signature: block["signature"].as_str().unwrap_or("").to_owned(),
-                                });
-                            }
-                            "redacted_thinking" => {
-                                pending = Some(PendingBlock::RedactedThinking {
-                                    data: block["data"].as_str().unwrap_or("").to_owned(),
-                                });
-                            }
-                            "tool_use" => {
-                                let id = block["id"].as_str().unwrap_or("").to_owned();
-                                let name = block["name"].as_str().unwrap_or("").to_owned();
-                                if !name.is_empty() {
-                                    let _ =
-                                        tx.send(Event::ToolSelected { name: name.clone() }).await;
-                                }
-                                let streamable = streamable_arg_for(tools, &name);
-                                crate::dbg_log!(
-                                    "claude tool_use block_start: name={name:?} streamable_arg={streamable:?}"
-                                );
-                                let arg_extractor = streamable.map(JsonStringExtractor::new);
-                                pending = Some(PendingBlock::ToolUse {
-                                    id,
-                                    name,
-                                    args_buffer: String::new(),
-                                    arg_extractor,
-                                });
-                            }
-                            "server_tool_use" if block["name"] == "web_search" => {
-                                pending = Some(PendingBlock::WebSearch {
-                                    query_extractor: JsonStringExtractor::new("query"),
-                                });
-                                web_search_query_sent = false;
-                            }
-                            "web_search_tool_result" => {
-                                let content_len =
-                                    block["content"].as_array().map(|a| a.len()).unwrap_or(0);
-                                crate::dbg_log!(
-                                    "claude web_search_tool_result: {} items in content",
-                                    content_len
-                                );
-                                let mut hits = Vec::new();
-                                if let Some(results) = block["content"].as_array() {
-                                    for r in results {
-                                        let title = r["title"].as_str().unwrap_or("").to_owned();
-                                        let url = r["url"].as_str().unwrap_or("").to_owned();
-                                        if !url.is_empty() {
-                                            hits.push(crate::event::SearchHit {
-                                                title,
-                                                url,
-                                                snippet: String::new(),
-                                            });
-                                        }
-                                    }
-                                }
-                                let _ = tx
-                                    .send(Event::WebSearchDone {
-                                        query: String::new(),
-                                        results: hits,
-                                    })
-                                    .await;
-                                // web_search_tool_result is a terminal block
-                                // with no deltas — nothing to commit on stop.
-                            }
-                            _ => {}
-                        }
+            while let Some(evt) = events.next().await {
+                match evt? {
+                    StreamEvent::TextDelta(t) => {
+                        let _ = tx.send(Event::Token(t)).await;
                     }
-
-                    "content_block_delta" => {
-                        let delta = &data["delta"];
-                        let delta_type = delta["type"].as_str().unwrap_or("");
-                        match (delta_type, pending.as_mut()) {
-                            ("text_delta", Some(PendingBlock::Text { text })) => {
-                                if let Some(t) = delta["text"].as_str() {
-                                    text.push_str(t);
-                                    let _ = tx.send(Event::Token(t.to_owned())).await;
-                                }
-                            }
-                            ("thinking_delta", Some(PendingBlock::Thinking { thinking, .. })) => {
-                                if let Some(t) = delta["thinking"].as_str() {
-                                    thinking.push_str(t);
-                                    let _ = tx.send(Event::Thinking(t.to_owned())).await;
-                                }
-                            }
-                            ("signature_delta", Some(PendingBlock::Thinking { signature, .. })) => {
-                                if let Some(s) = delta["signature"].as_str() {
-                                    signature.push_str(s);
-                                }
-                            }
-                            (
-                                "input_json_delta",
-                                Some(PendingBlock::ToolUse {
-                                    name,
-                                    args_buffer,
-                                    arg_extractor,
-                                    ..
-                                }),
-                            ) => {
-                                if let Some(j) = delta["partial_json"].as_str() {
-                                    args_buffer.push_str(j);
-                                    if let Some(ex) = arg_extractor.as_mut() {
-                                        let chunk = ex.feed(j);
-                                        crate::dbg_log!(
-                                            "claude input_json_delta tool={name} delta_bytes={} extracted={}",
-                                            j.len(),
-                                            chunk.len()
-                                        );
-                                        if !chunk.is_empty() {
-                                            let _ = tx
-                                                .send(Event::ToolInput {
-                                                    name: name.clone(),
-                                                    chunk,
-                                                })
-                                                .await;
-                                        }
-                                    } else {
-                                        crate::dbg_log!(
-                                            "claude input_json_delta tool={name} NO EXTRACTOR (streamable_arg not set or tool not found)"
-                                        );
-                                    }
-                                }
-                            }
-                            (
-                                "input_json_delta",
-                                Some(PendingBlock::WebSearch { query_extractor }),
-                            ) => {
-                                if let Some(j) = delta["partial_json"].as_str() {
-                                    let chunk = query_extractor.feed(j);
-                                    if !chunk.is_empty() && !web_search_query_sent {
-                                        let _ =
-                                            tx.send(Event::WebSearchStart { query: chunk }).await;
-                                        web_search_query_sent = true;
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
+                    StreamEvent::ThinkingDelta(t) => {
+                        let _ = tx.send(Event::Thinking(t)).await;
                     }
-
-                    "content_block_stop" => {
-                        if let Some(pb) = pending.take()
-                            && let Some(committed) = pb.commit()
-                        {
-                            blocks.push(committed);
-                        }
+                    StreamEvent::ToolSelected { name } => {
+                        let _ = tx.send(Event::ToolSelected { name }).await;
                     }
-
-                    "message_start" => {
-                        if let Some(u) = data["message"]["usage"].as_object() {
-                            let u_data = Usage {
-                                input_tokens: u
-                                    .get("input_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0),
-                                output_tokens: u
-                                    .get("output_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0),
-                                cache_read: u
-                                    .get("cache_read_input_tokens")
-                                    .and_then(|v| v.as_u64()),
-                                cache_write: u
-                                    .get("cache_creation_input_tokens")
-                                    .and_then(|v| v.as_u64()),
-                            };
-                            usage = u_data.clone();
-                            let _ = tx.send(Event::Usage(u_data)).await;
-                        }
+                    StreamEvent::ToolInput { name, chunk } => {
+                        let _ = tx.send(Event::ToolInput { name, chunk }).await;
                     }
-
-                    "message_delta" => {
-                        if let Some(reason) = data["delta"]["stop_reason"].as_str() {
-                            stop_reason = reason.to_owned();
-                        }
-                        if let Some(u) = data["usage"].as_object()
-                            && let Some(out) = u.get("output_tokens").and_then(|v| v.as_u64())
-                        {
-                            usage.output_tokens = out;
-                            // Cache values were already reported in message_start.
-                            let _ = tx
-                                .send(Event::Usage(Usage {
-                                    input_tokens: usage.input_tokens,
-                                    output_tokens: out,
-                                    cache_read: None,
-                                    cache_write: None,
-                                }))
-                                .await;
-                        }
+                    StreamEvent::WebSearchStart { query } => {
+                        let _ = tx.send(Event::WebSearchStart { query }).await;
                     }
-
-                    "message_stop" => {
-                        saw_message_stop = true;
+                    StreamEvent::WebSearchDone { results } => {
+                        let _ = tx
+                            .send(Event::WebSearchDone {
+                                query: String::new(),
+                                results,
+                            })
+                            .await;
                     }
-
-                    _ => {}
+                    StreamEvent::UsageUpdate(u) => {
+                        usage = u.clone();
+                        let _ = tx.send(Event::Usage(u)).await;
+                    }
+                    StreamEvent::BlockComplete(b) => blocks.push(b),
+                    StreamEvent::Done { stop } => {
+                        stop_reason = stop;
+                        saw_done = true;
+                        break;
+                    }
                 }
             }
 
-            // Stream ended without message_stop AND no content → truly
-            // interrupted (network cut, proxy failure). Retryable.
-            //
+            // Stream ended without a terminal Done event AND no content →
+            // truly interrupted (network cut, proxy failure). Retryable.
             // A valid stop_reason with empty content is a legitimate turn
-            // (e.g. structured output tool call on turn 1, then end_turn on
-            // turn 2 with no text). Do NOT error — let the caller decide
-            // based on stop_reason.
-            if !saw_message_stop && blocks.is_empty() {
+            // (e.g. structured output tool call on turn 1, then end_turn
+            // on turn 2 with no text) — don't error.
+            if !saw_done && blocks.is_empty() {
                 return Err(crate::provider::sse::StreamInterrupted(
                     "Claude stream ended with no content".into(),
                 )
@@ -485,10 +304,266 @@ impl Provider for AnthropicRuntime {
                     }),
                 },
                 usage,
-                stop_reason: parse_stop_reason(&stop_reason),
+                stop_reason,
             })
         })
     }
+}
+
+/// Decoder state held across SSE frames. Pure — no I/O, no UI.
+struct AnthropicDecoder {
+    tools: Vec<ToolSchema>,
+    pending: Option<PendingBlock>,
+    web_search_query_sent: bool,
+    /// Usage accumulator. `message_start` populates input/cache; `message_delta`
+    /// overwrites output. Emitted as `UsageUpdate` at both boundaries.
+    usage: Usage,
+    /// Anthropic stop_reason string, resolved at `message_delta`. Converted
+    /// to `StopReason` only when we emit `Done`.
+    stop_reason_raw: String,
+    /// Drained by the outer Stream on each poll.
+    out: VecDeque<StreamEvent>,
+    saw_message_stop: bool,
+}
+
+impl AnthropicDecoder {
+    fn new(tools: Vec<ToolSchema>) -> Self {
+        Self {
+            tools,
+            pending: None,
+            web_search_query_sent: false,
+            usage: Usage::default(),
+            stop_reason_raw: String::new(),
+            out: VecDeque::new(),
+            saw_message_stop: false,
+        }
+    }
+
+    /// Feed one Anthropic SSE frame; append zero or more `StreamEvent`s to
+    /// the output queue. Never blocks; never touches the network.
+    fn feed(&mut self, data: &serde_json::Value) {
+        match data["type"].as_str().unwrap_or("") {
+            "content_block_start" => self.on_block_start(&data["content_block"]),
+            "content_block_delta" => self.on_block_delta(&data["delta"]),
+            "content_block_stop" => self.on_block_stop(),
+            "message_start" => {
+                if let Some(u) = data["message"]["usage"].as_object() {
+                    self.usage = Usage {
+                        input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                        output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                        cache_read: u.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
+                        cache_write: u
+                            .get("cache_creation_input_tokens")
+                            .and_then(|v| v.as_u64()),
+                    };
+                    self.out
+                        .push_back(StreamEvent::UsageUpdate(self.usage.clone()));
+                }
+            }
+            "message_delta" => {
+                if let Some(reason) = data["delta"]["stop_reason"].as_str() {
+                    self.stop_reason_raw = reason.to_owned();
+                }
+                if let Some(u) = data["usage"].as_object()
+                    && let Some(out) = u.get("output_tokens").and_then(|v| v.as_u64())
+                {
+                    self.usage.output_tokens = out;
+                    // Cache values were already reported in message_start —
+                    // emit only the new output count to avoid double-counting.
+                    self.out.push_back(StreamEvent::UsageUpdate(Usage {
+                        input_tokens: self.usage.input_tokens,
+                        output_tokens: out,
+                        cache_read: None,
+                        cache_write: None,
+                    }));
+                }
+            }
+            "message_stop" => {
+                self.saw_message_stop = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn on_block_start(&mut self, block: &serde_json::Value) {
+        match block["type"].as_str().unwrap_or("") {
+            "text" => {
+                self.pending = Some(PendingBlock::Text {
+                    text: String::new(),
+                });
+            }
+            "thinking" => {
+                self.pending = Some(PendingBlock::Thinking {
+                    thinking: block["thinking"].as_str().unwrap_or("").to_owned(),
+                    signature: block["signature"].as_str().unwrap_or("").to_owned(),
+                });
+            }
+            "redacted_thinking" => {
+                self.pending = Some(PendingBlock::RedactedThinking {
+                    data: block["data"].as_str().unwrap_or("").to_owned(),
+                });
+            }
+            "tool_use" => {
+                let id = block["id"].as_str().unwrap_or("").to_owned();
+                let name = block["name"].as_str().unwrap_or("").to_owned();
+                if !name.is_empty() {
+                    self.out
+                        .push_back(StreamEvent::ToolSelected { name: name.clone() });
+                }
+                let streamable = streamable_arg_for(&self.tools, &name);
+                let arg_extractor = streamable.map(JsonStringExtractor::new);
+                self.pending = Some(PendingBlock::ToolUse {
+                    id,
+                    name,
+                    args_buffer: String::new(),
+                    arg_extractor,
+                });
+            }
+            "server_tool_use" if block["name"] == "web_search" => {
+                self.pending = Some(PendingBlock::WebSearch {
+                    query_extractor: JsonStringExtractor::new("query"),
+                });
+                self.web_search_query_sent = false;
+            }
+            "web_search_tool_result" => {
+                let mut hits = Vec::new();
+                if let Some(results) = block["content"].as_array() {
+                    for r in results {
+                        let title = r["title"].as_str().unwrap_or("").to_owned();
+                        let url = r["url"].as_str().unwrap_or("").to_owned();
+                        if !url.is_empty() {
+                            hits.push(crate::event::SearchHit {
+                                title,
+                                url,
+                                snippet: String::new(),
+                            });
+                        }
+                    }
+                }
+                self.out
+                    .push_back(StreamEvent::WebSearchDone { results: hits });
+                // web_search_tool_result is terminal and has no deltas —
+                // no PendingBlock is opened, nothing to commit on stop.
+            }
+            _ => {}
+        }
+    }
+
+    fn on_block_delta(&mut self, delta: &serde_json::Value) {
+        let delta_type = delta["type"].as_str().unwrap_or("");
+        match (delta_type, self.pending.as_mut()) {
+            ("text_delta", Some(PendingBlock::Text { text })) => {
+                if let Some(t) = delta["text"].as_str() {
+                    text.push_str(t);
+                    self.out.push_back(StreamEvent::TextDelta(t.to_owned()));
+                }
+            }
+            ("thinking_delta", Some(PendingBlock::Thinking { thinking, .. })) => {
+                if let Some(t) = delta["thinking"].as_str() {
+                    thinking.push_str(t);
+                    self.out.push_back(StreamEvent::ThinkingDelta(t.to_owned()));
+                }
+            }
+            ("signature_delta", Some(PendingBlock::Thinking { signature, .. })) => {
+                if let Some(s) = delta["signature"].as_str() {
+                    signature.push_str(s);
+                }
+            }
+            (
+                "input_json_delta",
+                Some(PendingBlock::ToolUse {
+                    name,
+                    args_buffer,
+                    arg_extractor,
+                    ..
+                }),
+            ) => {
+                if let Some(j) = delta["partial_json"].as_str() {
+                    args_buffer.push_str(j);
+                    if let Some(ex) = arg_extractor.as_mut() {
+                        let chunk = ex.feed(j);
+                        if !chunk.is_empty() {
+                            self.out.push_back(StreamEvent::ToolInput {
+                                name: name.clone(),
+                                chunk,
+                            });
+                        }
+                    }
+                }
+            }
+            ("input_json_delta", Some(PendingBlock::WebSearch { query_extractor })) => {
+                if let Some(j) = delta["partial_json"].as_str() {
+                    let chunk = query_extractor.feed(j);
+                    if !chunk.is_empty() && !self.web_search_query_sent {
+                        self.out
+                            .push_back(StreamEvent::WebSearchStart { query: chunk });
+                        self.web_search_query_sent = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn on_block_stop(&mut self) {
+        if let Some(pb) = self.pending.take()
+            && let Some(committed) = pb.commit()
+        {
+            self.out.push_back(StreamEvent::BlockComplete(committed));
+        }
+    }
+}
+
+/// Convert an Anthropic SSE stream into a pull-based `StreamEvent` stream.
+///
+/// Pure with respect to the outside world: no UI events, no filesystem.
+/// The caller drives consumption; dropping the returned stream aborts the
+/// underlying HTTP reader task (via `SseEventStream`'s drop).
+fn decode_anthropic_sse(
+    sse: SseEventStream,
+    tools: Vec<ToolSchema>,
+) -> BoxStream<'static, Result<StreamEvent>> {
+    let decoder = AnthropicDecoder::new(tools);
+    futures::stream::unfold(
+        (sse, decoder, false),
+        |(mut sse, mut decoder, mut done_emitted)| async move {
+            // Drain any buffered events first.
+            if let Some(evt) = decoder.out.pop_front() {
+                return Some((Ok(evt), (sse, decoder, done_emitted)));
+            }
+            if done_emitted {
+                return None;
+            }
+            loop {
+                match sse.next().await {
+                    Some(Ok(frame)) => {
+                        decoder.feed(&frame.data);
+                        if let Some(evt) = decoder.out.pop_front() {
+                            return Some((Ok(evt), (sse, decoder, done_emitted)));
+                        }
+                    }
+                    Some(Err(e)) => return Some((Err(e), (sse, decoder, true))),
+                    None => {
+                        // SSE exhausted. If we saw the terminal
+                        // `message_stop` frame, emit `Done` and let the
+                        // consumer treat this as a clean close. Otherwise
+                        // end the stream without `Done` so the consumer
+                        // can classify it as a network interruption.
+                        done_emitted = true;
+                        if decoder.saw_message_stop {
+                            let stop = parse_stop_reason(&decoder.stop_reason_raw);
+                            return Some((
+                                Ok(StreamEvent::Done { stop }),
+                                (sse, decoder, done_emitted),
+                            ));
+                        }
+                        return None;
+                    }
+                }
+            }
+        },
+    )
+    .boxed()
 }
 
 /// Pending block under construction during SSE streaming. Exactly one
@@ -844,4 +919,157 @@ mod tests {
     }
 
     // --- Claude Code parity regression tests ---
+
+    fn feed_frames(decoder: &mut AnthropicDecoder, frames: &[serde_json::Value]) {
+        for f in frames {
+            decoder.feed(f);
+        }
+    }
+
+    fn drain(decoder: &mut AnthropicDecoder) -> Vec<StreamEvent> {
+        decoder.out.drain(..).collect()
+    }
+
+    #[test]
+    fn decoder_emits_text_delta_and_block_complete_for_text_block() {
+        let mut d = AnthropicDecoder::new(vec![]);
+        feed_frames(
+            &mut d,
+            &[
+                serde_json::json!({
+                    "type": "content_block_start",
+                    "content_block": {"type": "text"},
+                }),
+                serde_json::json!({
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": "hi"},
+                }),
+                serde_json::json!({
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": " there"},
+                }),
+                serde_json::json!({"type": "content_block_stop"}),
+            ],
+        );
+        let events = drain(&mut d);
+        match &events[..] {
+            [
+                StreamEvent::TextDelta(a),
+                StreamEvent::TextDelta(b),
+                StreamEvent::BlockComplete(ContentBlock::Text { text }),
+            ] => {
+                assert_eq!(a, "hi");
+                assert_eq!(b, " there");
+                assert_eq!(text, "hi there");
+            }
+            _ => panic!("unexpected: {events:?}"),
+        }
+    }
+
+    #[test]
+    fn decoder_emits_tool_selected_and_input_with_extractor() {
+        let tool = ToolSchema {
+            name: "write".into(),
+            description: String::new(),
+            parameters: serde_json::json!({}),
+            streamable_arg: Some("content".into()),
+        };
+        let mut d = AnthropicDecoder::new(vec![tool]);
+        feed_frames(
+            &mut d,
+            &[
+                serde_json::json!({
+                    "type": "content_block_start",
+                    "content_block": {"type": "tool_use", "id": "tc_1", "name": "write"},
+                }),
+                serde_json::json!({
+                    "type": "content_block_delta",
+                    "delta": {"type": "input_json_delta",
+                              "partial_json": "{\"content\":\"hello\""},
+                }),
+                serde_json::json!({
+                    "type": "content_block_delta",
+                    "delta": {"type": "input_json_delta",
+                              "partial_json": ",\"path\":\"/x\"}"},
+                }),
+                serde_json::json!({"type": "content_block_stop"}),
+            ],
+        );
+        let events = drain(&mut d);
+        let names: Vec<_> = events
+            .iter()
+            .map(|e| match e {
+                StreamEvent::ToolSelected { name } => format!("selected:{name}"),
+                StreamEvent::ToolInput { chunk, .. } => format!("input:{chunk}"),
+                StreamEvent::BlockComplete(ContentBlock::ToolUse { name, input, .. }) => {
+                    format!("done:{name}:{}", input["content"].as_str().unwrap_or(""))
+                }
+                _ => "other".into(),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["selected:write", "input:hello", "done:write:hello"]
+        );
+    }
+
+    #[test]
+    fn decoder_tracks_usage_and_stop_reason() {
+        let mut d = AnthropicDecoder::new(vec![]);
+        feed_frames(
+            &mut d,
+            &[
+                serde_json::json!({
+                    "type": "message_start",
+                    "message": {"usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 0,
+                        "cache_read_input_tokens": 3,
+                    }},
+                }),
+                serde_json::json!({
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 42},
+                }),
+                serde_json::json!({"type": "message_stop"}),
+            ],
+        );
+        let events = drain(&mut d);
+        let usages: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::UsageUpdate(u) => Some(u.output_tokens),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usages, vec![0, 42]);
+        assert!(d.saw_message_stop);
+        assert_eq!(parse_stop_reason(&d.stop_reason_raw), StopReason::EndTurn);
+    }
+
+    #[test]
+    fn decoder_emits_web_search_done_with_hits() {
+        let mut d = AnthropicDecoder::new(vec![]);
+        feed_frames(
+            &mut d,
+            &[serde_json::json!({
+                "type": "content_block_start",
+                "content_block": {
+                    "type": "web_search_tool_result",
+                    "content": [
+                        {"title": "Rust", "url": "https://rust-lang.org"},
+                        {"title": "No URL"},
+                    ],
+                },
+            })],
+        );
+        match drain(&mut d).as_slice() {
+            [StreamEvent::WebSearchDone { results }] => {
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].url, "https://rust-lang.org");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
 }
