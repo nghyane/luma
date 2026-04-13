@@ -26,6 +26,31 @@ fn render_info() {
 }
 
 #[test]
+fn skill_snapshot_tracks_name_and_summary() {
+    let a = Block::Skill(SkillBlock {
+        name: "tui".into(),
+        is_done: false,
+        end_summary: String::new(),
+    })
+    .snapshot();
+    let b = Block::Skill(SkillBlock {
+        name: "browser".into(),
+        is_done: false,
+        end_summary: String::new(),
+    })
+    .snapshot();
+    let c = Block::Skill(SkillBlock {
+        name: "tui".into(),
+        is_done: true,
+        end_summary: "loaded tui".into(),
+    })
+    .snapshot();
+
+    assert!(a != b, "different skill names must invalidate layout cache");
+    assert!(a != c, "completion summary must invalidate layout cache");
+}
+
+#[test]
 fn render_user_block() {
     let mut st = RenderState::new();
     let content = vec![crate::core::types::ContentBlock::Text { text: "hi".into() }];

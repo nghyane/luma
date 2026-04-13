@@ -172,8 +172,12 @@ pub enum Snapshot {
     Stream { committed: usize, partial: usize },
     /// Completed tool — fingerprint of state that affects rendering.
     Tool { fingerprint: u64 },
-    /// Skill — track completion.
-    Skill { is_done: bool },
+    /// Skill — track state that affects rendering.
+    Skill {
+        is_done: bool,
+        name: String,
+        end_summary: String,
+    },
 }
 
 impl PartialEq for Snapshot {
@@ -192,7 +196,18 @@ impl PartialEq for Snapshot {
                 },
             ) => a == c && b == d,
             (Self::Tool { fingerprint: a }, Self::Tool { fingerprint: b }) => a == b,
-            (Self::Skill { is_done: a }, Self::Skill { is_done: b }) => a == b,
+            (
+                Self::Skill {
+                    is_done: a_done,
+                    name: a_name,
+                    end_summary: a_summary,
+                },
+                Self::Skill {
+                    is_done: b_done,
+                    name: b_name,
+                    end_summary: b_summary,
+                },
+            ) => a_done == b_done && a_name == b_name && a_summary == b_summary,
             _ => false,
         }
     }
@@ -222,6 +237,8 @@ impl Block {
             Block::Tool(_) => Snapshot::Volatile,
             Block::Skill(sb) => Snapshot::Skill {
                 is_done: sb.is_done,
+                name: sb.name.clone(),
+                end_summary: sb.end_summary.clone(),
             },
         }
     }
