@@ -101,9 +101,11 @@ fn pick_choice() -> Result<Choice> {
 
 fn run_picker(reader: &termina::EventReader) -> Result<Choice> {
     let mut selected: usize = 0;
-    // First render — newline so the block does not collide with any
-    // shell prompt above.
-    writeln!(io::stderr())?;
+    // First render. `\r\n` because raw mode disables the LF→CRLF
+    // translation cooked mode provides — bare `\n` would cascade each
+    // line further right across the terminal.
+    write!(io::stderr(), "\r\n")?;
+    io::stderr().flush()?;
     render_menu(selected, false)?;
 
     loop {
@@ -138,22 +140,26 @@ fn run_picker(reader: &termina::EventReader) -> Result<Choice> {
 
 /// Render the menu. On redraw, move the cursor back to the top of the
 /// previously drawn block so each frame overwrites the last cleanly.
+///
+/// Raw mode does not translate `\n` into CRLF, so every line break here
+/// MUST be `\r\n` or the second+ line drifts right across the terminal.
 fn render_menu(selected: usize, redraw: bool) -> Result<()> {
     let lines = 3 + CHOICES.len() + 2; // title+blank + items + blank+help
 
     let mut out = io::stderr();
     if redraw {
-        // Cursor up `lines` lines, then clear below.
-        write!(out, "\x1b[{lines}A\x1b[J")?;
+        // Cursor up `lines` lines, carriage-return to col 0, then clear
+        // from cursor down to end-of-screen.
+        write!(out, "\x1b[{lines}A\r\x1b[J")?;
+    } else {
+        write!(out, "\r")?;
     }
-    writeln!(out, "luma login — select provider")?;
-    writeln!(out)?;
+    write!(out, "luma login — select provider\r\n\r\n")?;
     for (i, choice) in CHOICES.iter().enumerate() {
         let arrow = if i == selected { ">" } else { " " };
-        writeln!(out, " {arrow} {}", choice.label())?;
+        write!(out, " {arrow} {}\r\n", choice.label())?;
     }
-    writeln!(out)?;
-    writeln!(out, "   ↑/↓ move · enter select · esc cancel")?;
+    write!(out, "\r\n   ↑/↓ move · enter select · esc cancel\r\n")?;
     out.flush()?;
     Ok(())
 }
