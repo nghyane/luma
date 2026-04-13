@@ -449,15 +449,18 @@ Commit order trong PR1 (mỗi commit MUST pass
 `cargo fmt && cargo clippy -- -D warnings && cargo test`):
 
 1. `refactor(provider): define StreamEvent and pull-based Protocol trait`
-2. `refactor(provider): extract encode_request for anthropic/openai-chat/openai-responses`
-3. `refactor(provider): extract decode_stream + fixture tests`
-4. `refactor(provider): add MessageAssembler, migrate turn.rs to pull loop`
-5. `refactor(provider): extract Gateway and AuthScheme`
-6. `refactor(provider): extract quirks as request/response middleware`
-   (một commit con mỗi quirk)
-7. `refactor(provider): add ProviderRuntime, wire via registry`
-8. `refactor(auth): replace AuthProvider enum with AuthKind`
-9. `refactor(provider): remove legacy claude/codex/openai modules`
+2. `refactor(provider): extract build_request_body helpers`
+3. `refactor(provider): extract consume_chat_stream (openai)`
+4. `refactor(provider): extract Gateway and AuthScheme`
+5. `refactor(provider/quirks): extract claude_user_agent + fingerprint`
+6. `refactor(provider/quirks): extract oauth_system_rewrite + mcp_noop`
+7. `refactor(provider/quirks): extract cache_breakpoint`
+8. `refactor(provider/quirks): extract adaptive_thinking`
+9. `refactor(provider/quirks): extract codex_session`
+10. `refactor(provider): impl Protocol + MessageAssembler, migrate pull,
+    add ProviderRuntime + registry, delete legacy modules`
+    (large atomic commit — the streaming-architecture cutover)
+11. `refactor(auth): replace AuthProvider enum with AuthKind`
 
 ### Test plan
 

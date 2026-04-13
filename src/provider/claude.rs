@@ -11,6 +11,7 @@ use crate::core::provider::{
 use crate::core::types::{ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage};
 use crate::event::Event;
 use crate::provider::json_stream::{JsonStringExtractor, streamable_arg_for};
+use crate::provider::quirks::cache_breakpoint::apply_cache_breakpoint;
 use crate::provider::sse::post_sse;
 use crate::util::uuid_v4;
 use anyhow::Result;
@@ -842,28 +843,6 @@ fn is_adaptive_thinking_model(model: &str) -> bool {
     m.contains("opus-4-6") || m.contains("sonnet-4-6")
 }
 
-/// Apply a single `cache_control: ephemeral` breakpoint to the last block
-/// of the last message. Mutates the messages in place.
-///
-/// Anthropic's prompt caching uses breakpoints to mark cache boundaries; a
-/// single breakpoint on the last message caches the full prefix. `content`
-/// is always an array after `to_api_messages` so we can assume that shape.
-fn apply_cache_breakpoint(api_messages: &mut [serde_json::Value]) {
-    let Some(last_msg) = api_messages.last_mut() else {
-        return;
-    };
-    let Some(content) = last_msg["content"].as_array_mut() else {
-        return;
-    };
-    for block in content.iter_mut().rev() {
-        let block_type = block["type"].as_str().unwrap_or("");
-        if matches!(block_type, "thinking" | "redacted_thinking") {
-            continue;
-        }
-        block["cache_control"] = serde_json::json!({"type": "ephemeral"});
-        break;
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1087,61 +1066,6 @@ mod tests {
         assert!(!is_adaptive_thinking_model("claude-opus-4-5"));
         assert!(!is_adaptive_thinking_model("claude-haiku-4-5"));
         assert!(!is_adaptive_thinking_model("claude-3-opus"));
-    }
-
-    #[test]
-    fn cache_breakpoint_on_array_content() {
-        let mut msgs = vec![serde_json::json!({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "a"},
-                {"type": "text", "text": "b"},
-            ]
-        })];
-        apply_cache_breakpoint(&mut msgs);
-        let content = msgs[0]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 2);
-        assert!(content[0].get("cache_control").is_none());
-        assert_eq!(content[1]["cache_control"]["type"], "ephemeral");
-    }
-
-    #[test]
-    fn cache_breakpoint_skips_thinking_and_marks_last_mutable_block() {
-        let mut msgs = vec![serde_json::json!({
-            "role": "assistant",
-            "content": [
-                {"type": "text", "text": "answer"},
-                {"type": "thinking", "thinking": "x", "signature": "sig"},
-                {"type": "redacted_thinking", "data": "opaque"},
-            ]
-        })];
-        apply_cache_breakpoint(&mut msgs);
-        let content = msgs[0]["content"].as_array().unwrap();
-        assert_eq!(content[0]["cache_control"]["type"], "ephemeral");
-        assert!(content[1].get("cache_control").is_none());
-        assert!(content[2].get("cache_control").is_none());
-    }
-
-    #[test]
-    fn cache_breakpoint_with_only_thinking_blocks_is_noop() {
-        let mut msgs = vec![serde_json::json!({
-            "role": "assistant",
-            "content": [
-                {"type": "thinking", "thinking": "x", "signature": "sig"},
-                {"type": "redacted_thinking", "data": "opaque"},
-            ]
-        })];
-        apply_cache_breakpoint(&mut msgs);
-        let content = msgs[0]["content"].as_array().unwrap();
-        assert!(content[0].get("cache_control").is_none());
-        assert!(content[1].get("cache_control").is_none());
-    }
-
-    #[test]
-    fn cache_breakpoint_on_empty_messages_is_noop() {
-        let mut msgs: Vec<serde_json::Value> = vec![];
-        apply_cache_breakpoint(&mut msgs);
-        assert!(msgs.is_empty());
     }
 
     // --- Claude Code parity regression tests ---
