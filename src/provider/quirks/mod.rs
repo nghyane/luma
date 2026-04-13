@@ -6,6 +6,7 @@
 //! bitflag; during PR1 they are called directly from the legacy provider
 //! modules to preserve behavior.
 
+pub mod adaptive_thinking;
 pub mod cache_breakpoint;
 pub mod claude_identity;
 pub mod oauth_system_rewrite;
