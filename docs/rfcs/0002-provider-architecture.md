@@ -631,8 +631,14 @@ Structural cutover (session 2):
 - `b75cf02` refactor(auth): rename AuthProvider → AuthVendor, introduce
   AuthKind (10). `AnthropicRuntime` consumes `AuthKind`; `AuthVendor`
   names the pool bucket only.
+- `5705b62` fix(auth): classify AuthKind by vendor, not `account_id`.
+  Claude OAuth entries carry `profile.account_uuid` in `account_id`,
+  so the initial `(is_oauth, account_id.is_some())` split in b75cf02
+  misrouted Claude OAuth to `CodexSession` and dropped the Claude Code
+  headers — 401 on every turn. `Credential` now carries `vendor`; the
+  split keys off vendor.
 
-### State after commit `b75cf02`
+### State after commit `5705b62`
 
 - 566 tests pass; `cargo clippy -- -D warnings` clean.
 - File layout matches RFC §File layout.
@@ -640,6 +646,8 @@ Structural cutover (session 2):
   deferred to PR2.
 - Push-model SSE decode preserved verbatim inside each protocol module
   to protect the test suite — no behaviour drift across the cutover.
+- Claude OAuth turn smoke-tested live after `5705b62`; Codex and OpenAI
+  direct not yet verified against live traffic.
 
 ### Remaining PR1 work
 
