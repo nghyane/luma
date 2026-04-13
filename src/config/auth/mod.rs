@@ -124,18 +124,20 @@ pub struct Credential {
     pub is_oauth: bool,
     pub account_id: Option<String>,
     pub label: String,
+    pub vendor: AuthVendor,
 }
 
 impl Credential {
     /// Classify how this credential is transported on the wire.
     ///
-    /// Derived from the legacy `(is_oauth, account_id)` pair: Codex
-    /// OAuth tokens carry a `chatgpt-account-id` and need extra session
-    /// headers; Claude OAuth tokens don't. Raw API keys are `ApiKey`.
+    /// Anthropic OAuth carries `account_id` in some pool entries (profile
+    /// UUID) but does NOT use Codex session headers — so `account_id`
+    /// alone cannot distinguish OAuthBearer from CodexSession. We key off
+    /// `vendor` for that split.
     pub fn auth_kind(&self) -> AuthKind {
-        match (self.is_oauth, self.account_id.is_some()) {
-            (true, true) => AuthKind::CodexSession,
-            (true, false) => AuthKind::OAuthBearer,
+        match (self.is_oauth, self.vendor) {
+            (true, AuthVendor::OpenAI) => AuthKind::CodexSession,
+            (true, AuthVendor::Anthropic) => AuthKind::OAuthBearer,
             (false, _) => AuthKind::ApiKey,
         }
     }
@@ -524,6 +526,7 @@ fn credential_from(e: &AccountEntry) -> Credential {
         is_oauth: e.is_oauth,
         account_id: e.account_id.clone(),
         label: e.label.clone(),
+        vendor: AuthVendor::from_str(&e.provider).unwrap_or(AuthVendor::Anthropic),
     }
 }
 
