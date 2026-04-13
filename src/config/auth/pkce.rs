@@ -6,7 +6,7 @@
 //! shared listener/exchange logic doesn't branch on provider type.
 
 use super::{
-    AccountEntry, AuthProvider, CLAUDE_CLIENT_ID, CLAUDE_OAUTH_ENDPOINT, CLAUDE_SCOPES,
+    AccountEntry, AuthVendor, CLAUDE_CLIENT_ID, CLAUDE_OAUTH_ENDPOINT, CLAUDE_SCOPES,
     CODEX_ORIGINATOR, OPENAI_CLIENT_ID, OPENAI_OAUTH_ENDPOINT, UsageRec, decode_jwt_payload,
     derive_label, extract_email_from_jwt, now_unix, upsert_by_label, with_pool_mut,
 };
@@ -34,7 +34,7 @@ const LOGIN_TIMEOUT_SECS: u64 = 300;
 // =============================================================================
 
 struct ProviderFlow {
-    provider: AuthProvider,
+    provider: AuthVendor,
     authorize_url: String,
     token_url: &'static str,
     client_id: &'static str,
@@ -72,7 +72,7 @@ impl ProviderFlow {
         );
 
         Self {
-            provider: AuthProvider::Anthropic,
+            provider: AuthVendor::Anthropic,
             authorize_url: url,
             token_url: CLAUDE_OAUTH_ENDPOINT,
             client_id: CLAUDE_CLIENT_ID,
@@ -102,7 +102,7 @@ impl ProviderFlow {
         );
 
         Self {
-            provider: AuthProvider::OpenAI,
+            provider: AuthVendor::OpenAI,
             authorize_url: url,
             token_url: OPENAI_OAUTH_ENDPOINT,
             client_id: OPENAI_CLIENT_ID,
@@ -121,11 +121,11 @@ impl ProviderFlow {
 pub struct LoginOutcome {
     pub label: String,
     pub email: Option<String>,
-    pub provider: AuthProvider,
+    pub provider: AuthVendor,
 }
 
 /// CLI convenience wrapper — prints the authorize URL to stderr.
-pub async fn login(provider: AuthProvider) -> Result<LoginOutcome> {
+pub async fn login(provider: AuthVendor) -> Result<LoginOutcome> {
     login_with_reporter(provider, |url| {
         eprintln!("\nOpen this URL to sign in:\n  {url}\n");
     })
@@ -135,7 +135,7 @@ pub async fn login(provider: AuthProvider) -> Result<LoginOutcome> {
 /// Run an end-to-end PKCE login with a custom URL reporter. The reporter is
 /// called exactly once with the authorize URL. Use this from the TUI so the
 /// URL surfaces via the event bus instead of a stray `eprintln!`.
-pub async fn login_with_reporter<F>(provider: AuthProvider, on_url: F) -> Result<LoginOutcome>
+pub async fn login_with_reporter<F>(provider: AuthVendor, on_url: F) -> Result<LoginOutcome>
 where
     F: FnOnce(&str),
 {
@@ -150,10 +150,10 @@ where
         .port();
 
     let flow = match provider {
-        AuthProvider::Anthropic => {
+        AuthVendor::Anthropic => {
             ProviderFlow::claude(&challenge, &state, &build_redirect_uri(provider, port))
         }
-        AuthProvider::OpenAI => {
+        AuthVendor::OpenAI => {
             ProviderFlow::codex(&challenge, &state, &build_redirect_uri(provider, port))
         }
     };
@@ -198,10 +198,10 @@ const CODEX_CALLBACK_PORT: u16 = 1455;
 /// Bind the loopback callback listener. Codex must use a fixed port so the
 /// redirect URI matches the OAuth client registration; Claude accepts any
 /// loopback port so we pick one dynamically.
-async fn bind_listener(provider: AuthProvider) -> Result<tokio::net::TcpListener> {
+async fn bind_listener(provider: AuthVendor) -> Result<tokio::net::TcpListener> {
     let port = match provider {
-        AuthProvider::Anthropic => 0,
-        AuthProvider::OpenAI => CODEX_CALLBACK_PORT,
+        AuthVendor::Anthropic => 0,
+        AuthVendor::OpenAI => CODEX_CALLBACK_PORT,
     };
     tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
@@ -222,10 +222,10 @@ async fn bind_listener(provider: AuthProvider) -> Result<tokio::net::TcpListener
 /// strict-match the hostname and reject any alternative with an opaque
 /// `unknown_error`. The loopback listener still binds on `127.0.0.1`;
 /// `localhost` resolves there so the redirect still lands correctly.
-fn build_redirect_uri(provider: AuthProvider, port: u16) -> String {
+fn build_redirect_uri(provider: AuthVendor, port: u16) -> String {
     match provider {
-        AuthProvider::Anthropic => format!("http://localhost:{port}/callback"),
-        AuthProvider::OpenAI => format!("http://localhost:{port}/auth/callback"),
+        AuthVendor::Anthropic => format!("http://localhost:{port}/callback"),
+        AuthVendor::OpenAI => format!("http://localhost:{port}/auth/callback"),
     }
 }
 
@@ -510,7 +510,7 @@ async fn exchange_code(flow: &ProviderFlow, code: &str, verifier: &str) -> Resul
         .map(|s| s.to_owned());
 
     let (email, account_id, expires_at) = match flow.provider {
-        AuthProvider::Anthropic => {
+        AuthVendor::Anthropic => {
             let account = json.get("account");
             let email = account
                 .and_then(|a| a.get("email_address").or_else(|| a.get("email")))
@@ -532,7 +532,7 @@ async fn exchange_code(flow: &ProviderFlow, code: &str, verifier: &str) -> Resul
                 });
             (email, account_id, expires_at)
         }
-        AuthProvider::OpenAI => {
+        AuthVendor::OpenAI => {
             // Codex: identity lives in id_token JWT, expiry in access_token JWT.
             let id_token = json
                 .get("id_token")
@@ -587,7 +587,7 @@ fn extract_redirect(flow: &ProviderFlow) -> String {
         .unwrap_or_default()
 }
 
-fn build_account_entry(provider: AuthProvider, tokens: TokenResponse) -> AccountEntry {
+fn build_account_entry(provider: AuthVendor, tokens: TokenResponse) -> AccountEntry {
     let label = derive_label(provider, tokens.email.as_deref());
     AccountEntry {
         label,
@@ -727,11 +727,11 @@ mod tests {
     fn redirect_uri_uses_localhost_for_both_providers() {
         // Regression: `127.0.0.1` fails on both OAuth servers.
         assert_eq!(
-            build_redirect_uri(AuthProvider::Anthropic, 12345),
+            build_redirect_uri(AuthVendor::Anthropic, 12345),
             "http://localhost:12345/callback"
         );
         assert_eq!(
-            build_redirect_uri(AuthProvider::OpenAI, 12345),
+            build_redirect_uri(AuthVendor::OpenAI, 12345),
             "http://localhost:12345/auth/callback"
         );
     }

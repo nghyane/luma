@@ -41,7 +41,7 @@ impl ProviderRuntime {
             GatewayId::Anthropic => Self::Anthropic(AnthropicRuntime::new(
                 &binding.model_id,
                 &credential.token,
-                credential.is_oauth,
+                credential.auth_kind(),
                 &credential.label,
             )),
             GatewayId::Codex => Self::OpenAIResponses(OpenAIResponsesRuntime::new(
@@ -68,7 +68,8 @@ impl ProviderRuntime {
     pub fn thinking_caps_for(gateway: GatewayId, model_id: &str) -> ThinkingCapabilities {
         match gateway {
             GatewayId::Anthropic => {
-                AnthropicRuntime::new(model_id, "", false, "").thinking_capabilities()
+                AnthropicRuntime::new(model_id, "", crate::config::auth::AuthKind::ApiKey, "")
+                    .thinking_capabilities()
             }
             GatewayId::Codex => {
                 OpenAIResponsesRuntime::new(model_id, "", None, "", "").thinking_capabilities()

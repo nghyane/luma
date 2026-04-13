@@ -1,5 +1,5 @@
 use super::{
-    AuthProvider, CLAUDE_CLIENT_ID, CLAUDE_OAUTH_ENDPOINT, CLAUDE_REFRESH_SCOPES, OPENAI_CLIENT_ID,
+    AuthVendor, CLAUDE_CLIENT_ID, CLAUDE_OAUTH_ENDPOINT, CLAUDE_REFRESH_SCOPES, OPENAI_CLIENT_ID,
     OPENAI_OAUTH_ENDPOINT, should_use_claude_ai_auth,
 };
 
@@ -17,7 +17,7 @@ pub struct RefreshRequest {
     pub content_type: &'static str,
 }
 
-impl AuthProvider {
+impl AuthVendor {
     pub fn classify_auth_failure(self, status_code: u16, detail: &str) -> Option<AuthFailureKind> {
         if status_code != 401 && status_code != 403 {
             return None;

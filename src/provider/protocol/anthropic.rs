@@ -5,6 +5,7 @@
 /// `src/services/api/client.ts`, `src/services/api/claude.ts`,
 /// `src/utils/fingerprint.ts`, `src/constants/system.ts`, `src/utils/betas.ts`
 /// in `yasasbanukaofficial/claude-code`.
+use crate::config::auth::AuthKind;
 use crate::core::provider::{
     Provider, StopReason, StreamRequest, StreamResponse, ThinkingCapabilities, ThinkingOption,
 };
@@ -36,24 +37,28 @@ pub struct AnthropicRuntime {
     max_tokens: u32,
     base_url: String,
     api_key: String,
-    is_oauth: bool,
+    auth_kind: AuthKind,
     thinking: ThinkingLevel,
     account_label: String,
 }
 
 impl AnthropicRuntime {
-    /// Create from token. Set `is_oauth` true for OAuth tokens, false for raw API keys.
+    /// Create from a credential token and its wire-level auth kind.
     /// `account_label` is the pool entry name used for rate-limit / usage accounting.
-    pub fn new(model: &str, api_key: &str, is_oauth: bool, account_label: &str) -> Self {
+    pub fn new(model: &str, api_key: &str, auth_kind: AuthKind, account_label: &str) -> Self {
         Self {
             max_tokens: DEFAULT_MAX_TOKENS,
             model: model.to_owned(),
             base_url: BASE_URL.to_owned(),
             api_key: api_key.to_owned(),
-            is_oauth,
+            auth_kind,
             thinking: ThinkingLevel::Off,
             account_label: account_label.to_owned(),
         }
+    }
+
+    fn is_oauth(&self) -> bool {
+        matches!(self.auth_kind, AuthKind::OAuthBearer)
     }
 
     /// Build the full Anthropic Messages request body.
@@ -98,7 +103,7 @@ impl AnthropicRuntime {
             }
         }
 
-        if self.is_oauth {
+        if self.is_oauth() {
             let first_user_text = messages
                 .iter()
                 .find(|m| m.role == Role::User)
@@ -190,15 +195,11 @@ impl Provider for AnthropicRuntime {
                 effective_max_tokens,
             );
 
-            let auth_header = if self.is_oauth {
-                format!("Bearer {}", self.api_key)
-            } else {
-                self.api_key.clone()
-            };
-            let auth_key = if self.is_oauth {
-                "Authorization"
-            } else {
-                "x-api-key"
+            let (auth_key, auth_header) = match self.auth_kind {
+                AuthKind::OAuthBearer | AuthKind::CodexSession => {
+                    ("Authorization", format!("Bearer {}", self.api_key))
+                }
+                AuthKind::ApiKey => ("x-api-key", self.api_key.clone()),
             };
 
             // Default headers — matches `src/services/api/client.ts::getAnthropicClient`
@@ -210,7 +211,7 @@ impl Provider for AnthropicRuntime {
                 (auth_key, auth_header),
                 ("anthropic-version", "2023-06-01".into()),
             ];
-            if self.is_oauth {
+            if matches!(self.auth_kind, AuthKind::OAuthBearer) {
                 let betas = build_betas(&self.model);
                 header_vec.push(("anthropic-beta", betas));
                 header_vec.push(("x-app", "cli".into()));
@@ -715,7 +716,12 @@ mod tests {
 
     #[test]
     fn adaptive_thinking_capabilities_include_max() {
-        let provider = AnthropicRuntime::new("claude-sonnet-4-6", "key", false, "acc");
+        let provider = AnthropicRuntime::new(
+            "claude-sonnet-4-6",
+            "key",
+            crate::config::auth::AuthKind::ApiKey,
+            "acc",
+        );
         let labels: Vec<_> = provider
             .thinking_capabilities()
             .options()
@@ -727,7 +733,12 @@ mod tests {
 
     #[test]
     fn non_adaptive_thinking_capabilities_stop_at_high() {
-        let provider = AnthropicRuntime::new("claude-sonnet-4-5", "key", false, "acc");
+        let provider = AnthropicRuntime::new(
+            "claude-sonnet-4-5",
+            "key",
+            crate::config::auth::AuthKind::ApiKey,
+            "acc",
+        );
         let labels: Vec<_> = provider
             .thinking_capabilities()
             .options()

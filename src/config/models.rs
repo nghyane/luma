@@ -1,5 +1,5 @@
 /// Model discovery, sync, and default resolution.
-use crate::config::auth::{self, AuthProvider};
+use crate::config::auth::{self, AuthVendor};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -195,7 +195,7 @@ pub async fn sync() -> Result<usize> {
 }
 
 async fn scan_anthropic() -> Result<Vec<ModelEntry>> {
-    let auth = auth::resolve(AuthProvider::Anthropic).await?;
+    let auth = auth::resolve(AuthVendor::Anthropic).await?;
     let client = reqwest::Client::new();
     let res = client
         .get("https://api.anthropic.com/v1/models")
@@ -229,7 +229,7 @@ async fn scan_anthropic() -> Result<Vec<ModelEntry>> {
 }
 
 async fn scan_codex() -> Result<Vec<ModelEntry>> {
-    let auth = auth::resolve(AuthProvider::OpenAI).await?;
+    let auth = auth::resolve(AuthVendor::OpenAI).await?;
     let client = reqwest::Client::new();
     let res = client
         .get("https://chatgpt.com/backend-api/codex/models?client_version=1.0.0")

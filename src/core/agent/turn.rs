@@ -46,12 +46,11 @@ pub async fn run_chat_turn(
     tx: &EventSender,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    use crate::config::auth::{self, AuthProvider};
+    use crate::config::auth;
+    use crate::provider::binding::GatewayId;
 
-    let provider_kind = match config.source.as_str() {
-        "anthropic" => AuthProvider::Anthropic,
-        _ => AuthProvider::OpenAI,
-    };
+    let gateway = GatewayId::from_source(&config.source);
+    let provider_kind = gateway.auth_vendor();
 
     let mut auth_cred = auth::resolve(provider_kind).await?;
     for attempt in 0..MAX_AUTH_RETRIES {

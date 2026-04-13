@@ -74,12 +74,12 @@ async fn main() {
         }
         Some("auth") => {
             for provider in [
-                config::auth::AuthProvider::Anthropic,
-                config::auth::AuthProvider::OpenAI,
+                config::auth::AuthVendor::Anthropic,
+                config::auth::AuthVendor::OpenAI,
             ] {
                 let name = match provider {
-                    config::auth::AuthProvider::Anthropic => "anthropic",
-                    config::auth::AuthProvider::OpenAI => "openai",
+                    config::auth::AuthVendor::Anthropic => "anthropic",
+                    config::auth::AuthVendor::OpenAI => "openai",
                 };
                 match config::auth::resolve(provider).await {
                     Ok(auth) => println!(
@@ -92,8 +92,8 @@ async fn main() {
         }
         Some("login") => {
             let provider = match args.get(2).map(std::string::String::as_str) {
-                Some("anthropic" | "claude") | None => config::auth::AuthProvider::Anthropic,
-                Some("openai" | "codex") => config::auth::AuthProvider::OpenAI,
+                Some("anthropic" | "claude") | None => config::auth::AuthVendor::Anthropic,
+                Some("openai" | "codex") => config::auth::AuthVendor::OpenAI,
                 Some(other) => {
                     eprintln!("unknown provider: {other}\nusage: luma login [anthropic|openai]");
                     std::process::exit(1);

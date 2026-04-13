@@ -223,7 +223,7 @@ pub fn classify_auth_failure(
     status: reqwest::StatusCode,
     body: &str,
 ) -> Option<AuthFailureKind> {
-    let provider = crate::config::auth::AuthProvider::from_str(provider)?;
+    let provider = crate::config::auth::AuthVendor::from_str(provider)?;
     provider.classify_auth_failure(status.as_u16(), &extract_error_message(body))
 }
 

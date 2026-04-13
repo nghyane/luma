@@ -1,7 +1,7 @@
 use super::Action;
 /// App commands — slash commands, mode/model selection, session resume.
 use super::state::PickerMode;
-use crate::config::auth::{self, AccountHealth, AuthProvider};
+use crate::config::auth::{self, AccountHealth, AuthVendor};
 use crate::config::models::{self, AgentMode};
 use crate::event::{AgentCommand, Event};
 use crate::tui::status::PoolHealth;
@@ -113,11 +113,11 @@ impl super::App {
                 Action::Render
             }
             "login" | "login anthropic" | "login claude" => {
-                self.start_login(AuthProvider::Anthropic);
+                self.start_login(AuthVendor::Anthropic);
                 Action::Render
             }
             "login openai" | "login codex" => {
-                self.start_login(AuthProvider::OpenAI);
+                self.start_login(AuthVendor::OpenAI);
                 Action::Render
             }
             "exit" => Action::Quit,
@@ -140,8 +140,8 @@ impl super::App {
             .iter()
             .map(|a| {
                 let provider = match a.provider {
-                    AuthProvider::Anthropic => "claude",
-                    AuthProvider::OpenAI => "codex",
+                    AuthVendor::Anthropic => "claude",
+                    AuthVendor::OpenAI => "codex",
                 };
                 let status = match a.health {
                     AccountHealth::Ok if a.disabled => "off",
@@ -165,7 +165,7 @@ impl super::App {
 
     /// Spawn a detached PKCE login flow for `provider`. Progress and the
     /// final outcome are reported to the UI via the event bus.
-    pub(super) fn start_login(&mut self, provider: AuthProvider) {
+    pub(super) fn start_login(&mut self, provider: AuthVendor) {
         let Some(tx) = self.tx.clone() else {
             self.doc.error("internal: event bus not ready");
             return;
@@ -266,8 +266,10 @@ impl super::App {
             return;
         }
         let sent = self.agent.last_sent.as_ref();
-        let prompt_dirty = sent.is_none_or(|s| s.mode != desired.mode || s.source != desired.source);
-        let model_dirty = sent.is_none_or(|s| s.model_id != desired.model_id || s.source != desired.source);
+        let prompt_dirty =
+            sent.is_none_or(|s| s.mode != desired.mode || s.source != desired.source);
+        let model_dirty =
+            sent.is_none_or(|s| s.model_id != desired.model_id || s.source != desired.source);
         let thinking_dirty = sent.is_none_or(|s| s.thinking != desired.thinking);
 
         if prompt_dirty {
@@ -461,8 +463,8 @@ fn format_account_row(a: &crate::config::auth::AccountView) -> String {
     };
     let who = a.email.as_deref().unwrap_or(a.label.as_str());
     let provider = match a.provider {
-        AuthProvider::Anthropic => "anthropic",
-        AuthProvider::OpenAI => "openai",
+        AuthVendor::Anthropic => "anthropic",
+        AuthVendor::OpenAI => "openai",
     };
     let status = match a.health {
         AccountHealth::Ok => "ok".to_owned(),
@@ -486,7 +488,7 @@ mod tests {
     fn view(health: AccountHealth, email: Option<&str>) -> AccountView {
         AccountView {
             label: "nghia@gmail".into(),
-            provider: AuthProvider::Anthropic,
+            provider: AuthVendor::Anthropic,
             email: email.map(str::to_owned),
             health,
             disabled: false,

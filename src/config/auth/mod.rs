@@ -70,16 +70,16 @@ const POOL_STORE_VERSION: u32 = 2;
 // =============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthProvider {
+pub enum AuthVendor {
     Anthropic,
     OpenAI,
 }
 
-impl AuthProvider {
+impl AuthVendor {
     pub fn as_str(self) -> &'static str {
         match self {
-            AuthProvider::Anthropic => "anthropic",
-            AuthProvider::OpenAI => "openai",
+            AuthVendor::Anthropic => "anthropic",
+            AuthVendor::OpenAI => "openai",
         }
     }
 
@@ -90,6 +90,29 @@ impl AuthProvider {
             _ => None,
         }
     }
+}
+
+/// Wire-level auth scheme. Orthogonal to [`AuthVendor`], which identifies
+/// which pool bucket a credential belongs to. A single vendor can expose
+/// multiple kinds (Claude supports both OAuth and raw API keys); a single
+/// kind can cover multiple vendors (OpenAI and OpenCode Go both speak
+/// `OAuthBearer` → `Authorization: Bearer …`).
+///
+/// Derived from a [`Credential`] via [`Credential::auth_kind`] and consumed
+/// by the gateway / quirk layer. Keeping this as data (rather than
+/// branching on `AuthVendor` at every header site) is the decoupling RFC
+/// 0002 §Auth calls for — PR2 OpenCode Go plugs in as
+/// `gateway.auth = ApiKey | OAuthBearer` without a new enum variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthKind {
+    /// Raw API key. Header shape is gateway-specific
+    /// (`x-api-key` for Anthropic, `Authorization: Bearer …` elsewhere).
+    ApiKey,
+    /// OAuth `access_token` sent as `Authorization: Bearer …`.
+    OAuthBearer,
+    /// ChatGPT-account Codex session — `Authorization: Bearer …` plus
+    /// `chatgpt-account-id` + `session_id` headers.
+    CodexSession,
 }
 
 /// Resolved credential ready to hand to a provider client. Carries the
@@ -103,11 +126,26 @@ pub struct Credential {
     pub label: String,
 }
 
+impl Credential {
+    /// Classify how this credential is transported on the wire.
+    ///
+    /// Derived from the legacy `(is_oauth, account_id)` pair: Codex
+    /// OAuth tokens carry a `chatgpt-account-id` and need extra session
+    /// headers; Claude OAuth tokens don't. Raw API keys are `ApiKey`.
+    pub fn auth_kind(&self) -> AuthKind {
+        match (self.is_oauth, self.account_id.is_some()) {
+            (true, true) => AuthKind::CodexSession,
+            (true, false) => AuthKind::OAuthBearer,
+            (false, _) => AuthKind::ApiKey,
+        }
+    }
+}
+
 /// UI-safe snapshot of a pooled account. No secrets.
 #[derive(Debug, Clone)]
 pub struct AccountView {
     pub label: String,
-    pub provider: AuthProvider,
+    pub provider: AuthVendor,
     pub email: Option<String>,
     pub health: AccountHealth,
     pub disabled: bool,
@@ -250,14 +288,14 @@ where
 /// local upstream CLIs on first run and transparently refreshes expired
 /// tokens. If the current candidate's refresh fails, the account is flagged
 /// and the next healthy candidate is tried in the same call.
-pub async fn resolve(provider: AuthProvider) -> Result<Credential> {
+pub async fn resolve(provider: AuthVendor) -> Result<Credential> {
     resolve_inner(provider, false).await
 }
 
 /// Force a refresh even if the cached token looks valid. Used after a 401
 /// from the provider — the server said this token is bad, so don't trust
 /// local state.
-pub async fn force_refresh(provider: AuthProvider) -> Result<Credential> {
+pub async fn force_refresh(provider: AuthVendor) -> Result<Credential> {
     resolve_inner(provider, true).await
 }
 
@@ -320,7 +358,7 @@ pub fn list_accounts() -> Vec<AccountView> {
 }
 
 fn account_view(a: &AccountEntry) -> AccountView {
-    let provider = AuthProvider::from_str(&a.provider).unwrap_or(AuthProvider::Anthropic);
+    let provider = AuthVendor::from_str(&a.provider).unwrap_or(AuthVendor::Anthropic);
     let health = if a.needs_relogin {
         AccountHealth::NeedsRelogin
     } else if let Some(until) = a.cooldown_until {
@@ -345,7 +383,7 @@ fn account_view(a: &AccountEntry) -> AccountView {
 // resolve flow
 // =============================================================================
 
-async fn resolve_inner(provider: AuthProvider, force: bool) -> Result<Credential> {
+async fn resolve_inner(provider: AuthVendor, force: bool) -> Result<Credential> {
     // Bootstrap the pool if it has no account for this provider.
     ensure_bootstrapped(provider);
     crate::dbg_log!(
@@ -456,7 +494,7 @@ async fn resolve_inner(provider: AuthProvider, force: bool) -> Result<Credential
 
 /// Pick the first healthy account for `provider`. "Healthy" means not
 /// flagged `needs_relogin` and not currently on cooldown.
-fn pick_candidate(provider: AuthProvider) -> Option<AccountEntry> {
+fn pick_candidate(provider: AuthVendor) -> Option<AccountEntry> {
     let now = now_unix();
     let pool = pool();
     pool.accounts
@@ -529,7 +567,7 @@ fn merge_account(existing: &AccountEntry, mut incoming: AccountEntry) -> Account
     // (set by parse_*_json or PKCE login). A bad value here is an invariant
     // violation, not a fallback case.
     let provider =
-        AuthProvider::from_str(&incoming.provider).expect("pool entry has invalid provider string");
+        AuthVendor::from_str(&incoming.provider).expect("pool entry has invalid provider string");
     let current_label = derive_label(provider, incoming.email.as_deref());
     if !current_label.ends_with("-1") {
         incoming.label = current_label;
@@ -578,7 +616,7 @@ fn upsert_by_label(pool: &mut PoolStore, mut entry: AccountEntry) {
 
 /// If the pool has no account for this provider, try to seed one from the
 /// upstream CLI's local credential store.
-fn ensure_bootstrapped(provider: AuthProvider) {
+fn ensure_bootstrapped(provider: AuthVendor) {
     if let Some(seed) = load_local(provider) {
         with_pool_mut(|p| upsert_by_label(p, seed));
     }
@@ -588,7 +626,7 @@ fn ensure_bootstrapped(provider: AuthProvider) {
 /// has a materially different entry (different `refresh_token` or still-valid
 /// `access_token`), save it into the pool and return `true` so the caller
 /// retries. Returns `false` if no recovery is possible.
-async fn attempt_auto_recover(provider: AuthProvider, label: &str) -> bool {
+async fn attempt_auto_recover(provider: AuthVendor, label: &str) -> bool {
     let Some(fresh) = load_local(provider) else {
         crate::dbg_log!(
             "auth auto-recover no local credential provider={} label={}",
@@ -645,10 +683,10 @@ async fn attempt_auto_recover(provider: AuthProvider, label: &str) -> bool {
 // local source readers (first-run import + auto-recovery)
 // =============================================================================
 
-fn load_local(provider: AuthProvider) -> Option<AccountEntry> {
+fn load_local(provider: AuthVendor) -> Option<AccountEntry> {
     match provider {
-        AuthProvider::Anthropic => load_claude_local(),
-        AuthProvider::OpenAI => load_codex_local(),
+        AuthVendor::Anthropic => load_claude_local(),
+        AuthVendor::OpenAI => load_codex_local(),
     }
 }
 
@@ -676,7 +714,7 @@ fn load_claude_local() -> Option<AccountEntry> {
             entry.account_id = profile.account_uuid;
         }
         // Regenerate label now that we have identity.
-        entry.label = derive_label(AuthProvider::Anthropic, entry.email.as_deref());
+        entry.label = derive_label(AuthVendor::Anthropic, entry.email.as_deref());
     }
     Some(entry)
 }
@@ -829,7 +867,7 @@ fn parse_claude_json(raw: &str) -> Option<AccountEntry> {
         needs_relogin: false,
         disabled: false,
     };
-    entry.label = derive_label(AuthProvider::Anthropic, entry.email.as_deref());
+    entry.label = derive_label(AuthVendor::Anthropic, entry.email.as_deref());
     Some(entry)
 }
 
@@ -924,7 +962,7 @@ fn parse_codex_json(raw: &str) -> Option<AccountEntry> {
             })
         });
 
-    let label = derive_label(AuthProvider::OpenAI, email.as_deref());
+    let label = derive_label(AuthVendor::OpenAI, email.as_deref());
     Some(AccountEntry {
         label,
         provider: "openai".into(),
@@ -948,7 +986,7 @@ fn parse_codex_json(raw: &str) -> Option<AccountEntry> {
 
 async fn try_refresh(
     entry: &AccountEntry,
-    provider: AuthProvider,
+    provider: AuthVendor,
 ) -> std::result::Result<AccountEntry, String> {
     crate::dbg_log!(
         "auth refresh start provider={} label={} expires_at={:?}",
@@ -1177,7 +1215,7 @@ struct LegacyEntry {
 }
 
 fn legacy_to_account(le: LegacyEntry) -> Option<AccountEntry> {
-    let provider = AuthProvider::from_str(&le.provider)?;
+    let provider = AuthVendor::from_str(&le.provider)?;
     let email = extract_email_from_jwt(&le.access_token);
     let label = derive_label(provider, email.as_deref());
     let expires_at = le.expires_at.as_ref().and_then(parse_expires_field);
@@ -1204,7 +1242,7 @@ fn legacy_to_account(le: LegacyEntry) -> Option<AccountEntry> {
 
 /// Auto-derive a short account label from the email address. Falls back to
 /// `{provider}-{N}` when no email is available.
-fn derive_label(provider: AuthProvider, email: Option<&str>) -> String {
+fn derive_label(provider: AuthVendor, email: Option<&str>) -> String {
     if let Some(email) = email
         && let Some((local, domain)) = email.split_once('@')
     {
@@ -1422,11 +1460,11 @@ mod tests {
     #[test]
     fn derive_label_from_email() {
         assert_eq!(
-            derive_label(AuthProvider::Anthropic, Some("nghia@gmail.com")),
+            derive_label(AuthVendor::Anthropic, Some("nghia@gmail.com")),
             "nghia@gmail"
         );
         assert_eq!(
-            derive_label(AuthProvider::OpenAI, Some("work@company.co.uk")),
+            derive_label(AuthVendor::OpenAI, Some("work@company.co.uk")),
             "work@company"
         );
     }

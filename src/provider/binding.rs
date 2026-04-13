@@ -46,6 +46,18 @@ impl GatewayId {
             _ => Self::OpenAI,
         }
     }
+
+    /// Which auth-pool bucket this gateway's credentials live in. Decouples
+    /// the provider / binding layer from the vendor-keyed pool: callers
+    /// ask `gateway.auth_vendor()` instead of hardcoding
+    /// `AuthVendor::Anthropic` / `AuthVendor::OpenAI` at the call site.
+    pub fn auth_vendor(self) -> crate::config::auth::AuthVendor {
+        use crate::config::auth::AuthVendor;
+        match self {
+            Self::Anthropic => AuthVendor::Anthropic,
+            Self::Codex | Self::OpenAI => AuthVendor::OpenAI,
+        }
+    }
 }
 
 /// How a gateway authenticates. Intentionally coarse today — only the
