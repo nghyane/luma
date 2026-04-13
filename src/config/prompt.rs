@@ -92,7 +92,10 @@ mod tests {
         for mode in &[AgentMode::Rush, AgentMode::Smart, AgentMode::Deep] {
             for style in &[ToolStyle::Native, ToolStyle::Patch] {
                 let p = build(*mode, *style);
-                assert!(p.contains("emoji"), "Missing emoji rule: {mode:?}/{style:?}");
+                assert!(
+                    p.contains("emoji"),
+                    "Missing emoji rule: {mode:?}/{style:?}"
+                );
             }
         }
     }

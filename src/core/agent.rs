@@ -169,9 +169,7 @@ async fn agent_loop(
                         text: system_prompt,
                     }];
                 } else if !system_prompt.is_empty() {
-                    session
-                        .messages
-                        .insert(0, Message::system(system_prompt));
+                    session.messages.insert(0, Message::system(system_prompt));
                 }
             }
             AgentCommand::SetThinking(level) => {

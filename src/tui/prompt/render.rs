@@ -108,4 +108,3 @@ impl super::PromptState {
             .collect()
     }
 }
-

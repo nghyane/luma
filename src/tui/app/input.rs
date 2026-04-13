@@ -18,9 +18,7 @@ pub fn read_stdin_loop(reader: EventReader, tx: Sender) {
             // Only forward key-press events (ignore Release/Repeat).
             termina::Event::Key(ref k) if k.kind != KeyEventKind::Press => continue,
             // Drop NUL char key events (Windows reports bare modifier presses this way).
-            termina::Event::Key(ref k)
-                if matches!(k.code, termina::event::KeyCode::Char('\0')) =>
-            {
+            termina::Event::Key(ref k) if matches!(k.code, termina::event::KeyCode::Char('\0')) => {
                 continue;
             }
             // Drop escape sequence responses — app does not use them.
