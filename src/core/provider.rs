@@ -2,7 +2,6 @@
 use crate::core::types::{Message, ThinkingLevel, ToolSchema, Usage};
 use crate::event_bus::Sender as EventSender;
 use anyhow::Result;
-use futures::stream::BoxStream;
 use std::future::Future;
 use std::pin::Pin;
 use tokio_util::sync::CancellationToken;
@@ -123,129 +122,6 @@ pub struct StreamResponse {
     pub message: Message,
     pub usage: Usage,
     pub stop_reason: StopReason,
-}
-
-/// Normalized streaming event emitted by a `Protocol` decoder.
-///
-/// Protocols (Anthropic Messages, OpenAI Chat, OpenAI Responses) each have
-/// their own SSE / JSON-stream shape; `StreamEvent` is the common vocabulary
-/// the rest of the system consumes (see `MessageAssembler` and the caller
-/// loop in `turn.rs`).
-///
-/// `index` identifies the ordinal content block within the assistant
-/// message. It is required for protocols that interleave thinking and text
-/// blocks whose order matters for signature validation (Anthropic) and lets
-/// the assembler reconstruct a single ordered `Vec<ContentBlock>`.
-///
-/// Introduced by RFC 0002. Not yet wired to any `Provider` impl — legacy
-/// providers continue to use the push model until commit 4 of PR1.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub enum StreamEvent {
-    /// Reasoning / chain-of-thought delta for block `index`.
-    ThinkingDelta { index: u32, text: String },
-    /// Signature for the thinking block at `index`. Must round-trip verbatim
-    /// on later turns or the Anthropic backend rejects the request.
-    ThinkingSignature { index: u32, sig: String },
-    /// Assistant text delta for block `index`.
-    TextDelta { index: u32, text: String },
-    /// Model requested a tool call. Arguments arrive via `ToolUseDelta`.
-    ToolUseStart {
-        index: u32,
-        id: String,
-        name: String,
-    },
-    /// Incremental JSON fragment for the tool call at `index`.
-    ToolUseDelta { index: u32, json_delta: String },
-    /// Tool call at `index` is fully specified.
-    ToolUseStop { index: u32 },
-    /// Server-side tool (e.g. Claude web_search) invoked by the backend.
-    ServerToolCall {
-        name: String,
-        input: serde_json::Value,
-    },
-    /// Result of a server-side tool, returned inline in the stream.
-    ServerToolResult {
-        name: String,
-        output: serde_json::Value,
-    },
-    /// Running token usage. May be emitted multiple times; the last wins.
-    UsageUpdate(Usage),
-    /// Terminal event. Stream MUST NOT emit further events after `Done`.
-    Done { stop: StopReason },
-}
-
-/// Identifier for a wire protocol. Used by registry lookup and catalog.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ProtocolId {
-    /// Anthropic Messages API (`/v1/messages`, SSE event blocks).
-    AnthropicMessages,
-    /// OpenAI Chat Completions (`/v1/chat/completions`, SSE `data:` frames).
-    OpenAIChat,
-    /// OpenAI Responses API (`/v1/responses`, SSE with typed events).
-    OpenAIResponses,
-}
-
-/// Byte stream yielded by the HTTP transport, fed into `Protocol::decode_stream`.
-///
-/// Boundary uses `Vec<u8>` instead of `bytes::Bytes` to avoid pulling an
-/// extra dependency outside the project allowlist; the overhead is a single
-/// copy per chunk which is negligible relative to JSON parsing cost.
-#[allow(dead_code)]
-pub type ByteStream = BoxStream<'static, Result<Vec<u8>>>;
-
-/// Stream of normalized events produced by a protocol decoder.
-#[allow(dead_code)]
-pub type EventStream<'a> = BoxStream<'a, Result<StreamEvent>>;
-
-/// Wire-format adapter for a family of LLM APIs.
-///
-/// A `Protocol` is pure: `encode_request` builds a request body + headers
-/// from the abstract `StreamRequest`, and `decode_stream` transforms the
-/// raw HTTP byte stream into normalized `StreamEvent`s. Protocols MUST NOT
-/// perform I/O, touch the filesystem, or reference vendor-specific quirks
-/// (Claude betas, Codex session headers, OAuth system rewrites). Those
-/// concerns live in the `quirks` middleware layer (RFC 0002 §Quirks).
-///
-/// Introduced by RFC 0002. No implementations exist yet — this commit
-/// establishes the trait shape; subsequent commits in PR1 extract the
-/// three concrete protocols from the legacy provider modules.
-#[allow(dead_code)]
-pub trait Protocol: Send + Sync {
-    /// Stable identifier for registry lookup and catalog entries.
-    fn id(&self) -> ProtocolId;
-
-    /// Path appended to the gateway base URL for streaming requests.
-    fn endpoint_path(&self) -> &str;
-
-    /// Build the request body and protocol-specific headers. Pure.
-    ///
-    /// `ctx` supplies per-request state (model id, thinking level, max
-    /// tokens, image resolver) that the protocol needs to shape the body
-    /// but that is not part of the abstract message history.
-    fn encode_request(
-        &self,
-        req: &StreamRequest<'_>,
-        ctx: &RequestCtx<'_>,
-    ) -> (serde_json::Value, Vec<(String, String)>);
-
-    /// Decode the raw byte stream into normalized events. Pure.
-    ///
-    /// Implementations MUST emit a terminal `StreamEvent::Done` and then
-    /// terminate. They MUST NOT perform I/O or call into `EventSender`.
-    fn decode_stream(&self, bytes: ByteStream) -> EventStream<'static>;
-}
-
-/// Per-request context passed to `Protocol::encode_request`.
-///
-/// Bundles the small slice of provider configuration that influences body
-/// shape without coupling protocols to any specific `Provider` impl.
-#[allow(dead_code)]
-pub struct RequestCtx<'a> {
-    pub model_id: &'a str,
-    pub thinking: ThinkingLevel,
-    pub max_tokens: u32,
 }
 
 /// Resolves image id → base64 data. Passed to providers so they don't touch filesystem.
