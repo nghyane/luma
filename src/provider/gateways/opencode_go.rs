@@ -4,7 +4,7 @@
 //! distinct endpoint paths; the wire protocol is per-model. See
 //! <https://opencode.ai/docs/go/>.
 
-use crate::config::auth::{AuthKind, AuthVendor, Credential};
+use crate::config::auth::{AuthVendor, Credential};
 use crate::core::provider::{Provider, ThinkingCapabilities};
 use crate::provider::binding::{ModelBinding, ProtocolId};
 use crate::provider::gateway::{Gateway, GatewayId};
@@ -40,11 +40,6 @@ impl Gateway for OpenCodeGo {
     fn base_url(&self) -> &'static str {
         "https://opencode.ai/zen/go"
     }
-    fn auth_kind(&self, _is_oauth: bool) -> AuthKind {
-        // Proxy accepts only `Authorization: Bearer <token>`; never
-        // `x-api-key`, regardless of the underlying credential shape.
-        AuthKind::OAuthBearer
-    }
     fn quirks(&self, _is_oauth: bool) -> QuirkSet {
         QuirkSet::EMPTY
     }
@@ -69,7 +64,11 @@ impl Gateway for OpenCodeGo {
                 &binding.model_id,
                 &binding.base_url,
                 &credential.token,
-                self.auth_kind(credential.is_oauth),
+                // OpenCode Go's `/v1/messages` requires `x-api-key`
+                // (Anthropic-native shape); Bearer returns 401
+                // "Missing API key". Force the api-key wire shape
+                // regardless of the credential's is_oauth bit.
+                false,
                 self.quirks(credential.is_oauth),
                 &credential.label,
             )),

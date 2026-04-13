@@ -94,29 +94,6 @@ impl AuthVendor {
     }
 }
 
-/// Wire-level auth scheme. Orthogonal to [`AuthVendor`], which identifies
-/// which pool bucket a credential belongs to. A single vendor can expose
-/// multiple kinds (Claude supports both OAuth and raw API keys); a single
-/// kind can cover multiple vendors (OpenAI and OpenCode Go both speak
-/// `OAuthBearer` → `Authorization: Bearer …`).
-///
-/// Derived from a [`Credential`] via [`Credential::auth_kind`] and consumed
-/// by the gateway / quirk layer. Keeping this as data (rather than
-/// branching on `AuthVendor` at every header site) is the decoupling RFC
-/// 0002 §Auth calls for — PR2 OpenCode Go plugs in as
-/// `gateway.auth = ApiKey | OAuthBearer` without a new enum variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthKind {
-    /// Raw API key. Header shape is gateway-specific
-    /// (`x-api-key` for Anthropic, `Authorization: Bearer …` elsewhere).
-    ApiKey,
-    /// OAuth `access_token` sent as `Authorization: Bearer …`.
-    OAuthBearer,
-    /// ChatGPT-account Codex session — `Authorization: Bearer …` plus
-    /// `chatgpt-account-id` + `session_id` headers.
-    CodexSession,
-}
-
 /// Resolved credential ready to hand to a provider client. Carries the
 /// account `label` so callers can mark rate-limits / usage back onto the
 /// correct pool entry after a request.

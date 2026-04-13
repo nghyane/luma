@@ -1,6 +1,6 @@
 //! OpenAI direct (api.openai.com Chat Completions).
 
-use crate::config::auth::{AuthKind, AuthVendor, Credential};
+use crate::config::auth::{AuthVendor, Credential};
 use crate::core::provider::{Provider, ThinkingCapabilities};
 use crate::provider::binding::{ModelBinding, ProtocolId};
 use crate::provider::gateway::{Gateway, GatewayId};
@@ -21,11 +21,6 @@ impl Gateway for OpenAI {
     }
     fn base_url(&self) -> &'static str {
         "https://api.openai.com/v1"
-    }
-    fn auth_kind(&self, _is_oauth: bool) -> AuthKind {
-        // Raw API key carried in the Authorization header — same shape
-        // as OAuth bearer.
-        AuthKind::OAuthBearer
     }
     fn quirks(&self, _is_oauth: bool) -> QuirkSet {
         QuirkSet::EMPTY

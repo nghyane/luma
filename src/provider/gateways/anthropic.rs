@@ -1,6 +1,6 @@
 //! Anthropic Claude (claude.ai subscriber OAuth or raw API key).
 
-use crate::config::auth::{AuthKind, AuthVendor, Credential};
+use crate::config::auth::{AuthVendor, Credential};
 use crate::core::provider::{Provider, ThinkingCapabilities, ThinkingOption};
 use crate::core::types::ThinkingLevel;
 use crate::provider::binding::{ModelBinding, ProtocolId};
@@ -29,13 +29,6 @@ impl Gateway for Anthropic {
     }
     fn base_url(&self) -> &'static str {
         "https://api.anthropic.com"
-    }
-    fn auth_kind(&self, is_oauth: bool) -> AuthKind {
-        if is_oauth {
-            AuthKind::OAuthBearer
-        } else {
-            AuthKind::ApiKey
-        }
     }
     fn quirks(&self, is_oauth: bool) -> QuirkSet {
         if is_oauth {
@@ -86,7 +79,7 @@ impl Gateway for Anthropic {
             &binding.model_id,
             &binding.base_url,
             &credential.token,
-            self.auth_kind(credential.is_oauth),
+            credential.is_oauth,
             self.quirks(credential.is_oauth),
             &credential.label,
         ))

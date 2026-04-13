@@ -5,7 +5,6 @@
 /// `src/services/api/client.ts`, `src/services/api/claude.ts`,
 /// `src/utils/fingerprint.ts`, `src/constants/system.ts`, `src/utils/betas.ts`
 /// in `yasasbanukaofficial/claude-code`.
-use crate::config::auth::AuthKind;
 use crate::core::provider::{Provider, StopReason, StreamEvent, StreamRequest, StreamResponse};
 use crate::core::types::{ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage};
 use crate::event::Event;
@@ -34,24 +33,21 @@ pub struct AnthropicRuntime {
     max_tokens: u32,
     base_url: String,
     api_key: String,
-    auth_kind: AuthKind,
+    is_oauth: bool,
     quirks: QuirkSet,
     thinking: ThinkingLevel,
     account_label: String,
 }
 
 impl AnthropicRuntime {
-    /// Create from a credential token, its wire-level auth kind, and the
-    /// set of quirks the gateway + auth combination needs applied.
-    /// `base_url` is the gateway's scheme+host with no trailing slash
-    /// (e.g. `https://api.anthropic.com`); the `/v1/messages` path is
-    /// appended internally.
-    /// `account_label` is the pool entry name used for rate-limit / usage accounting.
+    /// Create from a credential token, the OAuth-vs-api-key bit, and the
+    /// set of quirks the gateway needs applied. `base_url` is the
+    /// gateway's scheme+host with no trailing slash.
     pub fn new(
         model: &str,
         base_url: &str,
         api_key: &str,
-        auth_kind: AuthKind,
+        is_oauth: bool,
         quirks: QuirkSet,
         account_label: &str,
     ) -> Self {
@@ -60,7 +56,7 @@ impl AnthropicRuntime {
             model: model.to_owned(),
             base_url: base_url.to_owned(),
             api_key: api_key.to_owned(),
-            auth_kind,
+            is_oauth,
             quirks,
             thinking: ThinkingLevel::Off,
             account_label: account_label.to_owned(),
@@ -174,11 +170,10 @@ impl Provider for AnthropicRuntime {
                 effective_max_tokens,
             );
 
-            let (auth_key, auth_header) = match self.auth_kind {
-                AuthKind::OAuthBearer | AuthKind::CodexSession => {
-                    ("Authorization", format!("Bearer {}", self.api_key))
-                }
-                AuthKind::ApiKey => ("x-api-key", self.api_key.clone()),
+            let (auth_key, auth_header) = if self.is_oauth {
+                ("Authorization", format!("Bearer {}", self.api_key))
+            } else {
+                ("x-api-key", self.api_key.clone())
             };
 
             // Default headers — matches `src/services/api/client.ts::getAnthropicClient`

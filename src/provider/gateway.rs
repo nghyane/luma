@@ -11,7 +11,7 @@
 //! and one entry in `gateways::GATEWAYS`. Compiler-checked exhaustiveness
 //! comes from `GatewayId`.
 
-use crate::config::auth::{AuthKind, AuthVendor, Credential};
+use crate::config::auth::{AuthVendor, Credential};
 use crate::core::provider::{Provider, ThinkingCapabilities};
 use crate::core::types::ThinkingLevel;
 use crate::provider::binding::{ModelBinding, ProtocolId};
@@ -44,9 +44,6 @@ pub trait Gateway: Send + Sync {
     /// Base URL (scheme + host, no trailing slash) that runtimes append
     /// protocol-specific endpoint paths to.
     fn base_url(&self) -> &'static str;
-
-    /// Wire-auth shape derived from whether the credential is OAuth-backed.
-    fn auth_kind(&self, is_oauth: bool) -> AuthKind;
 
     /// Quirks that apply to a request from this gateway with a credential
     /// of the given kind.
