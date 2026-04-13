@@ -12,6 +12,9 @@ use crate::core::types::{ContentBlock, Message, Role, ThinkingLevel, ToolSchema,
 use crate::event::Event;
 use crate::provider::json_stream::{JsonStringExtractor, streamable_arg_for};
 use crate::provider::quirks::cache_breakpoint::apply_cache_breakpoint;
+use crate::provider::quirks::claude_identity::{
+    CLI_VERSION, claude_cli_user_agent, claude_session_id, compute_fingerprint,
+};
 use crate::provider::sse::post_sse;
 use crate::util::uuid_v4;
 use anyhow::Result;
@@ -564,33 +567,7 @@ fn parse_stop_reason(s: &str) -> StopReason {
     }
 }
 
-/// Upstream CLI version reverse-engineered from `~/.local/bin/claude@2.1.100`.
-/// Used for `User-Agent`, `cc_version`, and as input to [`compute_fingerprint`].
-/// Must match across the three so the backend's attribution validator
-/// accepts the fingerprint.
-const CLI_VERSION: &str = "2.1.100";
-
 const IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
-
-/// Hardcoded fingerprint salt — `src/utils/fingerprint.ts:8`.
-const FINGERPRINT_SALT: &str = "59cf53e54c78";
-
-/// First-user-message character indices sampled for the fingerprint hash.
-const FINGERPRINT_POSITIONS: [usize; 3] = [4, 7, 20];
-
-/// Stable per-process session id for the `X-Claude-Code-Session-Id` header.
-fn claude_session_id() -> String {
-    use std::sync::OnceLock;
-    static SESSION_ID: OnceLock<String> = OnceLock::new();
-    SESSION_ID
-        .get_or_init(|| uuid_v4().unwrap_or_else(|| "unknown".to_owned()))
-        .clone()
-}
-
-/// `claude-cli/{CLI_VERSION} (external, cli)` — `src/utils/http.ts::getUserAgent`.
-fn claude_cli_user_agent() -> String {
-    format!("claude-cli/{CLI_VERSION} (external, cli)")
-}
 
 /// Build the OAuth-mode `system` array (`src/utils/api.ts::splitSysPromptPrefix`
 /// + `src/services/api/claude.ts::buildSystemPromptBlocks`).
@@ -622,20 +599,6 @@ fn build_oauth_system(user_system: &str, first_user_content: &str) -> serde_json
         }));
     }
     serde_json::Value::Array(blocks)
-}
-
-/// 3-char attribution fingerprint — `src/utils/fingerprint.ts::computeFingerprint`.
-/// `SHA256(SALT + msg[4] + msg[7] + msg[20] + version)[:3]`, missing positions
-/// substituted with `'0'`. Backend-validated: any drift breaks attribution.
-fn compute_fingerprint(first_user_content: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let chars: String = FINGERPRINT_POSITIONS
-        .iter()
-        .map(|&p| first_user_content.chars().nth(p).unwrap_or('0'))
-        .collect();
-    let input = format!("{FINGERPRINT_SALT}{chars}{CLI_VERSION}");
-    let hash = Sha256::digest(input.as_bytes());
-    format!("{hash:x}")[..3].to_owned()
 }
 
 /// `anthropic-beta` header value, in upstream emit order for the common
@@ -1069,42 +1032,6 @@ mod tests {
     }
 
     // --- Claude Code parity regression tests ---
-
-    #[test]
-    fn user_agent_matches_upstream_shape() {
-        let ua = claude_cli_user_agent();
-        assert!(ua.starts_with("claude-cli/"));
-        assert!(ua.ends_with(" (external, cli)"));
-        assert!(ua.contains(CLI_VERSION));
-    }
-
-    #[test]
-    fn session_id_is_stable_per_process() {
-        let a = claude_session_id();
-        let b = claude_session_id();
-        assert_eq!(a, b);
-        assert!(!a.is_empty());
-    }
-
-    #[test]
-    fn fingerprint_is_three_hex_chars() {
-        let fp = compute_fingerprint("hello world, this is a short prompt");
-        assert_eq!(fp.len(), 3);
-        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn fingerprint_substitutes_zero_for_missing_positions() {
-        // All three sample positions fall past the end → all '0's.
-        assert_eq!(compute_fingerprint("abc"), compute_fingerprint(""));
-    }
-
-    #[test]
-    fn fingerprint_is_deterministic() {
-        let a = compute_fingerprint("the quick brown fox jumps over lazy dog");
-        let b = compute_fingerprint("the quick brown fox jumps over lazy dog");
-        assert_eq!(a, b);
-    }
 
     #[test]
     fn billing_block_has_expected_shape() {

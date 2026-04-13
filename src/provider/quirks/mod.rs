@@ -7,3 +7,4 @@
 //! modules to preserve behavior.
 
 pub mod cache_breakpoint;
+pub mod claude_identity;
