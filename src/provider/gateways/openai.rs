@@ -20,7 +20,7 @@ impl Gateway for OpenAI {
         AuthVendor::OpenAI
     }
     fn base_url(&self) -> &'static str {
-        "https://api.openai.com/v1"
+        "https://api.openai.com"
     }
     fn quirks(&self, _is_oauth: bool) -> QuirkSet {
         QuirkSet::EMPTY

@@ -18,9 +18,9 @@ pub struct OpenAIChatRuntime {
 
 impl OpenAIChatRuntime {
     /// Create from model name, gateway base URL, API key, and pool account
-    /// label. `base_url` must include the `/v1` prefix where applicable
-    /// (e.g. `https://api.openai.com/v1`); the runtime appends
-    /// `/chat/completions`.
+    /// label. `base_url` is the gateway's scheme+host with no trailing
+    /// slash (e.g. `https://api.openai.com`); the runtime appends
+    /// `/v1/chat/completions`.
     pub fn new(model: &str, base_url: &str, api_key: &str, account_label: &str) -> Self {
         Self {
             model: model.to_owned(),
@@ -104,7 +104,7 @@ impl Provider for OpenAIChatRuntime {
             let sse = post_sse(
                 "openai",
                 &self.account_label,
-                &format!("{}/chat/completions", self.base_url),
+                &format!("{}/v1/chat/completions", self.base_url),
                 &headers,
                 &body,
                 &tx,
