@@ -1,14 +1,16 @@
 /// Codex provider — OpenAI Responses API at chatgpt.com/backend-api/codex.
 use crate::config::auth::{CODEX_ORIGINATOR, codex_user_agent, resolve_installation_id};
 use crate::core::provider::{
-    Provider, StopReason, StreamRequest, StreamResponse, ThinkingCapabilities,
+    Provider, StopReason, StreamEvent, StreamRequest, StreamResponse, ThinkingCapabilities,
 };
 use crate::core::types::{ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage};
 use crate::event::Event;
 use crate::event_bus::Sender as EventSender;
 use crate::provider::json_stream::{JsonStringExtractor, streamable_arg_for};
+use crate::provider::sse::SseEventStream;
 use anyhow::Result;
-use std::collections::BTreeMap;
+use futures::stream::{BoxStream, StreamExt};
+use std::collections::{BTreeMap, VecDeque};
 
 const CODEX_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 
@@ -168,7 +170,7 @@ impl Provider for OpenAIResponsesRuntime {
                 header_vec.push(("session_id", sid.as_str()));
             }
 
-            let mut stream = crate::provider::sse::post_sse(
+            let sse = crate::provider::sse::post_sse(
                 "codex",
                 &self.account_label,
                 CODEX_ENDPOINT,
@@ -178,75 +180,150 @@ impl Provider for OpenAIResponsesRuntime {
                 &cancel,
             )
             .await?;
-            run_codex_stream_loop(&mut stream, tools, &tx).await
+            consume_responses_stream(sse, tools, &tx).await
         })
     }
 }
 
-struct CodexStreamState {
+/// Drain a decoded Codex Responses stream into a `StreamResponse`.
+async fn consume_responses_stream(
+    sse: SseEventStream,
+    tools: &[ToolSchema],
+    tx: &EventSender,
+) -> Result<StreamResponse> {
+    let mut events = decode_responses_sse(sse, tools.to_vec());
+    let mut blocks: Vec<ContentBlock> = Vec::new();
+    let mut usage = Usage::default();
+    let mut stop_reason = StopReason::default();
+    let mut saw_done = false;
+
+    while let Some(evt) = events.next().await {
+        match evt? {
+            StreamEvent::TextDelta(t) => {
+                let _ = tx.send(Event::Token(t)).await;
+            }
+            StreamEvent::ThinkingDelta(t) => {
+                let _ = tx.send(Event::Thinking(t)).await;
+            }
+            StreamEvent::ToolSelected { name } => {
+                let _ = tx.send(Event::ToolSelected { name }).await;
+            }
+            StreamEvent::ToolInput { name, chunk } => {
+                let _ = tx.send(Event::ToolInput { name, chunk }).await;
+            }
+            StreamEvent::WebSearchStart { query } => {
+                let _ = tx.send(Event::WebSearchStart { query }).await;
+            }
+            StreamEvent::WebSearchDone { results } => {
+                let _ = tx
+                    .send(Event::WebSearchDone {
+                        query: String::new(),
+                        results,
+                    })
+                    .await;
+            }
+            StreamEvent::UsageUpdate(u) => {
+                usage = u.clone();
+                let _ = tx.send(Event::Usage(u)).await;
+            }
+            StreamEvent::BlockComplete(b) => blocks.push(b),
+            StreamEvent::Done { stop } => {
+                stop_reason = stop;
+                saw_done = true;
+                break;
+            }
+        }
+    }
+
+    if !saw_done {
+        return Err(crate::provider::sse::StreamInterrupted(
+            "Codex stream closed before response.completed".into(),
+        )
+        .into());
+    }
+
+    Ok(StreamResponse {
+        message: Message {
+            role: Role::Assistant,
+            content: blocks,
+            origin: Some(crate::core::types::MessageOrigin {
+                provider: "codex".into(),
+                model: None,
+            }),
+        },
+        usage,
+        stop_reason,
+    })
+}
+
+/// Pure decoder for the Codex Responses SSE dialect.
+///
+/// Reads one typed `sse_event.event_type` at a time; accumulates text,
+/// per-output-index tool calls, reasoning deltas, and web-search state;
+/// emits normalized `StreamEvent`s via an internal queue.
+struct ResponsesDecoder {
+    tools: Vec<ToolSchema>,
     text: String,
     tool_calls: BTreeMap<u64, PendingTool>,
     arg_extractors: BTreeMap<u64, JsonStringExtractor>,
     extractor_probed: std::collections::BTreeSet<u64>,
     usage: Usage,
-    saw_terminal: bool,
+    /// Terminal classifiers. Exactly one is set when the decoder finalises.
+    saw_completed: bool,
     incomplete_reason: String,
     failure_error: Option<anyhow::Error>,
+    out: VecDeque<StreamEvent>,
 }
 
-impl CodexStreamState {
-    fn new() -> Self {
+impl ResponsesDecoder {
+    fn new(tools: Vec<ToolSchema>) -> Self {
         Self {
+            tools,
             text: String::new(),
             tool_calls: BTreeMap::new(),
             arg_extractors: BTreeMap::new(),
             extractor_probed: std::collections::BTreeSet::new(),
             usage: Usage::default(),
-            saw_terminal: false,
+            saw_completed: false,
             incomplete_reason: String::new(),
             failure_error: None,
+            out: VecDeque::new(),
         }
     }
-}
 
-async fn run_codex_stream_loop(
-    stream: &mut crate::provider::sse::SseEventStream,
-    tools: &[ToolSchema],
-    tx: &EventSender,
-) -> Result<StreamResponse> {
-    let mut state = CodexStreamState::new();
+    /// Whether the decoder has reached a terminal frame (completed,
+    /// incomplete, or failed). After this, further SSE frames are ignored
+    /// and the outer stream finalises.
+    fn is_terminal(&self) -> bool {
+        self.saw_completed || !self.incomplete_reason.is_empty() || self.failure_error.is_some()
+    }
 
-    'outer: while let Some(event_result) = stream.next().await {
-        let sse_event = event_result?;
-        let event = sse_event.data;
-        let event_type = sse_event.event_type.as_str();
-
+    fn feed(&mut self, event_type: &str, event: &serde_json::Value) {
         crate::dbg_log!("codex event: {event_type}");
         match event_type {
             "response.output_text.delta" | "response.content_part.delta" => {
                 if let Some(delta) = event["delta"].as_str() {
-                    state.text.push_str(delta);
-                    let _ = tx.send(Event::Token(delta.to_owned())).await;
+                    self.text.push_str(delta);
+                    self.out.push_back(StreamEvent::TextDelta(delta.to_owned()));
                 }
             }
             "response.reasoning_summary_text.delta"
             | "response.reasoning_summary.delta"
             | "response.reasoning_text.delta" => {
                 if let Some(delta) = event["delta"].as_str() {
-                    let _ = tx.send(Event::Thinking(delta.to_owned())).await;
+                    self.out
+                        .push_back(StreamEvent::ThinkingDelta(delta.to_owned()));
                 }
             }
             "response.web_search_call.in_progress" => {
-                let _ = tx
-                    .send(Event::WebSearchStart {
-                        query: String::new(),
-                    })
-                    .await;
+                self.out.push_back(StreamEvent::WebSearchStart {
+                    query: String::new(),
+                });
             }
             "response.web_search_call.searching" => {}
             "response.output_item.added" => {
                 maybe_store_tool_call(
-                    &mut state.tool_calls,
+                    &mut self.tool_calls,
                     event["output_index"].as_u64(),
                     &event["item"],
                 );
@@ -254,199 +331,192 @@ async fn run_codex_stream_loop(
                     && let Some(name) = event["item"]["name"].as_str()
                     && !name.is_empty()
                 {
-                    let _ = tx
-                        .send(Event::ToolSelected {
-                            name: name.to_owned(),
-                        })
-                        .await;
+                    self.out.push_back(StreamEvent::ToolSelected {
+                        name: name.to_owned(),
+                    });
                 }
             }
             "response.function_call_arguments.delta" => {
                 if let Some(idx) = event["output_index"].as_u64()
                     && let Some(delta) = event["delta"].as_str()
                 {
-                    let entry = state.tool_calls.entry(idx).or_default();
+                    let entry = self.tool_calls.entry(idx).or_default();
                     entry.arguments.push_str(delta);
-
-                    if !state.extractor_probed.contains(&idx) && !entry.name.is_empty() {
-                        state.extractor_probed.insert(idx);
-                        if let Some(field) = streamable_arg_for(tools, &entry.name) {
-                            state
-                                .arg_extractors
+                    if !self.extractor_probed.contains(&idx) && !entry.name.is_empty() {
+                        self.extractor_probed.insert(idx);
+                        if let Some(field) = streamable_arg_for(&self.tools, &entry.name) {
+                            self.arg_extractors
                                 .insert(idx, JsonStringExtractor::new(field));
                         }
                     }
-
                     let tool_name = entry.name.clone();
-                    if let Some(ex) = state.arg_extractors.get_mut(&idx) {
+                    if let Some(ex) = self.arg_extractors.get_mut(&idx) {
                         let chunk = ex.feed(delta);
                         if !chunk.is_empty() {
-                            let _ = tx
-                                .send(Event::ToolInput {
-                                    name: tool_name,
-                                    chunk,
-                                })
-                                .await;
+                            self.out.push_back(StreamEvent::ToolInput {
+                                name: tool_name,
+                                chunk,
+                            });
                         }
                     }
                 }
             }
             "response.function_call_arguments.done" | "response.output_item.done" => {
                 maybe_store_tool_call(
-                    &mut state.tool_calls,
+                    &mut self.tool_calls,
                     event["output_index"].as_u64(),
                     &event["item"],
                 );
-
-                let item_type = event["item"]["type"].as_str().unwrap_or("");
-                if item_type == "web_search_call" {
-                    let query = event["item"]["action"]["query"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_owned();
-                    let _ = tx
-                        .send(Event::WebSearchDone {
-                            query,
-                            results: vec![],
-                        })
-                        .await;
+                if event["item"]["type"].as_str() == Some("web_search_call") {
+                    // Codex Responses doesn't surface per-hit URLs; the
+                    // consumer side emits an empty-results WebSearchDone.
+                    self.out.push_back(StreamEvent::WebSearchDone {
+                        results: Vec::new(),
+                    });
                 }
             }
-            "response.web_search_call.completed"
-            | "response.created"
-            | "response.in_progress"
-            | "response.content_part.added"
-            | "response.content_part.done"
-            | "response.output_text.done"
-            | "response.reasoning_summary_part.added"
-            | "response.reasoning_summary_text.done"
-            | "response.reasoning_summary_part.done"
-            | "response.reasoning_summary.part.added"
-            | "response.reasoning_summary.part.done"
-            | "response.reasoning_text.done" => {}
             "response.completed" => {
-                state.saw_terminal = true;
+                self.saw_completed = true;
                 if let Some(output) = event["response"]["output"].as_array() {
                     for (idx, item) in output.iter().enumerate() {
-                        maybe_store_tool_call(&mut state.tool_calls, Some(idx as u64), item);
+                        maybe_store_tool_call(&mut self.tool_calls, Some(idx as u64), item);
                     }
                 }
-                record_usage(&event["response"]["usage"], &mut state.usage, tx).await;
-                break 'outer;
+                self.record_usage(&event["response"]["usage"]);
             }
             "response.incomplete" => {
-                state.saw_terminal = true;
-                state.incomplete_reason = event["response"]["incomplete_details"]["reason"]
+                self.incomplete_reason = event["response"]["incomplete_details"]["reason"]
                     .as_str()
                     .unwrap_or("unknown")
                     .to_owned();
                 if let Some(output) = event["response"]["output"].as_array() {
                     for (idx, item) in output.iter().enumerate() {
-                        maybe_store_tool_call(&mut state.tool_calls, Some(idx as u64), item);
+                        maybe_store_tool_call(&mut self.tool_calls, Some(idx as u64), item);
                     }
                 }
-                record_usage(&event["response"]["usage"], &mut state.usage, tx).await;
-                break 'outer;
+                self.record_usage(&event["response"]["usage"]);
             }
             "response.failed" => {
-                state.saw_terminal = true;
                 let err_code = event["response"]["error"]["code"].as_str().unwrap_or("");
                 let err_msg = event["response"]["error"]["message"]
                     .as_str()
                     .unwrap_or("unknown error");
-                state.failure_error = Some(if err_code == "context_length_exceeded" {
+                self.failure_error = Some(if err_code == "context_length_exceeded" {
                     anyhow::anyhow!(
                         "codex context window exceeded: {err_msg}. Start a new session or switch to a model with larger context."
                     )
                 } else {
                     anyhow::anyhow!("codex response.failed ({err_code}): {err_msg}")
                 });
-                break 'outer;
             }
             _ => {}
         }
     }
 
-    if let Some(err) = state.failure_error {
-        return Err(err);
-    }
-    if !state.saw_terminal {
-        return Err(crate::provider::sse::StreamInterrupted(
-            "Codex stream closed before response.completed".into(),
-        )
-        .into());
-    }
-
-    // Build ordered content: text first, then tool_use blocks by ascending
-    // output_index. Codex Responses streams text via `output_text.delta`
-    // and tool calls via `output_item.added` / function_call_arguments —
-    // per-token interleave isn't exposed, so this text-then-tools order
-    // is the closest faithful reconstruction.
-    let mut content: Vec<ContentBlock> = Vec::new();
-    if !state.text.is_empty() {
-        content.push(ContentBlock::Text { text: state.text });
-    }
-    for (_, tool) in state.tool_calls {
-        if tool.id.is_empty() || tool.name.is_empty() {
-            continue;
-        }
-        let input: serde_json::Value = if tool.arguments.is_empty() {
-            serde_json::json!({})
-        } else {
-            serde_json::from_str(&tool.arguments).unwrap_or_else(|_| serde_json::json!({}))
+    fn record_usage(&mut self, usage_val: &serde_json::Value) {
+        let Some(u) = usage_val.as_object() else {
+            return;
         };
-        content.push(ContentBlock::ToolUse {
-            id: tool.id,
-            name: tool.name,
-            input,
-        });
+        let cached = u
+            .get("input_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(|v| v.as_u64());
+        let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        // Codex input_tokens includes cached — subtract to match Claude.
+        let non_cached = input.saturating_sub(cached.unwrap_or(0));
+        let snapshot = Usage {
+            input_tokens: non_cached,
+            output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            cache_read: cached,
+            cache_write: None,
+        };
+        self.usage = snapshot.clone();
+        self.out.push_back(StreamEvent::UsageUpdate(snapshot));
     }
 
-    let stop_reason = if state.incomplete_reason.is_empty() {
-        StopReason::EndTurn
-    } else if state.incomplete_reason == "max_output_tokens" {
-        StopReason::MaxTokens
-    } else {
-        anyhow::bail!(
-            "codex response.incomplete (reason={}). Try again or switch model.",
-            state.incomplete_reason
-        );
-    };
+    /// Emit `BlockComplete` for text (if any) then each concrete tool
+    /// call in output-index order, followed by the terminal `Done`.
+    /// Returns `Err` if the Responses API surfaced a structured failure.
+    fn finalize(&mut self) -> Result<()> {
+        if let Some(err) = self.failure_error.take() {
+            return Err(err);
+        }
+        if !self.text.is_empty() {
+            let text = std::mem::take(&mut self.text);
+            self.out
+                .push_back(StreamEvent::BlockComplete(ContentBlock::Text { text }));
+        }
+        for (_, tool) in std::mem::take(&mut self.tool_calls) {
+            if tool.id.is_empty() || tool.name.is_empty() {
+                continue;
+            }
+            let input: serde_json::Value = if tool.arguments.is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(&tool.arguments).unwrap_or_else(|_| serde_json::json!({}))
+            };
+            self.out
+                .push_back(StreamEvent::BlockComplete(ContentBlock::ToolUse {
+                    id: tool.id,
+                    name: tool.name,
+                    input,
+                }));
+        }
 
-    Ok(StreamResponse {
-        message: Message {
-            role: Role::Assistant,
-            content,
-            origin: Some(crate::core::types::MessageOrigin {
-                provider: "codex".into(),
-                model: None,
-            }),
-        },
-        usage: state.usage,
-        stop_reason,
-    })
+        let stop = if self.incomplete_reason.is_empty() {
+            StopReason::EndTurn
+        } else if self.incomplete_reason == "max_output_tokens" {
+            StopReason::MaxTokens
+        } else {
+            anyhow::bail!(
+                "codex response.incomplete (reason={}). Try again or switch model.",
+                self.incomplete_reason
+            );
+        };
+        self.out.push_back(StreamEvent::Done { stop });
+        Ok(())
+    }
 }
 
-/// Parse `response.usage` JSON into [`Usage`] and emit a Usage event.
-async fn record_usage(usage_val: &serde_json::Value, usage: &mut Usage, tx: &EventSender) {
-    let Some(u) = usage_val.as_object() else {
-        return;
-    };
-    let cached = u
-        .get("input_tokens_details")
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(|v| v.as_u64());
-    let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-    // Codex input_tokens includes cached — subtract to match Claude semantics
-    let non_cached = input.saturating_sub(cached.unwrap_or(0));
-    let u_data = Usage {
-        input_tokens: non_cached,
-        output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-        cache_read: cached,
-        cache_write: None,
-    };
-    *usage = u_data.clone();
-    let _ = tx.send(Event::Usage(u_data)).await;
+fn decode_responses_sse(
+    sse: SseEventStream,
+    tools: Vec<ToolSchema>,
+) -> BoxStream<'static, Result<StreamEvent>> {
+    let decoder = ResponsesDecoder::new(tools);
+    futures::stream::unfold(
+        (sse, decoder, false),
+        |(mut sse, mut decoder, mut finalized)| async move {
+            if let Some(evt) = decoder.out.pop_front() {
+                return Some((Ok(evt), (sse, decoder, finalized)));
+            }
+            if finalized {
+                return None;
+            }
+            loop {
+                match sse.next().await {
+                    Some(Ok(frame)) => {
+                        decoder.feed(frame.event_type.as_str(), &frame.data);
+                        if decoder.is_terminal() {
+                            finalized = true;
+                            if let Err(e) = decoder.finalize() {
+                                return Some((Err(e), (sse, decoder, finalized)));
+                            }
+                            if let Some(evt) = decoder.out.pop_front() {
+                                return Some((Ok(evt), (sse, decoder, finalized)));
+                            }
+                            return None;
+                        }
+                        if let Some(evt) = decoder.out.pop_front() {
+                            return Some((Ok(evt), (sse, decoder, finalized)));
+                        }
+                    }
+                    Some(Err(e)) => return Some((Err(e), (sse, decoder, true))),
+                    None => return None,
+                }
+            }
+        },
+    )
+    .boxed()
 }
 
 fn maybe_store_tool_call(
@@ -644,9 +714,9 @@ mod tests {
             }),
         ];
 
-        let mut stream = stream_from_events(events, true);
+        let stream = stream_from_events(events, true);
         let (tx, mut rx) = event_bus::channel();
-        let result = run_codex_stream_loop(&mut stream, &[], &tx).await.unwrap();
+        let result = consume_responses_stream(stream, &[], &tx).await.unwrap();
 
         assert_eq!(result.message.text(), "Hello world");
         assert_eq!(result.stop_reason, StopReason::EndTurn);
@@ -708,9 +778,9 @@ mod tests {
             }),
         ];
 
-        let mut stream = stream_from_events(events, true);
+        let stream = stream_from_events(events, true);
         let (tx, mut rx) = event_bus::channel();
-        let result = run_codex_stream_loop(&mut stream, &[tool], &tx)
+        let result = consume_responses_stream(stream, &[tool], &tx)
             .await
             .unwrap();
 
@@ -743,9 +813,9 @@ mod tests {
             data: serde_json::json!({"delta": "partial"}),
         })];
 
-        let mut stream = stream_from_events(events, false);
+        let stream = stream_from_events(events, false);
         let (tx, _rx) = event_bus::channel();
-        let err = run_codex_stream_loop(&mut stream, &[], &tx)
+        let err = consume_responses_stream(stream, &[], &tx)
             .await
             .unwrap_err()
             .to_string();

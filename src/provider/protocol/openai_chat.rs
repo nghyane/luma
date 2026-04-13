@@ -1,13 +1,13 @@
 /// OpenAI-compatible chat completions provider with SSE streaming.
 use crate::core::provider::{
-    Provider, StopReason, StreamRequest, StreamResponse, ThinkingCapabilities,
+    Provider, StopReason, StreamEvent, StreamRequest, StreamResponse, ThinkingCapabilities,
 };
 use crate::core::types::{ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage};
 use crate::event::Event;
-use crate::event_bus::Sender as EventSender;
 use crate::provider::sse::{SseEventStream, post_sse};
 use anyhow::Result;
-use std::collections::HashMap;
+use futures::stream::{BoxStream, StreamExt};
+use std::collections::{HashMap, VecDeque};
 
 const BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -105,7 +105,7 @@ impl Provider for OpenAIChatRuntime {
             let auth_header = format!("Bearer {}", self.api_key);
             let headers = [("Authorization", auth_header.as_str())];
 
-            let mut stream = post_sse(
+            let sse = post_sse(
                 "openai",
                 &self.account_label,
                 &format!("{}/chat/completions", self.base_url),
@@ -116,50 +116,126 @@ impl Provider for OpenAIChatRuntime {
             )
             .await?;
 
-            consume_chat_stream(&mut stream, &tx, &self.model).await
+            consume_chat_stream(sse, &tx, &self.model).await
         })
     }
 }
 
-/// Drain an OpenAI Chat Completions SSE stream into a `StreamResponse`.
+/// Drain a decoded OpenAI Chat stream into a `StreamResponse`, forwarding
+/// UI events to `tx` as they arrive.
 async fn consume_chat_stream(
-    stream: &mut SseEventStream,
-    tx: &EventSender,
+    sse: SseEventStream,
+    tx: &crate::event_bus::Sender,
     model: &str,
 ) -> Result<StreamResponse> {
-    let mut text = String::new();
-    let mut tool_map: HashMap<u64, (String, String, String)> = HashMap::new();
+    let mut events = decode_chat_sse(sse);
+    let mut blocks: Vec<ContentBlock> = Vec::new();
     let mut usage = Usage::default();
-    let mut finish_reason = String::new();
+    let mut stop_reason = StopReason::default();
+    let mut saw_done = false;
 
-    while let Some(event_result) = stream.next().await {
-        let event = event_result?;
-        let choice = &event.data["choices"][0];
+    while let Some(evt) = events.next().await {
+        match evt? {
+            StreamEvent::TextDelta(t) => {
+                let _ = tx.send(Event::Token(t)).await;
+            }
+            StreamEvent::ThinkingDelta(t) => {
+                let _ = tx.send(Event::Thinking(t)).await;
+            }
+            StreamEvent::UsageUpdate(u) => {
+                usage = u.clone();
+                let _ = tx.send(Event::Usage(u)).await;
+            }
+            StreamEvent::BlockComplete(b) => blocks.push(b),
+            StreamEvent::Done { stop } => {
+                stop_reason = stop;
+                saw_done = true;
+                break;
+            }
+            // OpenAI Chat Completions doesn't surface these — Anthropic-only.
+            StreamEvent::ToolSelected { .. }
+            | StreamEvent::ToolInput { .. }
+            | StreamEvent::WebSearchStart { .. }
+            | StreamEvent::WebSearchDone { .. } => {}
+        }
+    }
+
+    // Stream ended without Done AND no content → interrupted. Valid
+    // stop_reason + empty is legitimate (see decode_chat_sse).
+    if !saw_done && blocks.is_empty() {
+        return Err(crate::provider::sse::StreamInterrupted(
+            "OpenAI stream ended with no content".into(),
+        )
+        .into());
+    }
+
+    Ok(StreamResponse {
+        message: Message {
+            role: Role::Assistant,
+            content: blocks,
+            origin: Some(crate::core::types::MessageOrigin {
+                provider: "openai".into(),
+                model: Some(model.to_owned()),
+            }),
+        },
+        usage,
+        stop_reason,
+    })
+}
+
+/// Pure decoder for OpenAI Chat Completions SSE. See `AnthropicDecoder`
+/// for the sibling Anthropic variant.
+///
+/// Unlike Anthropic, Chat Completions streams text and tool_calls in a
+/// single flat frame sequence without per-block boundaries. The decoder
+/// accumulates text and per-index tool-call buffers, emitting
+/// `BlockComplete` events only when the stream finishes so the outer
+/// message ordering (text first, tools by ascending index) matches what
+/// the legacy consumer produced.
+struct ChatDecoder {
+    text: String,
+    /// index → (id, name, args_buffer). HashMap mirrors the legacy code's
+    /// structure; we sort by index at emission time.
+    tool_map: HashMap<u64, (String, String, String)>,
+    finish_reason: String,
+    out: VecDeque<StreamEvent>,
+}
+
+impl ChatDecoder {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            tool_map: HashMap::new(),
+            finish_reason: String::new(),
+            out: VecDeque::new(),
+        }
+    }
+
+    fn feed(&mut self, data: &serde_json::Value) {
+        let choice = &data["choices"][0];
         if let Some(r) = choice["finish_reason"].as_str()
             && !r.is_empty()
         {
-            finish_reason = r.to_owned();
+            self.finish_reason = r.to_owned();
         }
         let delta = &choice["delta"];
-
         if !delta.is_null() {
             if let Some(t) = delta["reasoning_content"].as_str()
                 && !t.is_empty()
             {
-                let _ = tx.send(Event::Thinking(t.to_owned())).await;
+                self.out.push_back(StreamEvent::ThinkingDelta(t.to_owned()));
             }
-
             if let Some(t) = delta["content"].as_str()
                 && !t.is_empty()
             {
-                text.push_str(t);
-                let _ = tx.send(Event::Token(t.to_owned())).await;
+                self.text.push_str(t);
+                self.out.push_back(StreamEvent::TextDelta(t.to_owned()));
             }
-
             if let Some(tcs) = delta["tool_calls"].as_array() {
                 for tc in tcs {
                     let idx = tc["index"].as_u64().unwrap_or(0);
-                    let entry = tool_map
+                    let entry = self
+                        .tool_map
                         .entry(idx)
                         .or_insert_with(|| (String::new(), String::new(), String::new()));
                     if let Some(id) = tc["id"].as_str() {
@@ -174,16 +250,16 @@ async fn consume_chat_stream(
                 }
             }
         }
-
-        if let Some(u) = event.data["usage"].as_object() {
+        if let Some(u) = data["usage"].as_object() {
             let cached = u
                 .get("prompt_tokens_details")
                 .and_then(|d| d.get("cached_tokens"))
                 .and_then(|v| v.as_u64());
             let prompt = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            // OpenAI prompt_tokens includes cached — subtract to match Claude semantics
+            // OpenAI prompt_tokens includes cached — subtract to match
+            // Claude semantics.
             let non_cached = prompt.saturating_sub(cached.unwrap_or(0));
-            let u_data = Usage {
+            self.out.push_back(StreamEvent::UsageUpdate(Usage {
                 input_tokens: non_cached,
                 output_tokens: u
                     .get("completion_tokens")
@@ -191,55 +267,80 @@ async fn consume_chat_stream(
                     .unwrap_or(0),
                 cache_read: cached,
                 cache_write: None,
-            };
-            usage = u_data.clone();
-            let _ = tx.send(Event::Usage(u_data)).await;
+            }));
         }
     }
 
-    // Stream ended without [DONE] AND without content → truly
-    // interrupted. Retryable. Valid finish_reason + empty is legitimate.
-    let is_empty = text.is_empty() && tool_map.is_empty();
-    if !stream.saw_done() && is_empty {
-        return Err(crate::provider::sse::StreamInterrupted(
-            "OpenAI stream ended with no content".into(),
-        )
-        .into());
+    /// Emit one `BlockComplete` per accumulated content block (text first,
+    /// then tools by ascending index), followed by `Done`.
+    fn finalize(&mut self) {
+        if !self.text.is_empty() {
+            let text = std::mem::take(&mut self.text);
+            self.out
+                .push_back(StreamEvent::BlockComplete(ContentBlock::Text { text }));
+        }
+        let mut sorted: Vec<_> = std::mem::take(&mut self.tool_map).into_iter().collect();
+        sorted.sort_by_key(|(idx, _)| *idx);
+        for (_, (id, name, args)) in sorted {
+            let input: serde_json::Value = if args.is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(&args).unwrap_or_else(|_| serde_json::json!({}))
+            };
+            self.out
+                .push_back(StreamEvent::BlockComplete(ContentBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                }));
+        }
+        self.out.push_back(StreamEvent::Done {
+            stop: parse_finish_reason(&self.finish_reason),
+        });
     }
+}
 
-    // Build the assistant message content in a single ordered array:
-    // leading text (if any), then tool_use blocks by ascending index.
-    // OpenAI Chat Completions streams text and tool_calls in parallel,
-    // but the unified `Vec<ContentBlock>` model only stores document
-    // order — we don't have per-token interleaving info, so text
-    // first then tools is the closest faithful reconstruction.
-    let mut content: Vec<ContentBlock> = Vec::new();
-    if !text.is_empty() {
-        content.push(ContentBlock::Text { text });
-    }
-    let mut sorted_tools: Vec<_> = tool_map.into_iter().collect();
-    sorted_tools.sort_by_key(|(idx, _)| *idx);
-    for (_, (id, name, args)) in sorted_tools {
-        let input: serde_json::Value = if args.is_empty() {
-            serde_json::json!({})
-        } else {
-            serde_json::from_str(&args).unwrap_or_else(|_| serde_json::json!({}))
-        };
-        content.push(ContentBlock::ToolUse { id, name, input });
-    }
-
-    Ok(StreamResponse {
-        message: Message {
-            role: Role::Assistant,
-            content,
-            origin: Some(crate::core::types::MessageOrigin {
-                provider: "openai".into(),
-                model: Some(model.to_owned()),
-            }),
+fn decode_chat_sse(sse: SseEventStream) -> BoxStream<'static, Result<StreamEvent>> {
+    let decoder = ChatDecoder::new();
+    futures::stream::unfold(
+        (sse, decoder, false),
+        |(mut sse, mut decoder, mut finalized)| async move {
+            if let Some(evt) = decoder.out.pop_front() {
+                return Some((Ok(evt), (sse, decoder, finalized)));
+            }
+            if finalized {
+                return None;
+            }
+            loop {
+                match sse.next().await {
+                    Some(Ok(frame)) => {
+                        decoder.feed(&frame.data);
+                        if let Some(evt) = decoder.out.pop_front() {
+                            return Some((Ok(evt), (sse, decoder, finalized)));
+                        }
+                    }
+                    Some(Err(e)) => return Some((Err(e), (sse, decoder, true))),
+                    None => {
+                        finalized = true;
+                        // Mirror the legacy "interrupted" classifier: emit
+                        // Done iff the SSE layer saw [DONE] OR the server
+                        // provided a finish_reason. Otherwise end the
+                        // stream without Done so the consumer classifies
+                        // it as an interruption.
+                        let has_content = !decoder.text.is_empty() || !decoder.tool_map.is_empty();
+                        if sse.saw_done() || !decoder.finish_reason.is_empty() || has_content {
+                            decoder.finalize();
+                            if let Some(evt) = decoder.out.pop_front() {
+                                return Some((Ok(evt), (sse, decoder, finalized)));
+                            }
+                        }
+                        return None;
+                    }
+                }
+            }
         },
-        usage,
-        stop_reason: parse_finish_reason(&finish_reason),
-    })
+    )
+    .boxed()
 }
 
 /// Map OpenAI finish_reason string to unified [`StopReason`].
