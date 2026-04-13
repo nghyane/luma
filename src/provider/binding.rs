@@ -152,33 +152,9 @@ impl BindingRegistry {
         session_id: &str,
         thinking: ThinkingLevel,
     ) -> Box<dyn Provider> {
-        use crate::provider::claude::ClaudeProvider;
-        use crate::provider::codex::CodexProvider;
-        use crate::provider::openai::OpenAIProvider;
-
-        let mut provider: Box<dyn Provider> = match binding.gateway {
-            GatewayId::Anthropic => Box::new(ClaudeProvider::new(
-                &binding.model_id,
-                &credential.token,
-                credential.is_oauth,
-                &credential.label,
-            )),
-            GatewayId::Codex => Box::new(CodexProvider::new(
-                &binding.model_id,
-                &credential.token,
-                credential.account_id.clone(),
-                session_id,
-                &credential.label,
-            )),
-            GatewayId::OpenAI => Box::new(OpenAIProvider::new(
-                &binding.model_id,
-                &credential.token,
-                &credential.label,
-            )),
-        };
-        let coerced = provider.thinking_capabilities().coerce(thinking);
-        provider.set_thinking(coerced);
-        provider
+        Box::new(crate::provider::runtime::ProviderRuntime::build(
+            binding, credential, session_id, thinking,
+        ))
     }
 }
 

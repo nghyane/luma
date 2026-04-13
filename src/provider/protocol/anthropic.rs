@@ -11,7 +11,9 @@ use crate::core::provider::{
 use crate::core::types::{ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage};
 use crate::event::Event;
 use crate::provider::json_stream::{JsonStringExtractor, streamable_arg_for};
-use crate::provider::quirks::adaptive_thinking::{build_thinking_config, is_adaptive_thinking_model};
+use crate::provider::quirks::adaptive_thinking::{
+    build_thinking_config, is_adaptive_thinking_model,
+};
 use crate::provider::quirks::cache_breakpoint::apply_cache_breakpoint;
 use crate::provider::quirks::claude_identity::{claude_cli_user_agent, claude_session_id};
 use crate::provider::quirks::oauth_system_rewrite::{build_betas, build_oauth_system};
@@ -29,7 +31,7 @@ pub const DEFAULT_MAX_TOKENS: u32 = 8192;
 pub const ESCALATED_MAX_TOKENS: u32 = 64_000;
 
 /// Anthropic Claude provider.
-pub struct ClaudeProvider {
+pub struct AnthropicRuntime {
     model: String,
     max_tokens: u32,
     base_url: String,
@@ -39,7 +41,7 @@ pub struct ClaudeProvider {
     account_label: String,
 }
 
-impl ClaudeProvider {
+impl AnthropicRuntime {
     /// Create from token. Set `is_oauth` true for OAuth tokens, false for raw API keys.
     /// `account_label` is the pool entry name used for rate-limit / usage accounting.
     pub fn new(model: &str, api_key: &str, is_oauth: bool, account_label: &str) -> Self {
@@ -121,7 +123,7 @@ impl ClaudeProvider {
     }
 }
 
-impl Provider for ClaudeProvider {
+impl Provider for AnthropicRuntime {
     fn name(&self) -> &str {
         "claude"
     }
@@ -694,8 +696,6 @@ fn to_api_tools(tools: &[ToolSchema]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,7 +715,7 @@ mod tests {
 
     #[test]
     fn adaptive_thinking_capabilities_include_max() {
-        let provider = ClaudeProvider::new("claude-sonnet-4-6", "key", false, "acc");
+        let provider = AnthropicRuntime::new("claude-sonnet-4-6", "key", false, "acc");
         let labels: Vec<_> = provider
             .thinking_capabilities()
             .options()
@@ -727,7 +727,7 @@ mod tests {
 
     #[test]
     fn non_adaptive_thinking_capabilities_stop_at_high() {
-        let provider = ClaudeProvider::new("claude-sonnet-4-5", "key", false, "acc");
+        let provider = AnthropicRuntime::new("claude-sonnet-4-5", "key", false, "acc");
         let labels: Vec<_> = provider
             .thinking_capabilities()
             .options()
@@ -838,7 +838,5 @@ mod tests {
         assert_eq!(old_content[0]["type"], "text");
     }
 
-
     // --- Claude Code parity regression tests ---
-
 }

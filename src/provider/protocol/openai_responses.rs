@@ -23,7 +23,7 @@ struct PendingTool {
 }
 
 /// Codex provider using the Responses API.
-pub struct CodexProvider {
+pub struct OpenAIResponsesRuntime {
     model: String,
     api_key: String,
     account_id: Option<String>,
@@ -32,7 +32,7 @@ pub struct CodexProvider {
     account_label: String,
 }
 
-impl CodexProvider {
+impl OpenAIResponsesRuntime {
     /// Create with model, token, optional account ID, session ID for cache
     /// routing, and pool account label.
     pub fn new(
@@ -101,7 +101,7 @@ impl CodexProvider {
     }
 }
 
-impl Provider for CodexProvider {
+impl Provider for OpenAIResponsesRuntime {
     fn name(&self) -> &str {
         "codex"
     }

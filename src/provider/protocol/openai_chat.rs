@@ -12,7 +12,7 @@ use std::collections::HashMap;
 const BASE_URL: &str = "https://api.openai.com/v1";
 
 /// OpenAI chat completions provider (also works with Codex).
-pub struct OpenAIProvider {
+pub struct OpenAIChatRuntime {
     model: String,
     max_tokens: u32,
     base_url: String,
@@ -20,12 +20,12 @@ pub struct OpenAIProvider {
     account_label: String,
 }
 
-impl OpenAIProvider {
+impl OpenAIChatRuntime {
     /// Create from model name, API key, and pool account label.
     pub fn new(model: &str, api_key: &str, account_label: &str) -> Self {
         Self {
             model: model.to_owned(),
-            max_tokens: crate::provider::claude::DEFAULT_MAX_TOKENS,
+            max_tokens: crate::provider::protocol::anthropic::DEFAULT_MAX_TOKENS,
             base_url: BASE_URL.to_owned(),
             api_key: api_key.to_owned(),
             account_label: account_label.to_owned(),
@@ -59,7 +59,7 @@ impl OpenAIProvider {
     }
 }
 
-impl Provider for OpenAIProvider {
+impl Provider for OpenAIChatRuntime {
     fn name(&self) -> &str {
         "openai"
     }
@@ -123,7 +123,7 @@ impl Provider for OpenAIProvider {
 
 /// Drain an OpenAI Chat Completions SSE stream into a `StreamResponse`.
 ///
-/// Extracted from `OpenAIProvider::stream` for isolation. Still push-model
+/// Extracted from `OpenAIChatRuntime::stream` for isolation. Still push-model
 /// (sends deltas via `EventSender`); RFC 0002 commit 5 migrates to pull.
 async fn consume_chat_stream(
     stream: &mut SseEventStream,

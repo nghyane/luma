@@ -6,7 +6,7 @@ use crate::core::session::Session;
 use crate::core::types::{ContentBlock, Message, Role};
 use crate::event::Event;
 use crate::event_bus::Sender as EventSender;
-use crate::provider::claude::ESCALATED_MAX_TOKENS;
+use crate::provider::protocol::anthropic::ESCALATED_MAX_TOKENS;
 use crate::provider::retry::ProviderRateLimited;
 use anyhow::Result;
 use tokio::sync::mpsc;

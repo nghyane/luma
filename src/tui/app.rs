@@ -8,7 +8,7 @@ mod state;
 use state::{AgentHandle, AppConfig, PickerMode, Screen, UiComponents};
 
 use crate::config::models;
-use crate::core::provider::{Provider, ThinkingCapabilities};
+use crate::core::provider::ThinkingCapabilities;
 use crate::core::types::ThinkingLevel;
 use crate::event::Event;
 use crate::tui::document::Document;
@@ -134,14 +134,8 @@ impl App {
         let Some(model) = &self.config.model else {
             return ThinkingCapabilities::standard();
         };
-        match model.source.as_str() {
-            "anthropic" => crate::provider::claude::ClaudeProvider::new(&model.id, "", false, "")
-                .thinking_capabilities(),
-            "codex" => crate::provider::codex::CodexProvider::new(&model.id, "", None, "", "")
-                .thinking_capabilities(),
-            _ => crate::provider::openai::OpenAIProvider::new(&model.id, "", "")
-                .thinking_capabilities(),
-        }
+        let gateway = crate::provider::binding::GatewayId::from_source(model.source.as_str());
+        crate::provider::runtime::ProviderRuntime::thinking_caps_for(gateway, &model.id)
     }
 
     pub fn new(env_context: String) -> Self {
