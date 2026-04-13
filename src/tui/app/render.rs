@@ -284,9 +284,11 @@ impl super::App {
         // Available rows for prompt content (between top bar and mode + bottom border).
         let content_slots = total_h.saturating_sub(3);
 
-        // Find which wrapped line the cursor sits on by walking line widths.
+        // Find which wrapped line the cursor sits on.
         let cursor_col = self.ui.prompt.cursor_column();
-        let (cursor_wrap_row, _) = cursor_position_in_wrapped(&wrapped, cursor_col);
+        let (cursor_logical_row, _) = self.ui.prompt.cursor_row_col();
+        let (cursor_wrap_row, _) =
+            cursor_wrap_position(&raw_prompt, cursor_logical_row, cursor_col, content_w);
 
         let scroll = if wrapped.len() > content_slots {
             cursor_wrap_row.saturating_sub(content_slots.saturating_sub(1))
@@ -337,6 +339,7 @@ impl super::App {
         let bar_w = 3u16; // "┃  "
         let content_w = ir.width.saturating_sub(bar_w) as usize;
         let cursor_col_abs = self.ui.prompt.cursor_column();
+        let (cursor_logical_row, _) = self.ui.prompt.cursor_row_col();
 
         // Wrap lines identically to build_input_lines.
         let raw_prompt = self.ui.prompt.lines();
@@ -345,7 +348,8 @@ impl super::App {
             wrapped.extend(wrap_line(pl, content_w, None));
         }
 
-        let (wrap_row, wrap_col) = cursor_position_in_wrapped(&wrapped, cursor_col_abs);
+        let (wrap_row, wrap_col) =
+            cursor_wrap_position(&raw_prompt, cursor_logical_row, cursor_col_abs, content_w);
 
         // Scroll offset mirrors build_input_lines.
         let total_h = ir.height as usize;
@@ -457,4 +461,26 @@ fn cursor_position_in_wrapped(wrapped: &[Line], cursor_col: usize) -> (usize, us
     let last = wrapped.len().saturating_sub(1);
     let last_w = wrapped.last().map(|l| l.visible_width()).unwrap_or(0);
     (last, last_w)
+}
+
+/// Given raw prompt lines, compute (wrap_row, wrap_col) for a cursor at
+/// `(logical_row, col)`. `logical_row` indexes into `raw`; `col` is the
+/// display width into that logical line.
+fn cursor_wrap_position(
+    raw: &[Line],
+    logical_row: usize,
+    col: usize,
+    content_w: usize,
+) -> (usize, usize) {
+    use crate::tui::text::wrap_line;
+    let mut before = 0usize;
+    for pl in raw.iter().take(logical_row) {
+        before += wrap_line(pl, content_w, None).len().max(1);
+    }
+    let this_wrapped = raw
+        .get(logical_row)
+        .map(|pl| wrap_line(pl, content_w, None))
+        .unwrap_or_default();
+    let (r, c) = cursor_position_in_wrapped(&this_wrapped, col);
+    (before + r, c)
 }

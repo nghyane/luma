@@ -6,27 +6,59 @@ use crate::tui::theme::palette;
 use smallvec::smallvec;
 
 impl super::PromptState {
-    /// Render the prompt input line.
+    /// Render the prompt input line(s). Emits one `Line` per logical newline
+    /// in the buffer; inline chips render in place.
     pub fn lines(&self) -> Vec<Line> {
-        let line_count = self.buf.line_count();
-        if line_count > 1 {
-            let mut spans = smallvec![
-                Span::with_bg(format!(" ~{line_count} lines "), palette::BG, palette::DIM),
-                Span::new(" ".to_owned(), palette::FG),
-            ];
-            spans.extend(render_segs_inline(
-                &self.buf.segs,
-                Some(&self.buf.last_line()),
-            ));
-            return vec![Line::new(spans)];
+        let mut lines: Vec<Line> = Vec::new();
+        let mut cur: smallvec::SmallVec<[Span; 4]> = smallvec![];
+        let mut img_n = 0;
+
+        for seg in &self.buf.segs {
+            match seg {
+                Seg::Text(t) => {
+                    let mut parts = t.split('\n');
+                    if let Some(first) = parts.next()
+                        && !first.is_empty()
+                    {
+                        cur.extend(highlight_at_refs(first));
+                    }
+                    for part in parts {
+                        lines.push(Line::new(std::mem::take(&mut cur)));
+                        if !part.is_empty() {
+                            cur.extend(highlight_at_refs(part));
+                        }
+                    }
+                }
+                Seg::Image { .. } => {
+                    img_n += 1;
+                    cur.push(Span::with_bg(
+                        format!(" Image {img_n} "),
+                        palette::BG,
+                        palette::FILE_REF,
+                    ));
+                    cur.push(Span::new(" ".to_owned(), palette::FG));
+                }
+                Seg::Paste(text) => {
+                    let n = text.lines().count();
+                    cur.push(Span::with_bg(
+                        format!(" Pasted ~{n} lines "),
+                        palette::BG,
+                        palette::WARN,
+                    ));
+                    cur.push(Span::new(" ".to_owned(), palette::FG));
+                }
+            }
         }
 
-        let mut spans = render_segs_inline(&self.buf.segs, None);
         let ghost = self.ghost();
         if !ghost.is_empty() {
-            spans.push(Span::new(ghost, palette::MUTED));
+            cur.push(Span::new(ghost, palette::MUTED));
         }
-        vec![Line::new(spans)]
+        if cur.is_empty() && lines.is_empty() {
+            cur.push(Span::new(String::new(), palette::FG));
+        }
+        lines.push(Line::new(cur));
+        lines
     }
 
     /// Render dropdown for commands or @file autocomplete.
@@ -77,49 +109,3 @@ impl super::PromptState {
     }
 }
 
-/// Render segments as inline spans. If `last_line_only` is set, only that text.
-fn render_segs_inline(segs: &[Seg], last_line_only: Option<&str>) -> smallvec::SmallVec<[Span; 4]> {
-    let mut spans = smallvec![];
-    let mut img_n = 0;
-
-    for seg in segs {
-        match seg {
-            Seg::Text(t) => {
-                let text = if let Some(ll) = last_line_only {
-                    ll
-                } else {
-                    t.as_str()
-                };
-                if !text.is_empty() {
-                    spans.extend(highlight_at_refs(text));
-                }
-                if last_line_only.is_some() {
-                    // Only render last line text, skip rest
-                    continue;
-                }
-            }
-            Seg::Image { .. } => {
-                img_n += 1;
-                spans.push(Span::with_bg(
-                    format!(" Image {img_n} "),
-                    palette::BG,
-                    palette::FILE_REF,
-                ));
-                spans.push(Span::new(" ".to_owned(), palette::FG));
-            }
-            Seg::Paste(text) => {
-                let n = text.lines().count();
-                spans.push(Span::with_bg(
-                    format!(" Pasted ~{n} lines "),
-                    palette::BG,
-                    palette::WARN,
-                ));
-                spans.push(Span::new(" ".to_owned(), palette::FG));
-            }
-        }
-    }
-    if spans.is_empty() {
-        spans.push(Span::new(String::new(), palette::FG));
-    }
-    spans
-}

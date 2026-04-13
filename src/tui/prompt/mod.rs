@@ -65,6 +65,11 @@ impl PromptState {
         self.buf.cursor_display_col()
     }
 
+    /// Cursor (logical_row, column) across prompt lines.
+    pub fn cursor_row_col(&self) -> (usize, usize) {
+        self.buf.cursor_row_col()
+    }
+
     // ── Dropdown helpers ──
 
     /// Whether the autocomplete dropdown is currently visible.
@@ -320,15 +325,15 @@ mod tests {
     #[test]
     fn paste_crlf_normalized() {
         let mut p = PromptState::new();
-        p.handle_paste("a\r\nb\r\nc".into());
-        assert_eq!(p.buf.text(), "a\nb\nc");
+        p.handle_paste("a\r\nb".into());
+        assert_eq!(p.buf.text(), "a\nb");
     }
 
     #[test]
     fn paste_cr_normalized() {
         let mut p = PromptState::new();
-        p.handle_paste("a\rb\rc".into());
-        assert_eq!(p.buf.text(), "a\nb\nc");
+        p.handle_paste("a\rb".into());
+        assert_eq!(p.buf.text(), "a\nb");
     }
 
     #[test]

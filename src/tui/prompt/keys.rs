@@ -2,7 +2,7 @@
 use super::PromptAction;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
-const PASTE_INLINE_THRESHOLD: usize = 5;
+const PASTE_INLINE_THRESHOLD: usize = 3;
 const PASTE_MAX_BYTES: usize = 1_048_576; // 1 MB
 
 impl super::PromptState {
@@ -28,7 +28,7 @@ impl super::PromptState {
             normalized.split('\n').count()
         };
         if line_count < PASTE_INLINE_THRESHOLD {
-            let trimmed = normalized.trim_end_matches('\n');
+            let trimmed = normalized.trim_matches('\n');
             self.buf.insert_str(trimmed);
         } else {
             self.buf.attach_paste(normalized);

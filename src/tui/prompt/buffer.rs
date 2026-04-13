@@ -249,22 +249,31 @@ impl PromptBuffer {
         self.text().lines().count().max(1)
     }
 
-    /// Last line of text content.
-    pub fn last_line(&self) -> String {
-        self.text().lines().last().unwrap_or("").to_owned()
-    }
-
     /// Snapshot content blocks (read-only, for render/display).
     #[cfg(test)]
     pub fn to_content(&self) -> Vec<ContentBlock> {
         let mut blocks = Vec::new();
-        for s in &self.segs {
+        let text_indices: Vec<usize> = self
+            .segs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| matches!(s, Seg::Text(_)).then_some(i))
+            .collect();
+        let first_text = text_indices.first().copied();
+        let last_text = text_indices.last().copied();
+        for (i, s) in self.segs.iter().enumerate() {
             match s {
                 Seg::Text(t) => {
-                    let trimmed = t.trim();
-                    if !trimmed.is_empty() {
+                    let mut slice: &str = t;
+                    if Some(i) == first_text {
+                        slice = slice.trim_start();
+                    }
+                    if Some(i) == last_text {
+                        slice = slice.trim_end();
+                    }
+                    if !slice.is_empty() {
                         blocks.push(ContentBlock::Text {
-                            text: trimmed.to_owned(),
+                            text: slice.to_owned(),
                         });
                     }
                 }
@@ -291,13 +300,30 @@ impl PromptBuffer {
     pub fn take_content(&mut self) -> (Vec<ContentBlock>, Vec<(String, Vec<u8>)>) {
         let mut blocks = Vec::new();
         let mut images = Vec::new();
-        for s in &mut self.segs {
+        // Find first and last text-seg indices to trim only at outer edges —
+        // inner text segments must keep spacing adjacent to chips.
+        let text_indices: Vec<usize> = self
+            .segs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| matches!(s, Seg::Text(_)).then_some(i))
+            .collect();
+        let first_text = text_indices.first().copied();
+        let last_text = text_indices.last().copied();
+
+        for (i, s) in self.segs.iter_mut().enumerate() {
             match s {
                 Seg::Text(t) => {
-                    let trimmed = t.trim();
-                    if !trimmed.is_empty() {
+                    let mut slice: &str = t;
+                    if Some(i) == first_text {
+                        slice = slice.trim_start();
+                    }
+                    if Some(i) == last_text {
+                        slice = slice.trim_end();
+                    }
+                    if !slice.is_empty() {
                         blocks.push(ContentBlock::Text {
-                            text: trimmed.to_owned(),
+                            text: slice.to_owned(),
                         });
                     }
                 }
@@ -317,9 +343,12 @@ impl PromptBuffer {
         (blocks, images)
     }
 
-    /// Display width of visible content before cursor (for cursor positioning).
-    pub fn cursor_display_col(&self) -> usize {
+    /// Display width of visible content before cursor, and logical row.
+    /// Row is number of '\n' characters before the cursor; col is display
+    /// width on the current visual row including chip widths.
+    pub fn cursor_row_col(&self) -> (usize, usize) {
         use crate::tui::text::display_width;
+        let mut row = 0;
         let mut col = 0;
         for (i, s) in self.segs.iter().enumerate() {
             if i > self.seg {
@@ -332,9 +361,14 @@ impl PromptBuffer {
                     } else {
                         t.as_str()
                     };
-                    // Only measure last line
-                    let last = slice.rsplit_once('\n').map(|(_, a)| a).unwrap_or(slice);
-                    col += display_width(last);
+                    for ch in slice.chars() {
+                        if ch == '\n' {
+                            row += 1;
+                            col = 0;
+                        } else {
+                            col += display_width(&ch.to_string());
+                        }
+                    }
                 }
                 Seg::Image { .. } => {
                     let n = self.image_index_at(i);
@@ -346,7 +380,12 @@ impl PromptBuffer {
                 }
             }
         }
-        col
+        (row, col)
+    }
+
+    /// Display width of visible content before cursor (for cursor positioning).
+    pub fn cursor_display_col(&self) -> usize {
+        self.cursor_row_col().1
     }
 
     // ── Private ──
@@ -469,9 +508,9 @@ mod tests {
         b.attach_paste("line1\nline2\nline3".into());
         b.insert_str(" done");
         let content = b.to_content();
-        assert!(matches!(&content[0], ContentBlock::Text { text } if text == "fix:"));
+        assert!(matches!(&content[0], ContentBlock::Text { text } if text == "fix: "));
         assert!(matches!(&content[1], ContentBlock::Paste { .. }));
-        assert!(matches!(&content[2], ContentBlock::Text { text } if text == "done"));
+        assert!(matches!(&content[2], ContentBlock::Text { text } if text == " done"));
     }
 
     #[test]
