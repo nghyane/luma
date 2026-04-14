@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.0-beta.11] - 2026-04-12
 
+### Added
+- **Kiro (Amazon Q) provider** — full gateway with AWS Event Stream protocol, OAuth login flow, account metadata, and session-stable conversation IDs
+- **OpenCode Go provider** — support for kimi-k2.5, glm-5, mimo-v2, minimax models with arrow-key login picker in CLI
+- Kiro model catalog expanded: Opus 4.5/4.6, Sonnet 4.6, Haiku 4.5
+- Kiro web search routed through free MCP `web_search` tool for Kiro sessions
+- `Read` tool gains capability-aware image support — passes images only when the active model declares `vision`
+- Models auto-sync on staleness; `prompt_caching` flag captured per model from provider snapshot
+- Kiro model list scanned live via `ListAvailableModels` API
+
+### Changed
+- Mode and model switches are now deferred until the next submit, matching the "staged change" UX of other picker dialogs
+- Tool registry is rebuilt when the model changes across providers so tool IDs stay consistent
+- System prompt and tool registry hot-swap on mode change without requiring a restart
+- Prompt and tool axes split into `mode` (behavior) and tool style (provider) so the two can vary independently
+- Kiro switched to Coral endpoint; `contextUsagePercentage` surfaced from server response
+- `envState` shipped on every user turn for Kiro; context percentage derived from server value × model window
+- Provider architecture refactored: per-gateway trait impls (one file per gateway), `ProtocolId` + per-binding `base_url`, `QuirkSet` bitflags, typed `ProviderUnauthorized` replacing keyword-classifier
+- Model picker shows `{source}/{id}` and disambiguates models with the same ID across providers
+- Preferences persist `{source}/{id}` for per-mode model selection; bare-id fallback removed
+- `perf(kiro)`: bytes-identical request body enables server-side auto-cache
+
 ### Fixed
 - Prompt input no longer inserts literal characters for Ctrl/Alt-modified keys on Windows consoles (fixes Delete rendering as `h` via legacy Ctrl+H); added proper handling for Delete (forward-delete), Home, End, Ctrl+H (backspace), and Ctrl+W (delete word)
 - Mouse any-motion tracking (`?1003`) disabled and bare `Moved` events short-circuited, eliminating an event-bus flood that could stall keyboard/scroll input mid-stream on Windows
@@ -15,12 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Windows startup now forces console code page to UTF-8 (`chcp 65001`) so legacy `cmd.exe` renders box-drawing and decorative glyphs correctly
 - Removed double gap between thinking and tool blocks caused by `render_thinking` appending a trailing empty line on top of `auto_gap`
 - Removed the dark half-cell gap at the bottom of the prompt separator by switching to a lower half-block with swapped fg/bg
-
-### Changed
-- Mode and model switches are now deferred until the next submit, matching the "staged change" UX of other picker dialogs
-- Tool registry is rebuilt when the model changes across providers so tool IDs stay consistent
-- System prompt and tool registry hot-swap on mode change without requiring a restart
-- Prompt and tool axes split into `mode` (behavior) and tool style (provider) so the two can vary independently
+- Kiro auth: captured `login_option` now passed through token exchange correctly
+- Kiro streaming fixed — real SSE streaming with stable conversation IDs across turns
+- OpenCode Go: `/v1/messages` requires `x-api-key` header, not `Bearer`; OpenCode Go uses `Bearer` for OAuth, not API keys
+- OpenCode Go models missing from picker; picker no longer leaves prior terminal content on exit
+- OpenAI Chat: runtime owns `/v1` path prefix, not the gateway `base_url`
+- Auth: `AuthKind` classified by vendor instead of `account_id`; actionable error on API-key 401, credentials never auto-deleted
+- Skill block cache invalidated when skill name changes
+- Multi-line paste rendering and cursor position corrected
+- Stale `/compact` suggestion replaced with actionable guidance in error messages
 
 ## [0.4.0-beta.10] - 2026-04-12
 
