@@ -1,6 +1,7 @@
 //! OAuth providers and shared contract.
 
 pub mod codex;
+pub mod claude;
 pub mod kiro;
 pub mod shared;
 
@@ -31,6 +32,7 @@ pub struct LoginResult {
 }
 
 pub enum ProviderRef<'a> {
+    Claude(&'a claude::ClaudeProvider),
     Codex(&'a codex::CodexProvider),
     Kiro(&'a kiro::KiroProvider),
 }
@@ -38,6 +40,7 @@ pub enum ProviderRef<'a> {
 impl ProviderRef<'_> {
     pub fn vendor(&self) -> AuthVendor {
         match self {
+            Self::Claude(_) => AuthVendor::Anthropic,
             Self::Codex(_) => AuthVendor::OpenAI,
             Self::Kiro(_) => AuthVendor::Kiro,
         }
@@ -45,6 +48,7 @@ impl ProviderRef<'_> {
 
     pub async fn login(&self) -> Result<LoginResult, OAuthError> {
         match self {
+            Self::Claude(p) => p.login().await,
             Self::Codex(p) => p.login().await,
             Self::Kiro(p) => p.login().await,
         }
@@ -52,6 +56,7 @@ impl ProviderRef<'_> {
 
     pub async fn refresh(&self, refresh_token: &str) -> Result<OAuthTokens, OAuthError> {
         match self {
+            Self::Claude(p) => p.refresh(refresh_token).await,
             Self::Codex(p) => p.refresh(refresh_token).await,
             Self::Kiro(p) => p.refresh(refresh_token).await,
         }
@@ -59,6 +64,7 @@ impl ProviderRef<'_> {
 }
 
 pub struct OAuthRegistry {
+    claude: claude::ClaudeProvider,
     codex: codex::CodexProvider,
     kiro: kiro::KiroProvider,
 }
@@ -66,6 +72,7 @@ pub struct OAuthRegistry {
 impl OAuthRegistry {
     pub fn new() -> Self {
         Self {
+            claude: claude::ClaudeProvider,
             codex: codex::CodexProvider,
             kiro: kiro::KiroProvider,
         }
@@ -73,6 +80,7 @@ impl OAuthRegistry {
 
     pub fn get(&self, vendor: AuthVendor) -> Option<ProviderRef<'_>> {
         match vendor {
+            AuthVendor::Anthropic => Some(ProviderRef::Claude(&self.claude)),
             AuthVendor::OpenAI => Some(ProviderRef::Codex(&self.codex)),
             AuthVendor::Kiro => Some(ProviderRef::Kiro(&self.kiro)),
             _ => None,

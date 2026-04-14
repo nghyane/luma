@@ -172,7 +172,7 @@ fn render_menu(selected: usize, redraw: bool) -> Result<()> {
 
 async fn dispatch_oauth(vendor: AuthVendor) -> Result<()> {
     eprintln!("logging in to {}…", vendor.as_str());
-    if matches!(vendor, AuthVendor::OpenAI | AuthVendor::Kiro) {
+    if matches!(vendor, AuthVendor::Anthropic | AuthVendor::OpenAI | AuthVendor::Kiro) {
         let view = AuthService::new(FileAuthRepository::with_default_path())
             .login(vendor.into())
             .await?;
