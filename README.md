@@ -1,10 +1,16 @@
 # luma
 
-> Lightweight coding agent built with Rust. Multi-provider AI support (Anthropic Claude, OpenAI Codex).
+> Lightweight terminal coding agent built with Rust.
+
+Multi-provider AI support, local code tools, sessions, skills, and a fast TUI for day-to-day development work.
 
 ![demo](demo.gif)
 
-## Install
+## Quick start
+
+1. Install `luma`
+2. Log in to at least one provider
+3. Run `luma` inside your project
 
 macOS, Linux, WSL (aarch64, x86_64):
 
@@ -18,48 +24,182 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/nghyane/luma/master/install.ps1 | iex
 ```
 
-Update: `luma update`
+Then:
 
-## Features
+```bash
+luma login
+luma
+```
 
-**Three modes** — switch with `Tab`:
+If you already use Claude Code or Codex CLI, `luma` can reuse those credentials automatically when available.
 
-| Mode | Model | Use case |
-|------|-------|----------|
-| Rush | Haiku | Quick fixes, simple questions |
-| Smart | Opus | Code review, complex problems |
-| Deep | Codex | Advanced analysis, research |
+## First run
 
-**@file mention** — type `@` in prompt to autocomplete file paths. File content injected as context when sent. Multiple files supported.
+Useful commands when getting started:
 
-**Inline attachments** — images and pasted text blocks insert at cursor position. Rendered as inline chips in both prompt and chat. Backspace removes them naturally.
+```bash
+# interactive login picker
+luma login
 
-**Drag & drop** — drop image files onto the terminal to attach. Supports `file://` paths, quoted paths, and common image formats.
+# check which providers/accounts are available
+luma auth
+luma accounts
 
-**Tools** — `Read`, `Write`, `Edit`, `Bash`, `Grep`, `Glob`, `apply_patch`. Web search via server-side (Claude) or client fallback.
+# refresh model catalog
+luma sync
 
-**Skills** — compatible with Claude Code skill format. Loaded from `.agents/skills/`, `.claude/skills/` (project) and `~/` equivalents.
+# start the TUI
+luma
+```
 
-**Sessions** — `/resume`, `/sessions`, `/new`. Attachments preserved across resume.
+Inside the app:
 
-## Keyboard Shortcuts
+- `Tab` switches mode: `Rush -> Smart -> Deep`
+- `/model` opens the model picker
+- `/new` starts a new thread
+- `/resume` resumes the last session for the current workspace
+- `/sessions` browses saved sessions
+- `/accounts` shows the account pool
+- `/exit` quits
+
+## What luma can do
+
+### Terminal coding workflow
+
+- Chat with AI models in a full-screen TUI
+- Work inside the current project directory
+- Read, search, edit, and patch files through agent tools
+- Run shell commands from the agent loop
+- Resume prior sessions per workspace
+
+### File and prompt context
+
+- `@file` mention with path autocomplete
+- Multiple file mentions in one prompt
+- Inline pasted text blocks
+- Image attachments in prompts
+- Drag-and-drop image files into the terminal
+
+### Tools
+
+Depending on the active model/provider workflow, `luma` exposes a tool set built around local coding tasks:
+
+- `Read`
+- `Write`
+- `Edit`
+- `MultiEdit`
+- `Bash`
+- `Glob`
+- `Grep`
+- `apply_patch`
+- `GhFile`
+- `GhLs`
+- `GhSearch`
+- `WebFetch`
+- web search when supported
+
+### Providers
+
+Current code supports multiple backends/gateways, including:
+
+- Anthropic
+- OpenAI
+- Codex
+- Kiro
+- OpenCode Go
+
+### Skills
+
+`luma` can load Claude Code-style skills from:
+
+- `.agents/skills/`
+- `.claude/skills/`
+- `~/.agents/skills/`
+- `~/.claude/skills/`
+- `~/.config/luma/skills/`
+
+## Modes
+
+`luma` has three user-facing modes. The exact default model can vary by your local model catalog and available providers, so the important distinction is workflow intent:
+
+| Mode | Use case |
+|------|----------|
+| `Rush` | Quick fixes, small edits, simple questions |
+| `Smart` | General coding work, debugging, code review |
+| `Deep` | More involved analysis, research, multi-step changes |
+
+Mode also influences the tool style used by the agent.
+
+## Keyboard shortcuts
 
 | Key | Action |
 |-----|--------|
-| `Tab` | Cycle mode (Rush → Smart → Deep) |
+| `Tab` | Cycle mode (`Rush -> Smart -> Deep`) |
 | `Enter` | Send message |
-| `Alt+Enter` | Newline in prompt |
-| `Paste` | Text inline or block attachment (≥5 lines) |
+| `Alt+Enter` | Insert newline |
+| `Paste` | Insert text inline or as a block attachment for long pastes |
 | `Ctrl+T` | Cycle thinking level |
-| `Esc` | Interrupt streaming (press twice to force) |
-| `Ctrl+C` | Clear input / quit (when empty) |
-| `↑` `↓` | History / dropdown navigation |
+| `Esc` | Interrupt streaming; press twice to force |
+| `Ctrl+C` | Clear input, or quit when input is empty |
+| `Up` / `Down` | Navigate history or picker/dropdown |
 
-## Config
+## Authentication
 
-All data in `~/.config/luma/` — preferences, sessions, skills. Zero-config auth reuses [Claude Code](https://github.com/anthropics/claude-code) / [Codex CLI](https://github.com/openai/codex) credentials. OAuth auto-refresh.
+`luma` stores its own auth state in `~/.config/luma/auth.json` and can import/reuse credentials from upstream tools when present.
 
-Debug: `LUMA_DEBUG=1 luma` → `/tmp/luma.log`
+Supported login flows include:
+
+- OAuth-based login for supported providers
+- API key entry for API-key providers
+- account health tracking and cooldown-aware selection
+
+Commands:
+
+```bash
+luma login
+luma auth
+luma accounts
+```
+
+## Data and config
+
+`luma` stores data under `~/.config/luma/`, including:
+
+- preferences
+- sessions
+- auth data
+- user skills
+
+Debug logging:
+
+```bash
+LUMA_DEBUG=1 luma
+```
+
+Logs are written to your temp directory as `luma.log`.
+
+## Maintenance commands
+
+```bash
+# update installed binary
+luma update
+
+# refresh model catalog
+luma sync
+
+# inspect agent behavior on saved sessions
+luma audit sessions
+luma audit incidents
+luma audit packets
+luma audit clusters
+```
+
+## Build from source
+
+```bash
+cargo build
+cargo run
+```
 
 ## License
 
