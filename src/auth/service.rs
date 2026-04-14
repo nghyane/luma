@@ -5,7 +5,10 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::auth::domain::{AccountHealth, AccountKey, AccountView, AuthFailure, ReloginReason};
+use crate::auth::domain::{
+    AccountHealth, AccountKey, AccountMetadata, AccountRecord, AccountView, AuthFailure,
+    AuthState, AuthVendor, OAuthCredential, ReloginReason,
+};
 use crate::auth::error::AuthError;
 use crate::auth::repo::{AuthRepository, AuthStore};
 use crate::auth::selection::{AccountSelectionPolicy, DefaultSelectionPolicy};
@@ -68,6 +71,41 @@ impl<R: AuthRepository> AuthService<R> {
         self.mutate(|store| store.accounts.retain(|a| &a.key != key))
     }
 
+    pub async fn login(&self, vendor: AuthVendor) -> Result<AccountView, AuthError> {
+        let oauth = crate::auth::oauth::OAuthRegistry::new();
+        let provider = oauth.get(vendor).ok_or(AuthError::NoEligibleAccount {
+            vendor: vendor.as_str().to_owned(),
+        })?;
+        let login = provider.login().await.map_err(AuthError::OAuth)?;
+        let record = AccountRecord {
+            key: login.identity.key.clone(),
+            display_name: login.identity.display_name,
+            email: login.identity.email,
+            auth: AuthState::OAuth(OAuthCredential {
+                access_token: login.tokens.access_token,
+                refresh_token: login.tokens.refresh_token,
+                expires_at: login.tokens.expires_at,
+                scopes: login.tokens.scopes,
+            }),
+            health: AccountHealth::Active,
+            metadata: AccountMetadata {
+                profile_arn: login.tokens.profile_arn,
+                ..AccountMetadata::default()
+            },
+        };
+
+        self.mutate(|store| upsert_account(store, record.clone()))?;
+
+        let store = self.repo.load()?;
+        let saved = store
+            .accounts
+            .iter()
+            .find(|a| a.key == record.key)
+            .map(AccountView::from_record)
+            .ok_or(AuthError::ReadBackFailed)?;
+        Ok(saved)
+    }
+
     // -------------------------------------------------------------------------
 
     fn mutate(&self, f: impl FnOnce(&mut AuthStore)) -> Result<(), AuthError> {
@@ -79,6 +117,14 @@ impl<R: AuthRepository> AuthService<R> {
 
 fn find_mut<'a>(store: &'a mut AuthStore, key: &AccountKey) -> Option<&'a mut crate::auth::domain::AccountRecord> {
     store.accounts.iter_mut().find(|a| &a.key == key)
+}
+
+fn upsert_account(store: &mut AuthStore, record: AccountRecord) {
+    if let Some(existing) = store.accounts.iter_mut().find(|a| a.key == record.key) {
+        *existing = record;
+    } else {
+        store.accounts.push(record);
+    }
 }
 
 fn now_unix() -> u64 {
