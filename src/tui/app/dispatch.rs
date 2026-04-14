@@ -237,6 +237,14 @@ impl super::App {
                 self.update_context_from_tokens(total);
                 Action::Render
             }
+            Event::ContextUsage(pct) => {
+                // Server-authoritative percentage (Kiro). Trusted over the
+                // client-side token estimate — set directly without going
+                // through update_context_from_tokens, which derives pct
+                // from a possibly-zero token count.
+                self.ui.status.set_context(0, pct.round() as u8);
+                Action::Render
+            }
         }
     }
 

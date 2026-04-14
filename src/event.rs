@@ -69,6 +69,10 @@ pub enum Event {
         max_attempts: u8,
     },
     Usage(Usage),
+    /// Provider-reported context window usage, percentage (0..=100).
+    /// Only Kiro surfaces this today (via `contextUsageEvent`); other
+    /// providers fall back to client-side token-based estimation.
+    ContextUsage(f32),
     SessionLoaded {
         /// Boxed to keep `Event` enum size small — `Session` contains a `Vec<Message>`
         /// which makes this variant significantly larger than others.

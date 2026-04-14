@@ -27,6 +27,11 @@ use crate::event_bus::Sender as EventSender;
 use crate::provider::json_stream::{JsonStringExtractor, streamable_arg_for};
 use crate::util::uuid_v4;
 
+/// User-Agent Kiro CLI sends. Captured via mitmproxy from a real
+/// kiro-cli session — the backend enforces a first-party-client
+/// check against this prefix, so drift will start dropping requests.
+const KIRO_USER_AGENT: &str = "aws-sdk-rust/1.3.14 ua/2.1 api/codewhispererstreaming/0.1.14474 os/macos lang/rust/1.92.0 app/AmazonQ-For-CLI";
+
 pub struct KiroRuntime {
     model_id: String,
     base_url: String,
@@ -94,12 +99,12 @@ impl KiroRuntime {
             .build()
             .map_err(|e| anyhow::anyhow!("Kiro client build: {e}"))?;
 
-        let encoded_arn = url_encode(profile_arn);
-        let url = format!(
-            "{}/generateAssistantResponse?origin=KIRO_CLI&profileArn={encoded_arn}",
-            self.base_url
-        );
-
+        // Kiro CLI uses the AWS Smithy "service" endpoint: root path, target
+        // in `X-Amz-Target`, `application/x-amz-json-1.0` envelope. This
+        // dispatches to AmazonCodeWhispererStreamingService and emits the
+        // richer event-stream response that includes contextUsageEvent —
+        // the legacy `/generateAssistantResponse` path only surfaces
+        // assistantResponseEvent + meteringEvent.
         let body = build_request_body(
             req.messages,
             &self.model_id,
@@ -110,9 +115,16 @@ impl KiroRuntime {
         );
 
         let resp = client
-            .post(&url)
+            .post(&self.base_url)
             .header("Authorization", format!("Bearer {}", self.token))
-            .header("Content-Type", "application/json")
+            .header("Content-Type", "application/x-amz-json-1.0")
+            .header(
+                "X-Amz-Target",
+                "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
+            )
+            .header("User-Agent", KIRO_USER_AGENT)
+            .header("X-Amz-User-Agent", KIRO_USER_AGENT)
+            .header("X-Amzn-Codewhisperer-Optout", "false")
             .json(&body)
             .send()
             .await?;
@@ -537,7 +549,19 @@ impl<'a> FrameDecoder<'a> {
             }
             // meteringEvent, and anything else: ignore. Kiro reports
             // usage in credits (float), not tokens — Usage::default()
-            // stays zeroed.
+            // stays zeroed. contextUsageEvent carries the authoritative
+            // server-side context percentage (input tokens / model limit).
+            Some("contextUsageEvent") => {
+                if let Some(pct) = v
+                    .get("contextUsagePercentage")
+                    .and_then(|p| p.as_f64())
+                {
+                    // Server value occasionally drifts slightly above 100
+                    // on saturation; clamp for the UI.
+                    let clamped = pct.clamp(0.0, 100.0) as f32;
+                    let _ = tx.send(Event::ContextUsage(clamped)).await;
+                }
+            }
             _ => {}
         }
     }
@@ -604,19 +628,6 @@ fn parse_event_type(headers_data: &[u8]) -> Option<String> {
         }
     }
     None
-}
-
-fn url_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -777,6 +788,58 @@ mod tests {
             [ContentBlock::Text { text }] => assert_eq!(text, "after"),
             other => panic!("corrupt frame stalled decoder: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn decoder_emits_context_usage_event() {
+        // Real wire shape captured from a live mitmproxy session against
+        // AmazonCodeWhispererStreamingService.GenerateAssistantResponse.
+        let wire = frame(
+            "contextUsageEvent",
+            br#"{"contextUsagePercentage":1.1650999784469604}"#,
+        );
+
+        let (tx, mut rx) = event_bus::channel();
+        let mut decoder = FrameDecoder::new(&[]);
+        decoder.feed(&wire);
+        while let Some(f) = decoder.pop_frame() {
+            decoder.handle_frame(&f, &tx).await;
+        }
+
+        drop(tx);
+        let mut ctx = None;
+        while let Some(evt) = rx.recv().await {
+            if let Event::ContextUsage(pct) = evt {
+                ctx = Some(pct);
+            }
+        }
+        let pct = ctx.expect("ContextUsage event emitted");
+        assert!((pct - 1.165).abs() < 0.01, "got {pct}");
+    }
+
+    #[tokio::test]
+    async fn decoder_clamps_context_usage_above_100() {
+        // Server occasionally reports slightly >100 on saturation; the
+        // UI takes an u8 after rounding, so clamp upstream to keep the
+        // type contract obvious.
+        let wire = frame(
+            "contextUsageEvent",
+            br#"{"contextUsagePercentage":105.3}"#,
+        );
+        let (tx, mut rx) = event_bus::channel();
+        let mut decoder = FrameDecoder::new(&[]);
+        decoder.feed(&wire);
+        while let Some(f) = decoder.pop_frame() {
+            decoder.handle_frame(&f, &tx).await;
+        }
+        drop(tx);
+        let mut ctx = None;
+        while let Some(evt) = rx.recv().await {
+            if let Event::ContextUsage(pct) = evt {
+                ctx = Some(pct);
+            }
+        }
+        assert_eq!(ctx, Some(100.0));
     }
 
     #[test]

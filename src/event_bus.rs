@@ -413,6 +413,10 @@ impl Event {
                 *slot = other;
                 Ok(())
             }
+            (slot @ Event::ContextUsage(_), other @ Event::ContextUsage(_)) => {
+                *slot = other;
+                Ok(())
+            }
             // Reconstruct `other` with all its fields and return.
             (_, other) => Err(other),
         }
