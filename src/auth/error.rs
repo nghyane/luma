@@ -23,6 +23,7 @@ pub enum AuthStoreError {
 // =============================================================================
 
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum AuthImportError {
     #[error("local credential source not found for {vendor}")]
     SourceNotFound { vendor: String },
@@ -39,6 +40,7 @@ pub enum AuthImportError {
 // =============================================================================
 
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum OAuthError {
     #[error("network error: {0}")]
     Network(String),
@@ -92,6 +94,7 @@ pub enum AuthError {
 // =============================================================================
 
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum ProviderError {
     #[error("transport error: {0}")]
     Transport(String),
@@ -107,4 +110,35 @@ pub enum ProviderError {
 
     #[error("remote error {status}: {message}")]
     Remote { status: u16, message: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::domain::AuthFailure;
+
+    #[test]
+    fn construct_import_errors() {
+        let _ = AuthImportError::SourceNotFound {
+            vendor: "openai".to_owned(),
+        };
+        let _ = AuthImportError::ParseError("bad json".to_owned());
+        let _ = AuthImportError::KeychainError("denied".to_owned());
+    }
+
+    #[test]
+    fn construct_oauth_errors() {
+        let _ = OAuthError::Network("offline".to_owned());
+        let _ = OAuthError::Http {
+            status: 401,
+            body: "unauthorized".to_owned(),
+        };
+        let _ = OAuthError::Cancelled;
+    }
+
+    #[test]
+    fn construct_provider_error() {
+        let _ = ProviderError::Auth(AuthFailure::Unauthorized);
+        let _ = ProviderError::Transport("reset".to_owned());
+    }
 }

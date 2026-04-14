@@ -3,9 +3,8 @@
 //! Single-binary subcommand; no TUI app integration. Uses raw-mode via
 //! `termina` to drive an arrow-key provider picker, then dispatches:
 //!
-//! * OAuth providers → existing PKCE flow in `config::auth::login`.
-//! * API-key providers → inline paste prompt, then
-//!   `config::auth::upsert_api_key`.
+//! * OAuth providers → `AuthService::login`.
+//! * API-key providers → `AuthService::save_api_key`.
 //!
 //! The menu restores cooked mode before printing results or spawning the
 //! browser so users see normal terminal output. Raw mode only bounds the
@@ -13,7 +12,7 @@
 
 use crate::auth::repo::FileAuthRepository;
 use crate::auth::service::AuthService;
-use crate::config::auth::{self, AuthVendor};
+use crate::config::auth::AuthVendor;
 use anyhow::{Context, Result};
 use std::io::{self, Write};
 use termina::{
@@ -172,33 +171,16 @@ fn render_menu(selected: usize, redraw: bool) -> Result<()> {
 
 async fn dispatch_oauth(vendor: AuthVendor) -> Result<()> {
     eprintln!("logging in to {}…", vendor.as_str());
-    if matches!(vendor, AuthVendor::Anthropic | AuthVendor::OpenAI | AuthVendor::Kiro) {
-        let view = AuthService::new(FileAuthRepository::with_default_path())
-            .login(vendor.into())
-            .await?;
-        let who = view.email.as_deref().unwrap_or(view.display_name.as_str());
-        println!(
-            "signed in as {who} ({}) · provider: {}",
-            view.display_name,
-            view.vendor.as_str()
-        );
-        return Ok(());
-    }
-    match auth::login(vendor).await {
-        Ok(outcome) => {
-            let who = outcome.email.as_deref().unwrap_or(outcome.label.as_str());
-            println!(
-                "signed in as {who} ({}) · provider: {}",
-                outcome.label,
-                outcome.provider.as_str()
-            );
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("login failed: {e}");
-            std::process::exit(1);
-        }
-    }
+    let view = AuthService::new(FileAuthRepository::with_default_path())
+        .login(vendor.into())
+        .await?;
+    let who = view.email.as_deref().unwrap_or(view.display_name.as_str());
+    println!(
+        "signed in as {who} ({}) · provider: {}",
+        view.display_name,
+        view.vendor.as_str()
+    );
+    Ok(())
 }
 
 fn dispatch_api_key(vendor: AuthVendor) -> Result<()> {

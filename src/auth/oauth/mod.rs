@@ -38,14 +38,6 @@ pub enum ProviderRef<'a> {
 }
 
 impl ProviderRef<'_> {
-    pub fn vendor(&self) -> AuthVendor {
-        match self {
-            Self::Claude(_) => AuthVendor::Anthropic,
-            Self::Codex(_) => AuthVendor::OpenAI,
-            Self::Kiro(_) => AuthVendor::Kiro,
-        }
-    }
-
     pub async fn login(&self) -> Result<LoginResult, OAuthError> {
         match self {
             Self::Claude(p) => p.login().await,

@@ -212,6 +212,7 @@ impl AccountView {
 // =============================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum AuthFailure {
     Unauthorized,
     RefreshRejected,
@@ -335,5 +336,13 @@ mod tests {
             let back: LegacyVendor = converted.into();
             assert_eq!(back.as_str(), legacy.as_str());
         }
+    }
+
+    #[test]
+    fn auth_failure_variants_are_constructible() {
+        let _ = AuthFailure::Unauthorized;
+        let _ = AuthFailure::RefreshRejected;
+        let _ = AuthFailure::MissingRefreshToken;
+        let _ = AuthFailure::InvalidGrant;
     }
 }

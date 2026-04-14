@@ -133,6 +133,25 @@ impl<R: AuthRepository> AuthService<R> {
             .ok_or(AuthError::ReadBackFailed)
     }
 
+    pub fn record_usage_by_display_name(
+        &self,
+        display_name: &str,
+        usage: crate::config::auth::UsageSnapshot,
+    ) -> Result<(), AuthError> {
+        self.mutate(|store| {
+            if let Some(account) = store.accounts.iter_mut().find(|a| a.display_name == display_name) {
+                account.metadata.usage = crate::auth::domain::UsageSnapshot {
+                    requests_remaining: usage.requests_remaining,
+                    requests_limit: usage.requests_limit,
+                    tokens_remaining: usage.tokens_remaining,
+                    tokens_limit: usage.tokens_limit,
+                    reset_at: usage.reset_at,
+                    updated_at: if usage.updated_at == 0 { now_unix() } else { usage.updated_at },
+                };
+            }
+        })
+    }
+
     pub async fn refresh_credential(
         &self,
         key: &AccountKey,
