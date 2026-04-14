@@ -663,9 +663,7 @@ mod tests {
         let text = ToolResultBody::Text("no images".into());
         assert!(!text.has_images());
 
-        let items_no_img = ToolResultBody::Items(vec![ToolResultItem::Text {
-            text: "t".into(),
-        }]);
+        let items_no_img = ToolResultBody::Items(vec![ToolResultItem::Text { text: "t".into() }]);
         assert!(!items_no_img.has_images());
 
         let with_img = ToolResultBody::Items(vec![ToolResultItem::Image {
