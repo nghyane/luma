@@ -1,5 +1,7 @@
 /// OpenAI-compatible chat completions provider with SSE streaming.
-use crate::core::provider::{Provider, StopReason, StreamEvent, StreamRequest, StreamResponse};
+use crate::core::provider::{
+    DEFAULT_MAX_TOKENS, Provider, StopReason, StreamEvent, StreamRequest, StreamResponse,
+};
 use crate::core::types::{ContentBlock, Message, Role, ThinkingLevel, ToolSchema, Usage};
 use crate::event::Event;
 use crate::provider::sse::{SseEventStream, post_sse};
@@ -24,7 +26,7 @@ impl OpenAIChatRuntime {
     pub fn new(model: &str, base_url: &str, api_key: &str, account_label: &str) -> Self {
         Self {
             model: model.to_owned(),
-            max_tokens: crate::provider::protocol::anthropic::DEFAULT_MAX_TOKENS,
+            max_tokens: DEFAULT_MAX_TOKENS,
             base_url: base_url.to_owned(),
             api_key: api_key.to_owned(),
             account_label: account_label.to_owned(),

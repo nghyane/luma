@@ -6,6 +6,16 @@ use std::future::Future;
 use std::pin::Pin;
 use tokio_util::sync::CancellationToken;
 
+/// Default output token cap applied by providers that honour
+/// [`StreamRequest::max_tokens_override`]. Mirrors Claude Code's capped
+/// default. Caller may escalate to [`ESCALATED_MAX_TOKENS`] on the first
+/// `max_tokens` stop reason (see `core::agent::turn`).
+pub const DEFAULT_MAX_TOKENS: u32 = 8192;
+
+/// Escalation cap used after hitting `max_tokens` once. Claude 4.x native
+/// limit; OpenAI Chat providers also accept this value.
+pub const ESCALATED_MAX_TOKENS: u32 = 64_000;
+
 /// A thinking level surfaced by a provider for the current model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThinkingOption {

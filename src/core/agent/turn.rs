@@ -1,12 +1,11 @@
 /// Turn execution — auth, provider, tool loop, summaries, mid-turn save.
 use super::AgentConfig;
-use crate::core::provider::{Provider, StopReason, StreamResponse};
+use crate::core::provider::{ESCALATED_MAX_TOKENS, Provider, StopReason, StreamResponse};
 use crate::core::registry::Registry;
 use crate::core::session::Session;
 use crate::core::types::{ContentBlock, Message, Role, ToolResultBody};
 use crate::event::Event;
 use crate::event_bus::Sender as EventSender;
-use crate::provider::protocol::anthropic::ESCALATED_MAX_TOKENS;
 use crate::provider::retry::ProviderRateLimited;
 use anyhow::Result;
 use tokio::sync::mpsc;

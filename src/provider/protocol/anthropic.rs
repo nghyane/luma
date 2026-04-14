@@ -5,7 +5,9 @@
 /// `src/services/api/client.ts`, `src/services/api/claude.ts`,
 /// `src/utils/fingerprint.ts`, `src/constants/system.ts`, `src/utils/betas.ts`
 /// in `yasasbanukaofficial/claude-code`.
-use crate::core::provider::{Provider, StopReason, StreamEvent, StreamRequest, StreamResponse};
+use crate::core::provider::{
+    DEFAULT_MAX_TOKENS, Provider, StopReason, StreamEvent, StreamRequest, StreamResponse,
+};
 use crate::core::types::{
     ContentBlock, Message, Role, ThinkingLevel, ToolResultBody, ToolResultItem, ToolSchema, Usage,
 };
@@ -21,13 +23,6 @@ use crate::util::uuid_v4;
 use anyhow::Result;
 use futures::stream::{BoxStream, StreamExt};
 use std::collections::VecDeque;
-
-/// Default output token cap, matching claude-code's capped default.
-/// Caller can escalate to [`ESCALATED_MAX_TOKENS`] on first `max_tokens` hit.
-pub const DEFAULT_MAX_TOKENS: u32 = 8192;
-
-/// Escalation cap used after hitting `max_tokens` once. Claude 4.x native limit.
-pub const ESCALATED_MAX_TOKENS: u32 = 64_000;
 
 /// Anthropic Claude provider.
 pub struct AnthropicRuntime {
