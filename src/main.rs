@@ -82,10 +82,19 @@ async fn main() {
             ] {
                 let name = provider.as_str();
                 match config::auth::resolve(provider).await {
-                    Ok(auth) => println!(
-                        "{name}: {} (ok)",
-                        if auth.is_oauth { "oauth" } else { "apikey" }
-                    ),
+                    Ok(auth) => {
+                        let kind = if auth.is_oauth { "oauth" } else { "apikey" };
+                        if provider == config::auth::AuthVendor::Kiro {
+                            match probe_kiro_chat(&auth).await {
+                                Ok(()) => println!("{name}: {kind} (ok, chat probe ok)"),
+                                Err(e) => {
+                                    println!("{name}: {kind} (resolve ok, chat probe failed: {e})")
+                                }
+                            }
+                        } else {
+                            println!("{name}: {kind} (ok)");
+                        }
+                    }
                     Err(e) => println!("{name}: {e}"),
                 }
             }
@@ -123,6 +132,27 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Some("audit") => match args.get(2).map(std::string::String::as_str) {
+            Some("sessions") => {
+                let limit = args
+                    .get(3)
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(30);
+                let summary = crate::core::audit::audit_sessions(limit);
+                println!("sessions scanned:                  {}", summary.sessions_scanned);
+                println!("sessions with project instructions: {}", summary.sessions_with_project_instructions);
+                println!("sessions with skill loads:          {}", summary.sessions_with_skill_loads);
+                println!("mixed local/remote source sessions: {}", summary.mixed_local_remote_source_sessions);
+                println!("premature external research sessions: {}", summary.premature_external_research_sessions);
+                println!("edited without verify sessions:    {}", summary.edited_without_verify_sessions);
+                println!("bash verify commands:             {}", summary.bash_verify_commands);
+                println!("bash file-inspection commands:    {}", summary.bash_file_inspection_commands);
+            }
+            _ => {
+                eprintln!("usage: luma audit sessions [limit]");
+                std::process::exit(1);
+            }
+        },
         Some("version" | "--version" | "-v") => println!("luma {}", env!("CARGO_PKG_VERSION")),
         Some("help" | "--help" | "-h") => {
             println!(
@@ -156,6 +186,69 @@ async fn main() {
             }
         }
     }
+}
+
+async fn probe_kiro_chat(auth: &config::auth::Credential) -> anyhow::Result<()> {
+    let profile_arn = auth
+        .profile_arn
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("missing profile_arn"))?;
+    let body = serde_json::json!({
+        "conversationState": {
+            "conversationId": "00000000-0000-4000-8000-000000000001",
+            "chatTriggerType": "MANUAL",
+            "history": [],
+            "currentMessage": {
+                "userInputMessage": {
+                    "content": "ping",
+                    "modelId": "auto",
+                    "origin": "KIRO_CLI",
+                    "userInputMessageContext": {
+                        "envState": {
+                            "operatingSystem": std::env::consts::OS,
+                            "currentWorkingDirectory": std::env::current_dir()
+                                .unwrap_or_default()
+                                .display()
+                                .to_string(),
+                        }
+                    }
+                }
+            }
+        },
+        "profileArn": profile_arn,
+    });
+
+    let resp = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?
+        .post("https://q.us-east-1.amazonaws.com/")
+        .header("Authorization", format!("Bearer {}", auth.token))
+        .header("Content-Type", "application/x-amz-json-1.0")
+        .header(
+            "X-Amz-Target",
+            "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
+        )
+        .header(
+            "User-Agent",
+            "aws-sdk-rust/1.3.14 ua/2.1 api/codewhispererstreaming/0.1.14474 os/macos lang/rust/1.92.0 app/AmazonQ-For-CLI",
+        )
+        .header(
+            "X-Amz-User-Agent",
+            "aws-sdk-rust/1.3.14 ua/2.1 api/codewhispererstreaming/0.1.14474 os/macos lang/rust/1.92.0 app/AmazonQ-For-CLI",
+        )
+        .header("X-Amzn-Codewhisperer-Optout", "false")
+        .json(&body)
+        .send()
+        .await?;
+
+    if resp.status().is_success() {
+        return Ok(());
+    }
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    let detail: String = body.chars().take(200).collect();
+    anyhow::bail!("HTTP {}: {}", status.as_u16(), detail);
 }
 
 /// Self-update: download and run install script.

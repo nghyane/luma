@@ -110,6 +110,7 @@ Nếu chỉ có 1 session dùng wording hơi dài trong `GhFile` description:
 Luma SHOULD bắt đầu với taxonomy tối thiểu sau:
 
 - `wrong_source` — dùng GitHub/web khi local evidence đã đủ;
+- `premature_external_research` — gọi web/GitHub research quá sớm trong local audit/code tasks;
 - `bash_file_overuse` — dùng shell cho file read/search/list thay vì tool chuyên dụng;
 - `missing_verification` — code-changing task không có verify signal đủ mạnh;
 - `missed_skill` — task có tín hiệu procedural rõ nhưng không load skill;
