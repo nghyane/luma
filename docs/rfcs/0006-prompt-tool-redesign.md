@@ -157,6 +157,30 @@ src/config/prompt/
   tools_patch.md   ← RÚT: tương tự
 ```
 
+### Tool-style routing by mode
+
+Current code maps tool style directly from provider source (`codex` ->
+`Patch`, everything else -> `Native`). Session audit now shows that this
+provider-first mapping is too coarse for Luma's workflows:
+
+- `Patch` style relies on `exec_command` + `apply_patch` and therefore
+  pushes local read/search/list tasks into shell commands (`rg`, `sed`,
+  `cat`, python file reads).
+- This is acceptable for long autonomous coding flows, but it distorts
+  audit/improve workflows and makes `Smart` sessions more shell-heavy than
+  necessary.
+- `Native` style provides clearer local evidence tools (`Read`, `Grep`,
+  `Glob`) and is a better default for `Rush` and `Smart`.
+
+Therefore the default routing SHOULD be mode-first:
+
+- `Rush` -> `Native`
+- `Smart` -> `Native`
+- `Deep` -> `Patch` preferred, with `Native` fallback if needed
+
+Provider support still matters, but it becomes a compatibility concern,
+not the primary policy for choosing tool style.
+
 ### Prompt assembly layers
 
 Sau redesign, system prompt SHOULD được nhìn như composition của các lớp
@@ -166,7 +190,7 @@ riêng biệt, thay vì một blob text phẳng:
 system_prompt =
   base_prompt          // global agent policy
   + mode_prompt        // rush / smart / deep behavior
-  + tool_style_prompt  // native / patch usage notes
+  + tool_style_prompt  // native / patch usage notes, chosen by mode-first routing
   + env_context        // cwd, shell, git, CLI availability
   + skill_catalog      // metadata only, not full skill bodies
   + project_memory     // AGENTS.md / CLAUDE.md / RULES.md / ...
@@ -367,6 +391,26 @@ MUST chứa source boundary khi tool có nguy cơ overlap với tool khác:
 
 MAY chứa boundary guidance ("not for searching — use Grep instead").
 
+### Tool-style routing API
+
+Tool style SHOULD be chosen by a mode-aware helper rather than provider
+source alone:
+
+```rust
+pub fn for_mode(mode: AgentMode, source: &str) -> Self {
+    match mode {
+        AgentMode::Rush | AgentMode::Smart => Self::Native,
+        AgentMode::Deep => match source {
+            "codex" => Self::Patch,
+            _ => Self::Native,
+        },
+    }
+}
+```
+
+`for_source` MAY remain as a lower-level compatibility helper, but call
+sites in the app SHOULD use `for_mode(...)`.
+
 ### prompt::build() — thay đổi signature
 
 ```rust
@@ -412,6 +456,7 @@ Các test hiện tại trong `src/config/prompt.rs` cần update:
 6. Trim `tools_native.md` và `tools_patch.md`.
 7. Trim tool descriptions (từng tool một, có thể tách PR).
 8. Update `prompt::build()` và tests.
+9. Change tool-style routing from provider-first to mode-first.
 
 Các bước 1–6 có thể làm trong một PR. Bước 7 tách PR riêng vì nhiều file.
 
@@ -455,6 +500,9 @@ Phức tạp hơn, khó đọc, không match với cách `prompt::build()` hoạ
 - smart.md tiếp tục thiếu investigation và verification workflow — agent
   smart mode hoạt động kém hơn rush mode về hai behavior cơ bản này.
 - Mỗi lần thêm git safety rule phải sửa 2 file.
+- `codex`-backed Smart sessions continue to inherit `Patch` style by
+  provider mapping, forcing local inspection/search through shell-heavy
+  workflows that are worse for auditability and local-first reasoning.
 
 ## Prior art
 
@@ -506,6 +554,10 @@ Phức tạp hơn, khó đọc, không match với cách `prompt::build()` hoạ
 4. **`# Evidence and Source of Truth` nên nằm ở base.md hay smart.md?**
    Đề xuất mặc định: `base.md`, vì đây là global policy cho mọi mode,
    bao gồm rush/deep, không chỉ smart.
+
+5. **Should Patch be Deep-only by default?**
+   Đề xuất mặc định: yes — `Rush` and `Smart` use `Native`; `Deep` uses
+   `Patch` when the provider supports it well enough.
 
 ## Future possibilities
 

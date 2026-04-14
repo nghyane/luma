@@ -155,7 +155,7 @@ impl super::App {
         let project_instructions = crate::config::instructions::discover();
         let instructions_block =
             crate::config::instructions::build_instructions(&project_instructions);
-        let style = crate::tool::ToolStyle::for_source(&model.source);
+        let style = crate::tool::ToolStyle::for_mode(self.config.mode, &model.source);
         let base_prompt = crate::config::prompt::build(self.config.mode, style);
         let system_prompt = format!(
             "{base_prompt}\n{}{skill_catalog}{instructions_block}",
@@ -462,7 +462,10 @@ mod tests {
     #[test]
     fn format_attach_msg_kb_rounds_up() {
         // 1 byte still shows 1 KB rather than 0 — div_ceil behavior.
-        assert_eq!(format_attach_msg("x.png", &[0; 1]), "attached: x.png (1 KB)");
+        assert_eq!(
+            format_attach_msg("x.png", &[0; 1]),
+            "attached: x.png (1 KB)"
+        );
     }
 
     #[test]
@@ -474,7 +477,10 @@ mod tests {
     #[test]
     fn format_attach_msg_mb_above_threshold() {
         let data = vec![0u8; 2 * 1024 * 1024 + 512 * 1024];
-        assert_eq!(format_attach_msg("big.png", &data), "attached: big.png (2.5 MB)");
+        assert_eq!(
+            format_attach_msg("big.png", &data),
+            "attached: big.png (2.5 MB)"
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@ pub mod write;
 
 use crate::core::registry::Registry;
 
-/// Tool flavor — chosen by provider, not by agent mode.
+/// Tool flavor — chosen by workflow mode first, then constrained by provider support.
 ///
 /// - `Native`: dedicated file tools (Read/Write/Edit/MultiEdit/Glob/Grep)
 ///   plus shell. Used by Anthropic and OpenAI models.
@@ -30,11 +30,19 @@ pub enum ToolStyle {
 }
 
 impl ToolStyle {
-    /// Map a provider source string to its idiomatic tool style.
+    /// Lower-level compatibility mapping from provider source to tool style.
     pub fn for_source(source: &str) -> Self {
         match source {
             "codex" => Self::Patch,
             _ => Self::Native,
+        }
+    }
+
+    /// Default tool style for a given agent mode and provider source.
+    pub fn for_mode(mode: crate::config::models::AgentMode, source: &str) -> Self {
+        match mode {
+            crate::config::models::AgentMode::Rush | crate::config::models::AgentMode::Smart => Self::Native,
+            crate::config::models::AgentMode::Deep => Self::for_source(source),
         }
     }
 }

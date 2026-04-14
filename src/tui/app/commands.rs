@@ -183,10 +183,7 @@ impl super::App {
             return;
         };
         let all = models::all_models();
-        if let Some(m) = all
-            .iter()
-            .find(|m| m.source == source && m.id == model_id)
-        {
+        if let Some(m) = all.iter().find(|m| m.source == source && m.id == model_id) {
             self.config.model = Some(m.clone());
             let thinking_caps = self.current_thinking_capabilities();
             self.config.thinking = thinking_caps.coerce(self.config.thinking);
@@ -255,13 +252,14 @@ impl super::App {
             let project_instructions = crate::config::instructions::discover();
             let instructions_block =
                 crate::config::instructions::build_instructions(&project_instructions);
-            let style = crate::tool::ToolStyle::for_source(&desired.source);
+            let style = crate::tool::ToolStyle::for_mode(desired.mode, &desired.source);
             let base_prompt = crate::config::prompt::build(desired.mode, style);
             let system_prompt = format!(
                 "{base_prompt}\n{}{skill_catalog}{instructions_block}",
                 self.config.env_context
             );
-            let registry = crate::tool::build_registry(style, Self::search_backend(&desired.source));
+            let registry =
+                crate::tool::build_registry(style, Self::search_backend(&desired.source));
             let _ = tx.try_send(AgentCommand::SetContext {
                 system_prompt,
                 registry,
