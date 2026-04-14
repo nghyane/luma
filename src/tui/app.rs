@@ -161,7 +161,6 @@ impl App {
         prompt.add_command("resume", "resume last session");
         prompt.add_command("sessions", "browse sessions");
         prompt.add_command("accounts", "view account pool");
-        prompt.add_command("login", "add account via browser");
         prompt.add_command("exit", "quit luma");
 
         let mode = crate::config::prefs::load_mode();
