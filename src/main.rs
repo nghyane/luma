@@ -139,14 +139,38 @@ async fn main() {
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(30);
                 let summary = crate::core::audit::audit_sessions(limit);
-                println!("sessions scanned:                  {}", summary.sessions_scanned);
-                println!("sessions with project instructions: {}", summary.sessions_with_project_instructions);
-                println!("sessions with skill loads:          {}", summary.sessions_with_skill_loads);
-                println!("mixed local/remote source sessions: {}", summary.mixed_local_remote_source_sessions);
-                println!("premature external research sessions: {}", summary.premature_external_research_sessions);
-                println!("edited without verify sessions:    {}", summary.edited_without_verify_sessions);
-                println!("bash verify commands:             {}", summary.bash_verify_commands);
-                println!("bash file-inspection commands:    {}", summary.bash_file_inspection_commands);
+                println!(
+                    "sessions scanned:                  {}",
+                    summary.sessions_scanned
+                );
+                println!(
+                    "sessions with project instructions: {}",
+                    summary.sessions_with_project_instructions
+                );
+                println!(
+                    "sessions with skill loads:          {}",
+                    summary.sessions_with_skill_loads
+                );
+                println!(
+                    "mixed local/remote source sessions: {}",
+                    summary.mixed_local_remote_source_sessions
+                );
+                println!(
+                    "premature external research sessions: {}",
+                    summary.premature_external_research_sessions
+                );
+                println!(
+                    "edited without verify sessions:    {}",
+                    summary.edited_without_verify_sessions
+                );
+                println!(
+                    "bash verify commands:             {}",
+                    summary.bash_verify_commands
+                );
+                println!(
+                    "bash file-inspection commands:    {}",
+                    summary.bash_file_inspection_commands
+                );
             }
             Some("incidents") => {
                 let limit = args
@@ -156,7 +180,10 @@ async fn main() {
                 for incident in crate::core::audit::audit_incidents(limit) {
                     println!(
                         "{}	{}	{}	{}",
-                        incident.session_id, incident.failure_type, incident.severity, incident.title
+                        incident.session_id,
+                        incident.failure_type,
+                        incident.severity,
+                        incident.title
                     );
                 }
             }
@@ -172,9 +199,32 @@ async fn main() {
                 println!("session: {}", detail.session_id);
                 println!("title:   {}", detail.title);
                 println!("task:    {}", detail.task_preview);
-                println!("failures:{}", if detail.failure_types.is_empty() { " none" } else { "" });
+                println!(
+                    "failures:{}",
+                    if detail.failure_types.is_empty() {
+                        " none"
+                    } else {
+                        ""
+                    }
+                );
                 for failure in detail.failure_types {
                     println!("  - {}", failure);
+                }
+                if let Some(local_read) = detail.representative_local_read {
+                    println!("representative local read:");
+                    println!("  - {}", local_read);
+                }
+                if let Some(remote_use) = detail.representative_remote_use {
+                    println!("representative remote use:");
+                    println!("  - {}", remote_use);
+                }
+                if let Some(edit) = detail.representative_edit {
+                    println!("representative edit:");
+                    println!("  - {}", edit);
+                }
+                if let Some(verify) = detail.representative_verify {
+                    println!("representative verify:");
+                    println!("  - {}", verify);
                 }
                 println!("tool uses:");
                 for tool in detail.tool_uses.into_iter().take(25) {
@@ -182,9 +232,11 @@ async fn main() {
                 }
             }
             _ => {
-                eprintln!("usage: luma audit sessions [limit]
+                eprintln!(
+                    "usage: luma audit sessions [limit]
        luma audit incidents [limit]
-       luma audit show <session-id>");
+       luma audit show <session-id>"
+                );
                 std::process::exit(1);
             }
         },

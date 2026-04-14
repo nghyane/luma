@@ -20,6 +20,10 @@ pub struct IncidentDetail {
     pub task_preview: String,
     pub failure_types: Vec<String>,
     pub tool_uses: Vec<String>,
+    pub representative_local_read: Option<String>,
+    pub representative_remote_use: Option<String>,
+    pub representative_edit: Option<String>,
+    pub representative_verify: Option<String>,
 }
 
 /// Top-level metrics from a local session scan.
@@ -47,6 +51,10 @@ pub fn audit_show(session_id: &str) -> Option<IncidentDetail> {
 
     let mut failure_types = Vec::new();
     let mut tool_uses = Vec::new();
+    let mut representative_local_read = None;
+    let mut representative_remote_use = None;
+    let mut representative_edit = None;
+    let mut representative_verify = None;
     let mut used_remote = false;
     let mut used_local_read = false;
     let mut edited = false;
@@ -56,14 +64,22 @@ pub fn audit_show(session_id: &str) -> Option<IncidentDetail> {
     for msg in &session.messages {
         if msg.role == Role::User {
             let t = msg.text().to_lowercase();
-            if !(t.contains("http://") || t.contains("https://") || t.contains("github.com") || t.contains("latest") || t.contains("current") || t.contains("news")) {
+            if !(t.contains("http://")
+                || t.contains("https://")
+                || t.contains("github.com")
+                || t.contains("latest")
+                || t.contains("current")
+                || t.contains("news"))
+            {
                 local_task = true;
             }
         }
         for block in &msg.content {
             if let ContentBlock::ToolUse { name, input, .. } = block {
                 tool_uses.push(match name.as_str() {
-                    "Bash" | "exec_command" => format!("{} {}", name, input["command"].as_str().unwrap_or("")),
+                    "Bash" | "exec_command" => {
+                        format!("{} {}", name, input["command"].as_str().unwrap_or(""))
+                    }
                     _ => format!("{} {}", name, input),
                 });
                 match name.as_str() {
@@ -71,14 +87,30 @@ pub fn audit_show(session_id: &str) -> Option<IncidentDetail> {
                         let path = input["path"].as_str().unwrap_or("");
                         if !path.is_empty() && !path.starts_with("artifact://") {
                             used_local_read = true;
+                            if representative_local_read.is_none() {
+                                representative_local_read = Some(path.to_owned());
+                            }
                         }
                     }
-                    "GhFile" | "GhLs" | "GhSearch" | "WebFetch" | "WebSearch" => used_remote = true,
-                    "Edit" | "MultiEdit" | "Write" | "apply_patch" => edited = true,
+                    "GhFile" | "GhLs" | "GhSearch" | "WebFetch" | "WebSearch" => {
+                        used_remote = true;
+                        if representative_remote_use.is_none() {
+                            representative_remote_use = Some(format!("{} {}", name, input));
+                        }
+                    }
+                    "Edit" | "MultiEdit" | "Write" | "apply_patch" => {
+                        edited = true;
+                        if representative_edit.is_none() {
+                            representative_edit = Some(format!("{} {}", name, input));
+                        }
+                    }
                     "Bash" | "exec_command" => {
                         let command = input["command"].as_str().unwrap_or("");
                         if is_verify_command(command) {
                             verified = true;
+                            if representative_verify.is_none() {
+                                representative_verify = Some(command.to_owned());
+                            }
                         }
                     }
                     _ => {}
@@ -107,6 +139,10 @@ pub fn audit_show(session_id: &str) -> Option<IncidentDetail> {
             .unwrap_or_default(),
         failure_types,
         tool_uses,
+        representative_local_read,
+        representative_remote_use,
+        representative_edit,
+        representative_verify,
     })
 }
 
@@ -127,7 +163,13 @@ pub fn audit_incidents(limit: usize) -> Vec<Incident> {
             }
             if msg.role == Role::User {
                 let t = msg.text().to_lowercase();
-                if !(t.contains("http://") || t.contains("https://") || t.contains("github.com") || t.contains("latest") || t.contains("current") || t.contains("news")) {
+                if !(t.contains("http://")
+                    || t.contains("https://")
+                    || t.contains("github.com")
+                    || t.contains("latest")
+                    || t.contains("current")
+                    || t.contains("news"))
+                {
                     local_task = true;
                 }
             }
@@ -210,41 +252,45 @@ pub fn audit_sessions(limit: usize) -> AuditSummary {
             }
             if msg.role == Role::User {
                 let t = msg.text().to_lowercase();
-                if !(t.contains("http://") || t.contains("https://") || t.contains("github.com") || t.contains("latest") || t.contains("current") || t.contains("news")) {
+                if !(t.contains("http://")
+                    || t.contains("https://")
+                    || t.contains("github.com")
+                    || t.contains("latest")
+                    || t.contains("current")
+                    || t.contains("news"))
+                {
                     local_task = true;
                 }
             }
             for block in &msg.content {
                 match block {
-                    ContentBlock::ToolUse { name, input, .. } => {
-                        match name.as_str() {
-                            "Read" => {
-                                let path = input["path"].as_str().unwrap_or("");
-                                if path.starts_with("artifact://skill/") {
-                                    has_skill_load = true;
-                                } else if !path.is_empty() && !path.starts_with("artifact://") {
-                                    used_local_read = true;
-                                }
+                    ContentBlock::ToolUse { name, input, .. } => match name.as_str() {
+                        "Read" => {
+                            let path = input["path"].as_str().unwrap_or("");
+                            if path.starts_with("artifact://skill/") {
+                                has_skill_load = true;
+                            } else if !path.is_empty() && !path.starts_with("artifact://") {
+                                used_local_read = true;
                             }
-                            "GhFile" | "GhLs" | "GhSearch" | "WebFetch" | "WebSearch" => {
-                                used_remote = true;
-                            }
-                            "Edit" | "MultiEdit" | "Write" | "apply_patch" => {
-                                edited = true;
-                            }
-                            "Bash" | "exec_command" => {
-                                let command = input["command"].as_str().unwrap_or("");
-                                if is_verify_command(command) {
-                                    summary.bash_verify_commands += 1;
-                                    verified = true;
-                                }
-                                if is_file_inspection_command(command) {
-                                    summary.bash_file_inspection_commands += 1;
-                                }
-                            }
-                            _ => {}
                         }
-                    }
+                        "GhFile" | "GhLs" | "GhSearch" | "WebFetch" | "WebSearch" => {
+                            used_remote = true;
+                        }
+                        "Edit" | "MultiEdit" | "Write" | "apply_patch" => {
+                            edited = true;
+                        }
+                        "Bash" | "exec_command" => {
+                            let command = input["command"].as_str().unwrap_or("");
+                            if is_verify_command(command) {
+                                summary.bash_verify_commands += 1;
+                                verified = true;
+                            }
+                            if is_file_inspection_command(command) {
+                                summary.bash_file_inspection_commands += 1;
+                            }
+                        }
+                        _ => {}
+                    },
                     _ => {}
                 }
             }
@@ -311,9 +357,11 @@ fn is_verify_command(command: &str) -> bool {
 }
 
 fn is_file_inspection_command(command: &str) -> bool {
-    ["cat ", "head ", "tail ", "sed ", "awk ", "ls", "tree", "find ", "rg ", "grep ", "wc -"]
-        .iter()
-        .any(|needle| command.contains(needle))
+    [
+        "cat ", "head ", "tail ", "sed ", "awk ", "ls", "tree", "find ", "rg ", "grep ", "wc -",
+    ]
+    .iter()
+    .any(|needle| command.contains(needle))
 }
 
 #[cfg(test)]
