@@ -51,7 +51,6 @@ impl Tool for ReadTool {
                 "- Default reads up to 2000 lines. Use offset/limit for large files.\n",
                 "- Files larger than 10MB require offset and limit parameters.\n",
                 "- Avoid tiny repeated slices (e.g. 30-line chunks). Read a larger window instead.\n",
-                "- Call in parallel for multiple files you need to read.\n",
                 "- For directories, returns entries with trailing / for subdirectories.\n",
                 "- Not for searching — use `Grep` for content search, `Glob` for file search.",
             ).into(),
@@ -219,7 +218,10 @@ impl Tool for ReadTool {
                     });
                 }
                 return Ok(ToolExecution {
-                    result: (format!("(file has {total_lines} lines, offset {offset} is past end)")).into(),
+                    result: (format!(
+                        "(file has {total_lines} lines, offset {offset} is past end)"
+                    ))
+                    .into(),
                     artifact: None,
                 });
             }
@@ -293,9 +295,7 @@ fn read_image(
     let media_type = media_type_from_ext(ext);
     let size_kb = data.len().div_ceil(1024);
     let dims = parse_png_dimensions(&data);
-    let dim_txt = dims
-        .map(|(w, h)| format!("{w}×{h} "))
-        .unwrap_or_default();
+    let dim_txt = dims.map(|(w, h)| format!("{w}×{h} ")).unwrap_or_default();
 
     if !caps.vision {
         // Drop the bytes — no need to save to the session store when
@@ -462,7 +462,12 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(serde_json::json!({"path": file.to_str().unwrap()}), tx, cancel, Default::default())
+            .execute(
+                serde_json::json!({"path": file.to_str().unwrap()}),
+                tx,
+                cancel,
+                Default::default(),
+            )
             .await
             .unwrap();
 
@@ -484,7 +489,12 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(serde_json::json!({"path": file.to_str().unwrap(), "limit": 10}), tx, cancel, Default::default())
+            .execute(
+                serde_json::json!({"path": file.to_str().unwrap(), "limit": 10}),
+                tx,
+                cancel,
+                Default::default(),
+            )
             .await
             .unwrap();
 
@@ -503,7 +513,12 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(serde_json::json!({"path": file.to_str().unwrap(), "limit": 200}), tx, cancel, Default::default())
+            .execute(
+                serde_json::json!({"path": file.to_str().unwrap(), "limit": 200}),
+                tx,
+                cancel,
+                Default::default(),
+            )
             .await
             .unwrap();
 
@@ -520,7 +535,12 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(serde_json::json!({"path": dir.path().to_str().unwrap()}), tx, cancel, Default::default())
+            .execute(
+                serde_json::json!({"path": dir.path().to_str().unwrap()}),
+                tx,
+                cancel,
+                Default::default(),
+            )
             .await
             .unwrap();
 
@@ -541,7 +561,12 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(serde_json::json!({"path": file.to_str().unwrap(), "offset": 50, "limit": 5}), tx, cancel, Default::default())
+            .execute(
+                serde_json::json!({"path": file.to_str().unwrap(), "offset": 50, "limit": 5}),
+                tx,
+                cancel,
+                Default::default(),
+            )
             .await
             .unwrap();
 
@@ -647,7 +672,12 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(serde_json::json!({"path": dir.path().join("mian.rs").to_str().unwrap()}), tx, cancel, Default::default())
+            .execute(
+                serde_json::json!({"path": dir.path().join("mian.rs").to_str().unwrap()}),
+                tx,
+                cancel,
+                Default::default(),
+            )
             .await;
 
         assert!(result.is_err());
@@ -676,7 +706,12 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(serde_json::json!({"path": file.to_str().unwrap(), "limit": 5}), tx, cancel, Default::default())
+            .execute(
+                serde_json::json!({"path": file.to_str().unwrap(), "limit": 5}),
+                tx,
+                cancel,
+                Default::default(),
+            )
             .await
             .unwrap();
 

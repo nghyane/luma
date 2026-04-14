@@ -32,7 +32,6 @@ impl Tool for GrepTool {
                 "- ALWAYS set `include` when the target language is known — 5-10× faster in large repos than scanning every file.\n",
                 "- Results sorted by modification time (newest first).\n",
                 "- Respects .gitignore rules. Skips binary files.\n",
-                "- Call in parallel for multiple independent patterns or paths.\n",
                 "- Not for finding files by name — use `Glob` instead.",
             ).to_owned(),
             parameters: serde_json::json!({

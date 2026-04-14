@@ -24,11 +24,11 @@ impl Tool for GhFileTool {
             name: "GhFile".into(),
             description: concat!(
                 "Fetch a file from a GitHub repository using the gh CLI.\n",
+                "- For remote repositories only — not for files already present in the current workspace.\n",
                 "- Requires `gh` to be installed and authenticated.\n",
                 "- Repo format: owner/name or full GitHub URL.\n",
                 "- When objective is given, returns only relevant code blocks.\n",
-                "- Output clipped to 256KB.\n",
-                "- Call in parallel for multiple files you need to fetch.",
+                "- Output clipped to 256KB.",
             )
             .into(),
             parameters: serde_json::json!({

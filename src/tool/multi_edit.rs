@@ -42,8 +42,7 @@ impl Tool for MultiEditTool {
                 "- Prefer over `Edit` whenever you have more than one change to the same file — each Edit is a full round trip.\n",
                 "- Edits apply sequentially in order; each edit sees the file after previous edits.\n",
                 "- Fail-fast: first mismatch aborts the entire call (no partial writes).\n",
-                "- Each edit has the same rules as Edit: old_string must match exactly once unless replace_all=true; old_string ≠ new_string.\n",
-                "- You MUST read the file before editing.",
+                "- Each edit has the same rules as Edit: old_string must match exactly once unless replace_all=true; old_string ≠ new_string.",
             )
             .into(),
             parameters: serde_json::json!({
@@ -196,7 +195,8 @@ impl Tool for MultiEditTool {
                     if edits.len() > 1 { "s" } else { "" },
                     total_replacements,
                     if total_replacements > 1 { "s" } else { "" }
-                )).into(),
+                ))
+                .into(),
                 artifact: Some(FileChangeArtifact {
                     files: vec![FileArtifact {
                         path: path.display().to_string(),

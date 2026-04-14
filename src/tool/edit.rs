@@ -54,12 +54,11 @@ impl Tool for EditTool {
             name: "Edit".into(),
             description: concat!(
                 "Performs exact string replacement in an existing file.\n",
-                "- You MUST read the file before editing. Never edit code you haven't seen.\n",
                 "- old_string must match exactly one location, or set replace_all=true.\n",
                 "- old_string and new_string must be different.\n",
                 "- Preserve exact indentation from the file when specifying old_string.\n",
                 "- Use replace_all for renaming variables/strings across the file.\n",
-                "- To create new files, use the `write` tool instead.",
+                "- To create new files, use the `Write` tool instead.",
             )
             .into(),
             parameters: serde_json::json!({
@@ -206,7 +205,8 @@ impl Tool for EditTool {
                     path.display(),
                     count,
                     if count > 1 { "s" } else { "" }
-                )).into(),
+                ))
+                .into(),
                 artifact: Some(FileChangeArtifact {
                     files: vec![FileArtifact {
                         path: path.display().to_string(),

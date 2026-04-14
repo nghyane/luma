@@ -24,10 +24,10 @@ impl Tool for GhSearchTool {
             name: "GhSearch".into(),
             description: concat!(
                 "Search code in a GitHub repository using the gh CLI.\n",
+                "- For remote repositories only — not for code already present in the current workspace.\n",
                 "- Requires `gh` to be installed and authenticated.\n",
                 "- Returns matching file paths and URLs.\n",
-                "- Use to find specific code, functions, or patterns in a remote repo.\n",
-                "- Call in parallel for multiple independent queries.",
+                "- Use to find specific code, functions, or patterns in a remote repo.",
             )
             .into(),
             parameters: serde_json::json!({

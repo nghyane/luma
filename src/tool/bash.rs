@@ -53,19 +53,9 @@ impl Tool for BashTool {
             description: concat!(
                 "Execute a shell command. Returns stdout + stderr.\n",
                 "Use for: builds, tests, git operations, running scripts, installing packages.\n",
-                "Do NOT use for file operations — use dedicated tools instead:\n",
-                "  read files: `read` (not cat/head/tail)\n",
-                "  edit files: `edit` (not sed/awk)\n",
-                "  create files: `write` (not echo/cat)\n",
-                "  find files or list directories: `glob` (not find/fd/ls)\n",
-                "  search contents: `grep` (not grep/rg)\n",
-                "Rules:\n",
-                "- Quote paths with spaces.\n",
+                "Do NOT use for file operations — use dedicated tools instead (Read/Write/Edit/Glob/Grep).\n",
                 "- Do NOT use interactive commands (editors, REPLs, password prompts).\n",
-                "- Independent commands: use separate parallel tool calls.\n",
                 "- Dependent commands: chain with && in a single call.\n",
-                "  One chain is cheaper than three round trips — each extra call costs a full model response cycle.\n",
-                "  Example: `cargo check && cargo test parser::` beats two Bash calls.\n",
                 "- Only run git commit/push if explicitly instructed.\n",
                 "- Timeout default 30s, max 120s.",
             )
@@ -136,7 +126,8 @@ impl Tool for BashTool {
                     "(no output)".into()
                 } else {
                     result_str
-                }).into(),
+                })
+                .into(),
                 artifact: None,
             })
         })
@@ -254,7 +245,13 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(serde_json::json!({"command": "echo hello"}), tx, cancel, Default::default()).await
+            .execute(
+                serde_json::json!({"command": "echo hello"}),
+                tx,
+                cancel,
+                Default::default(),
+            )
+            .await
             .unwrap();
 
         assert!(result.result.as_text().contains("hello"));
@@ -268,7 +265,13 @@ mod tests {
         let (tx, _rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(serde_json::json!({"command": "exit 42"}), tx, cancel, Default::default()).await
+            .execute(
+                serde_json::json!({"command": "exit 42"}),
+                tx,
+                cancel,
+                Default::default(),
+            )
+            .await
             .unwrap();
 
         assert!(result.result.as_text().contains("[exit code: 42]"));
@@ -280,7 +283,13 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(serde_json::json!({"command": "rm -rf /"}), tx, cancel, Default::default()).await;
+            .execute(
+                serde_json::json!({"command": "rm -rf /"}),
+                tx,
+                cancel,
+                Default::default(),
+            )
+            .await;
 
         assert!(result.is_err());
     }
@@ -299,7 +308,13 @@ mod tests {
         });
 
         let result = tool
-            .execute(serde_json::json!({"command": "sleep 10"}), tx, cancel, Default::default()).await
+            .execute(
+                serde_json::json!({"command": "sleep 10"}),
+                tx,
+                cancel,
+                Default::default(),
+            )
+            .await
             .unwrap();
 
         assert!(result.result.as_text().contains("[aborted]"));
@@ -319,7 +334,12 @@ mod tests {
         });
 
         let result = tool
-            .execute(serde_json::json!({"command": "ping -n 100 127.0.0.1"}), tx, cancel, Default::default())
+            .execute(
+                serde_json::json!({"command": "ping -n 100 127.0.0.1"}),
+                tx,
+                cancel,
+                Default::default(),
+            )
             .await
             .unwrap();
 

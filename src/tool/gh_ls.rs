@@ -24,10 +24,10 @@ impl Tool for GhLsTool {
             name: "GhLs".into(),
             description: concat!(
                 "List files in a GitHub repository using the gh CLI.\n",
+                "- For remote repositories only — not for files already present in the current workspace.\n",
                 "- Requires `gh` to be installed and authenticated.\n",
                 "- Returns file tree with type (dir/file), path, and URL.\n",
-                "- Use path prefix to filter results to a subdirectory.\n",
-                "- Call in parallel for multiple repos or path prefixes.",
+                "- Use path prefix to filter results to a subdirectory.",
             )
             .into(),
             parameters: serde_json::json!({
