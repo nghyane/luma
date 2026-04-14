@@ -3,6 +3,7 @@
 use crate::config::models::AgentMode;
 use crate::tool::ToolStyle;
 
+const BASE: &str = include_str!("prompt/base.md");
 const RUSH: &str = include_str!("prompt/rush.md");
 const SMART: &str = include_str!("prompt/smart.md");
 const DEEP: &str = include_str!("prompt/deep.md");
@@ -12,22 +13,23 @@ const TOOLS_PATCH: &str = include_str!("prompt/tools_patch.md");
 
 /// Build the system prompt for the given agent mode and tool style.
 ///
-/// Rush is intentionally minimal and does not include a tool-usage block;
-/// the short inline hints in `rush.md` are enough.
+/// Composed as: base (shared policy) + mode behavior + tool-style notes.
+/// Rush is intentionally standalone — it inlines its own safety rules and
+/// does not include a separate tool-usage block.
 pub fn build(mode: AgentMode, style: ToolStyle) -> String {
+    if matches!(mode, AgentMode::Rush) {
+        return RUSH.to_owned();
+    }
     let behavior = match mode {
-        AgentMode::Rush => RUSH,
+        AgentMode::Rush => unreachable!(),
         AgentMode::Smart => SMART,
         AgentMode::Deep => DEEP,
     };
-    if matches!(mode, AgentMode::Rush) {
-        return behavior.to_owned();
-    }
     let tools = match style {
         ToolStyle::Native => TOOLS_NATIVE,
         ToolStyle::Patch => TOOLS_PATCH,
     };
-    format!("{behavior}\n{tools}")
+    format!("{BASE}\n{behavior}\n{tools}")
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -45,15 +47,27 @@ mod tests {
     }
 
     #[test]
+    fn base_in_smart_and_deep() {
+        for mode in &[AgentMode::Smart, AgentMode::Deep] {
+            for style in &[ToolStyle::Native, ToolStyle::Patch] {
+                let p = build(*mode, *style);
+                assert!(p.contains("# Git Safety"), "{mode:?}/{style:?} missing Git Safety");
+                assert!(p.contains("# Evidence and Source of Truth"), "{mode:?}/{style:?} missing Evidence section");
+                assert!(p.contains("# Response Style"), "{mode:?}/{style:?} missing Response Style");
+            }
+        }
+    }
+
+    #[test]
     fn smart_structure() {
         let p = build(AgentMode::Smart, ToolStyle::Native);
         assert!(p.contains("# Agency"));
-        assert!(p.contains("dedicated tools"));
-        assert!(p.contains("`MultiEdit`"));
-        assert!(p.contains("# Git Safety"));
-        assert!(p.contains("# Pragmatism"));
+        assert!(p.contains("# Investigation"));
+        assert!(p.contains("# Verification"));
+        assert!(p.contains("# Error Discipline"));
         assert!(p.contains("# Handling Ambiguity"));
-        assert!(!p.contains("Autonomy"));
+        assert!(!p.contains("# Autonomy"));
+        assert!(!p.contains("# Pragmatism"));
     }
 
     #[test]
@@ -61,7 +75,6 @@ mod tests {
         let p = build(AgentMode::Deep, ToolStyle::Native);
         assert!(p.contains("pragmatic, effective software engineer"));
         assert!(p.contains("# Autonomy"));
-        assert!(p.contains("`MultiEdit`"));
         assert!(p.contains("# Editing Constraints"));
         assert!(!p.contains("# Agency"));
     }

@@ -10,14 +10,6 @@ Persist until the task is fully handled end-to-end: implementation, verification
 
 Before performing file edits, briefly state what you're about to change and why. Keep it to 1-2 sentences.
 
-# Git Safety
-
-- NEVER use destructive commands (`reset --hard`, `checkout -- .`) unless the user explicitly asks.
-- NEVER revert or modify changes you didn't make. Others may be working concurrently.
-- NEVER amend a commit unless explicitly requested.
-- Non-interactive git commands only.
-- Dirty worktree: if unrelated changes are in files you've touched, read carefully and work with them. If in unrelated files, ignore them.
-
 # Pragmatism
 
 - The best change is often the smallest correct change.
@@ -36,11 +28,3 @@ Before performing file edits, briefly state what you're about to change and why.
 # Review Mindset
 
 When reviewing: findings first, ordered by severity with file/line references. Summaries after. No issues → say so explicitly.
-
-# Response Style
-
-- Be concise. No filler openers, no meta commentary, no narrating tool names. Just do the work.
-- Your responses never contain emojis or decorative symbols. Use plain text only.
-- Inline code for paths, commands, function names. Fenced code blocks for snippets.
-- Follow project instructions (AGENTS.md / CLAUDE.md / RULES.md) as ground truth.
-- Verify work before reporting done.
