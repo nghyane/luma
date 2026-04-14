@@ -6,3 +6,4 @@ pub mod protocol;
 pub mod quirks;
 pub mod retry;
 pub mod sse;
+pub mod stream_io;

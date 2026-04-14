@@ -14,7 +14,6 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use futures::StreamExt;
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -26,6 +25,7 @@ use crate::event::Event;
 use crate::event_bus::Sender as EventSender;
 use crate::provider::json_stream::{JsonStringExtractor, streamable_arg_for};
 use crate::provider::retry::ProviderUnauthorized;
+use crate::provider::stream_io::next_chunk_or_cancel;
 use crate::util::uuid_v4;
 
 /// User-Agent Kiro CLI sends. Captured via mitmproxy from a real
@@ -158,11 +158,13 @@ impl KiroRuntime {
         // a one-shot dump at end-of-body.
         let mut decoder = FrameDecoder::new(req.tools);
         let mut byte_stream = resp.bytes_stream();
-        while let Some(chunk) = byte_stream.next().await {
-            if req.cancel.is_cancelled() {
+        loop {
+            let Some(chunk) = next_chunk_or_cancel(&mut byte_stream, &req.cancel)
+                .await
+                .map_err(|e| anyhow::anyhow!("Kiro read error: {e}"))?
+            else {
                 break;
-            }
-            let chunk = chunk.map_err(|e| anyhow::anyhow!("Kiro read error: {e}"))?;
+            };
             decoder.feed(&chunk);
             while let Some(frame) = decoder.pop_frame() {
                 decoder.handle_frame(&frame, &req.tx).await;
