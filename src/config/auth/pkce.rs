@@ -205,7 +205,7 @@ where
         bail!("oauth state mismatch — possible CSRF attempt, aborting");
     }
 
-    let tokens = exchange_code(&flow, &code, &verifier).await?;
+    let tokens = exchange_code(&flow, &code, &verifier, login_option.as_deref()).await?;
     let mut entry = build_account_entry(provider, tokens);
 
     // Kiro: fetch real email via Cognito + SigV4
@@ -502,7 +502,12 @@ struct TokenResponse {
     profile_arn: Option<String>,
 }
 
-async fn exchange_code(flow: &ProviderFlow, code: &str, verifier: &str) -> Result<TokenResponse> {
+async fn exchange_code(
+    flow: &ProviderFlow,
+    code: &str,
+    verifier: &str,
+    login_option: Option<&str>,
+) -> Result<TokenResponse> {
     let client = reqwest::Client::new();
 
     let (body, content_type) = match &flow.exchange_format {
@@ -528,25 +533,40 @@ async fn exchange_code(flow: &ProviderFlow, code: &str, verifier: &str) -> Resul
             ),
             "application/x-www-form-urlencoded",
         ),
-        ExchangeFormat::KiroJson => (
-            // Kiro token exchange uses a fixed redirect_uri (registered in Cognito),
-            // different from the authorize URL's redirect_uri (which is just host:port).
-            // The login_option is appended by the portal after auth completes.
-            serde_json::json!({
-                "code": code,
-                "code_verifier": verifier,
-                "redirect_uri": "http://localhost:3128/oauth/callback?login_option=google",
-            })
-            .to_string(),
-            "application/json",
-        ),
+        ExchangeFormat::KiroJson => {
+            // Kiro token exchange: redirect_uri must be the fixed Cognito
+            // callback `http://localhost:3128/oauth/callback` (independent
+            // of our loopback port) with the `login_option` query param
+            // that the portal appended when redirecting. Upstream clients
+            // send it verbatim — passing the wrong provider (e.g. `google`
+            // for a GitHub sign-in) makes the token endpoint 500 with
+            // "Oops, something went wrong".
+            let opt = login_option.unwrap_or("google");
+            let redirect = format!("http://localhost:3128/oauth/callback?login_option={opt}");
+            (
+                serde_json::json!({
+                    "code": code,
+                    "code_verifier": verifier,
+                    "redirect_uri": redirect,
+                })
+                .to_string(),
+                "application/json",
+            )
+        }
     };
 
-    let res = client
+    let mut req = client
         .post(flow.token_url)
         .header("Content-Type", content_type)
         .header("Accept", "application/json")
-        .body(body)
+        .body(body);
+    // Kiro's token endpoint checks User-Agent on some paths; stay aligned
+    // with the official CLI's simple banner. Other providers don't care
+    // but the header is harmless.
+    if matches!(flow.exchange_format, ExchangeFormat::KiroJson) {
+        req = req.header("User-Agent", "Kiro-CLI");
+    }
+    let res = req
         .send()
         .await
         .context("token exchange network error")?;
