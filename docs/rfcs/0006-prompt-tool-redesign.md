@@ -4,13 +4,13 @@
 | ---------------- | -------------------------------------------- |
 | RFC              | 0006                                         |
 | Title            | Prompt & Tool System Redesign                |
-| Status           | Draft                                        |
+| Status           | Superseded                                   |
 | Author(s)        | nghia                                        |
 | Created          | 2026-04-14                                   |
 | Updated          | 2026-04-14                                   |
 | Tracking issue   | N/A                                          |
 | Supersedes       | N/A                                          |
-| Superseded by    | N/A                                          |
+| Superseded by    | Prompt patches to smart.md and tools_native.md |
 
 ## Summary
 
@@ -367,8 +367,7 @@ SHOULD NOT chứa "call in parallel" nếu rule này đã có trong system promp
 
 SHOULD NOT chứa "read before editing" nếu rule này đã có đủ rõ ở layer khác.
 
-MUST chứa: "prefer dedicated tools over Bash" (native) / "prefer
-exec_command + apply_patch" (patch).
+MUST chứa: "prefer dedicated tools over Bash" (native) / "use Read/Glob/Grep for local inspection and exec_command + apply_patch for shell/editing" (patch).
 
 MUST chứa: "never refer to tool names to the user".
 
@@ -390,6 +389,23 @@ MUST chứa source boundary khi tool có nguy cơ overlap với tool khác:
 - web tools SHOULD say they are for external pages, not local repo content.
 
 MAY chứa boundary guidance ("not for searching — use Grep instead").
+
+### Patch style needs dedicated inspection tools
+
+Session audit shows that pure patch style (`exec_command` + `apply_patch`)
+forces local inspection and search through shell commands (`rg`, `sed`,
+`cat`, python file reads). This is acceptable for mutation, but it makes
+Deep analysis and audit tasks unnecessarily shell-heavy.
+
+Therefore `Patch` SHOULD keep patch-based mutation while gaining a small
+native inspection sidecar:
+
+- `Read`
+- `Glob`
+- `Grep`
+
+This keeps mutation semantics consistent (`apply_patch`) without forcing
+local evidence gathering through shell commands.
 
 ### Tool-style routing API
 

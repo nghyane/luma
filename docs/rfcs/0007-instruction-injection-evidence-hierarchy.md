@@ -4,13 +4,13 @@
 | ---------------- | -------------------------------------------- |
 | RFC              | 0007                                         |
 | Title            | Instruction Injection & Evidence Hierarchy   |
-| Status           | Draft                                        |
+| Status           | Superseded                                   |
 | Author(s)        | nghia                                        |
 | Created          | 2026-04-14                                   |
 | Updated          | 2026-04-14                                   |
 | Tracking issue   | N/A                                          |
 | Supersedes       | N/A                                          |
-| Superseded by    | N/A                                          |
+| Superseded by    | Prompt patches to smart.md and tools_native.md |
 
 ## Summary
 

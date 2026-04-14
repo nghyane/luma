@@ -4,7 +4,7 @@
 | ---------------- | -------------------------------------------- |
 | RFC              | 0005                                         |
 | Title            | Kiro Provider (Amazon Q / CodeWhisperer)     |
-| Status           | Draft                                        |
+| Status           | Implemented                                  |
 | Author(s)        | nghyane                                      |
 | Created          | 2026-04-13                                   |
 | Updated          | 2026-04-13                                   |
