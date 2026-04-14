@@ -6,21 +6,29 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::auth::domain::{AccountHealth, AccountKey, AccountView, AuthFailure, ReloginReason};
-use crate::auth::error::{AuthError, AuthStoreError};
+use crate::auth::error::AuthError;
 use crate::auth::repo::{AuthRepository, AuthStore};
+use crate::auth::selection::{AccountSelectionPolicy, DefaultSelectionPolicy};
 
 pub struct AuthService<R> {
     repo: R,
+    selection: DefaultSelectionPolicy,
 }
 
 impl<R: AuthRepository> AuthService<R> {
     pub fn new(repo: R) -> Self {
-        Self { repo }
+        Self {
+            repo,
+            selection: DefaultSelectionPolicy,
+        }
     }
 
     pub fn list_accounts(&self) -> Result<Vec<AccountView>, AuthError> {
         let store = self.repo.load()?;
-        Ok(store.accounts.iter().map(AccountView::from_record).collect())
+        let selected = self.selection.select(&store.accounts);
+        let mut views: Vec<_> = store.accounts.iter().map(AccountView::from_record).collect();
+        views.sort_by_key(|view| (Some(&view.key) != selected.as_ref(), view.display_name.clone()));
+        Ok(views)
     }
 
     pub fn mark_rate_limited(&self, key: &AccountKey, retry_after_secs: u64) -> Result<(), AuthError> {
@@ -89,7 +97,6 @@ mod tests {
     use super::*;
     use crate::auth::domain::{
         AccountKey, AccountMetadata, AccountRecord, AuthState, AuthVendor, OAuthCredential,
-        ApiKeyCredential,
     };
     use crate::auth::error::AuthStoreError;
     use crate::auth::repo::AuthStore;

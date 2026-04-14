@@ -112,27 +112,6 @@ pub struct Credential {
     pub account_key: Option<crate::auth::domain::AccountKey>,
 }
 
-/// UI-safe snapshot of a pooled account. No secrets.
-#[derive(Debug, Clone)]
-pub struct AccountView {
-    pub label: String,
-    pub provider: AuthVendor,
-    pub email: Option<String>,
-    pub health: AccountHealth,
-    pub disabled: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AccountHealth {
-    Ok,
-    /// Rate-limited; `until_unix` is the earliest time the account can be used.
-    Cooldown {
-        until_unix: u64,
-    },
-    /// Refresh has failed permanently; user must re-login.
-    NeedsRelogin,
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct UsageSnapshot {
     pub requests_remaining: Option<u64>,
@@ -297,14 +276,6 @@ pub fn mark_rate_limited(label: &str, retry_after_secs: u64) {
     });
 }
 
-/// Mark an account as requiring a fresh login. Used when refresh fails in a
-/// way that can't be auto-recovered. The account is skipped by `resolve`
-/// until the user runs `/login`.
-/// Remove an account from the pool permanently.
-pub fn remove_account(label: &str) {
-    with_pool_mut(|p| p.accounts.retain(|a| a.label != label));
-}
-
 /// Mark an account as requiring a fresh login.
 pub fn mark_needs_relogin(label: &str) {
     with_pool_mut(|p| set_needs_relogin(p, label));
@@ -351,16 +322,6 @@ fn derive_api_key_label(vendor: AuthVendor, token: &str) -> String {
     format!("{}:key:{}", vendor.as_str(), suffix)
 }
 
-/// Toggle disabled state for an account. Disabled accounts are shown in
-/// `/accounts` but skipped by `resolve`.
-pub fn toggle_disabled(label: &str) {
-    with_pool_mut(|p| {
-        if let Some(a) = p.accounts.iter_mut().find(|a| a.label == label) {
-            a.disabled = !a.disabled;
-        }
-    });
-}
-
 /// Record the latest usage snapshot for an account, for display on the
 /// `/accounts` screen. Called from the provider layer after a successful
 /// response where rate-limit headers were parsed.
@@ -381,34 +342,6 @@ pub fn record_usage(label: &str, usage: UsageSnapshot) {
             };
         }
     });
-}
-
-/// Snapshot of the pool for the `/accounts` screen. No secrets in the
-/// returned `AccountView`s.
-pub fn list_accounts() -> Vec<AccountView> {
-    pool().accounts.iter().map(account_view).collect()
-}
-
-fn account_view(a: &AccountEntry) -> AccountView {
-    let provider = AuthVendor::from_str(&a.provider).unwrap_or(AuthVendor::Anthropic);
-    let health = if a.needs_relogin {
-        AccountHealth::NeedsRelogin
-    } else if let Some(until) = a.cooldown_until {
-        if until > now_unix() {
-            AccountHealth::Cooldown { until_unix: until }
-        } else {
-            AccountHealth::Ok
-        }
-    } else {
-        AccountHealth::Ok
-    };
-    AccountView {
-        label: a.label.clone(),
-        provider,
-        email: a.email.clone(),
-        health,
-        disabled: a.disabled,
-    }
 }
 
 // =============================================================================
@@ -563,7 +496,7 @@ fn credential_from(e: &AccountEntry) -> Credential {
         } else if let Some(em) = e.email.as_deref().filter(|s| !s.is_empty()) {
             Some(AccountKey::email(v, em))
         } else {
-            None
+            Some(AccountKey::anonymous(v, e.label.clone()))
         }
     });
     Credential {

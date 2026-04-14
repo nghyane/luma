@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::domain::{
-    AccountHealth, AccountKey, AccountMetadata, AccountRecord, AccountSubject, AuthState,
+    AccountHealth, AccountKey, AccountMetadata, AccountRecord, AuthState,
     AuthVendor, ApiKeyCredential, OAuthCredential, ReloginReason, UsageSnapshot,
 };
 use crate::auth::error::AuthStoreError;
@@ -366,6 +366,7 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::domain::AccountSubject;
     use tempfile::TempDir;
 
     fn make_repo(dir: &TempDir) -> FileAuthRepository {

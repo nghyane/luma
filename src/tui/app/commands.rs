@@ -1,7 +1,7 @@
 use super::Action;
 /// App commands — slash commands, mode/model selection, session resume.
 use super::state::PickerMode;
-use crate::auth::domain::{AccountHealth, AccountKey};
+use crate::auth::domain::AccountHealth;
 use crate::auth::repo::FileAuthRepository;
 use crate::auth::service::AuthService;
 use crate::config::models::{self, AgentMode};
@@ -458,7 +458,7 @@ fn format_account_row(a: &crate::auth::domain::AccountView) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::domain::{AccountKey, AccountMetadata, AccountRecord, AccountView, AuthState, AuthVendor, OAuthCredential};
+    use crate::auth::domain::{AccountKey, AccountView, AuthVendor};
 
     fn view(health: AccountHealth, email: Option<&str>) -> AccountView {
         AccountView {

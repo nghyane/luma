@@ -81,12 +81,12 @@ pub async fn run_chat_turn(
         if let Some(rl) = err.downcast_ref::<ProviderRateLimited>() {
             let label = rl.label.clone();
             let retry_after = rl.retry_after_secs;
-            if let Some(key) = &auth_cred.account_key {
-                let _ = AuthService::new(FileAuthRepository::with_default_path())
-                    .mark_rate_limited(key, retry_after);
-            } else {
-                auth::mark_rate_limited(&label, retry_after);
-            }
+            let key = auth_cred
+                .account_key
+                .as_ref()
+                .expect("resolved credential must carry account_key");
+            let _ = AuthService::new(FileAuthRepository::with_default_path())
+                .mark_rate_limited(key, retry_after);
             let _ = tx
                 .send(Event::ToolOutput {
                     name: String::new(),
@@ -113,12 +113,12 @@ pub async fn run_chat_turn(
         if let Some(unauth) = err.downcast_ref::<crate::provider::retry::ProviderUnauthorized>() {
             if auth_cred.is_oauth && unauth.status == 403 {
                 let dead_label = auth_cred.label.clone();
-                if let Some(key) = &auth_cred.account_key {
-                    let _ = AuthService::new(FileAuthRepository::with_default_path())
-                        .mark_auth_failed(key, AuthFailure::Revoked);
-                } else {
-                    auth::mark_needs_relogin(&dead_label);
-                }
+                let key = auth_cred
+                    .account_key
+                    .as_ref()
+                    .expect("resolved credential must carry account_key");
+                let _ = AuthService::new(FileAuthRepository::with_default_path())
+                    .mark_auth_failed(key, AuthFailure::Revoked);
                 let _ = tx
                     .send(Event::ToolOutput {
                         name: String::new(),
