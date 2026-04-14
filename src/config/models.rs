@@ -139,21 +139,15 @@ pub fn context_window(_model_id: &str) -> u64 {
 pub fn resolve_default(mode: AgentMode) -> Option<ModelEntry> {
     let models = all_models();
 
-    // Check saved per-mode preference first. The stored value is either a
-    // `{source}/{id}` composite (current format — unambiguous across
-    // gateways) or a bare id (pre-composite prefs files). Try the
-    // composite path first, fall back to id-only so existing prefs keep
-    // working until the user picks a model once and rewrites the entry.
+    // Check saved per-mode preference first. Stored as `{source}/{id}`;
+    // entries missing the separator are ignored so a malformed prefs
+    // file doesn't silently route to a same-id model on the wrong gateway.
     let prefs = crate::config::prefs::load_mode_prefs(mode);
-    if let Some(saved) = &prefs.model {
-        if let Some((source, id)) = saved.split_once('/')
-            && let Some(m) = models.iter().find(|m| m.source == source && m.id == id)
-        {
-            return Some(m.clone());
-        }
-        if let Some(m) = models.iter().find(|m| &m.id == saved) {
-            return Some(m.clone());
-        }
+    if let Some(saved) = prefs.model.as_deref()
+        && let Some((source, id)) = saved.split_once('/')
+        && let Some(m) = models.iter().find(|m| m.source == source && m.id == id)
+    {
+        return Some(m.clone());
     }
 
     let rules: &[(&[&str], &str)] = match mode {
