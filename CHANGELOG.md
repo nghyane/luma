@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-beta.13] - 2026-04-14
+
+### Added
+- RFC 0009: Auth, Routing, and Provider Runtime Rearchitecture
+- Shared non-SSE stream transport helper for immediate cancellation semantics
+
+### Changed
+- Auth architecture migrated to `AuthService` + `AuthRepository` with `src/auth/oauth/*` providers
+- Claude, Codex, and Kiro login/resolve/refresh now route through the new auth source of truth
+- API key accounts are now persisted and resolved through `AuthService` and `AuthRepository`
+- `config::auth` has been reduced to a thin compatibility shim over the new auth system
+- Streaming stop behavior is now immediate across SSE consumers, Kiro chunk streams, and the TUI abort path
+
+### Removed
+- Legacy singleton-backed auth business logic from `config::auth`
+- Legacy PKCE implementation under `src/config/auth/pkce.rs`
+
 ## [0.4.0-beta.12] - 2026-04-13
 
 ### Fixed
