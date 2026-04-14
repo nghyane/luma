@@ -14,12 +14,12 @@
 
 ## Summary
 
-Redesign phần instruction injection của Luma để tách rõ ba loại context
-khác nhau: (1) local workspace evidence, (2) always-injected project
-memory/instructions, và (3) external prior art. Mục tiêu là ngăn agent
-xác minh local implementation bằng GitHub/web copies, giảm context bloat
-ở tầng always-injected memory, và làm rõ source-of-truth hierarchy trong
-system prompt và tool descriptions.
+Redesign phần instruction injection của Luma để tách rõ taxonomy context
+của harness: local workspace evidence, project context/memory, session
+memory, skills/procedural memory, runtime context, và external prior art.
+Mục tiêu là ngăn agent xác minh local implementation bằng GitHub/web
+copies, giảm context bloat ở tầng always-injected project memory, và làm
+rõ source-of-truth hierarchy trong system prompt và tool descriptions.
 
 ## Motivation
 
@@ -43,6 +43,28 @@ Failure mode thực tế đã xảy ra trong audit: agent dùng GitHub/remote co
 để đọc file vốn đã tồn tại trong workspace local. Đây là bug ở instruction
 system, không phải bug một tool riêng lẻ.
 
+
+### Evidence từ session audit thực tế
+
+Audit local session store (`~/.config/luma/sessions/`) cho thấy đây không
+phải vấn đề lý thuyết:
+
+- Trên 20 session gần nhất, `<project_instructions>` xuất hiện trong
+  `20/20` system prompts.
+- Trên 20 session gần nhất, skill body chỉ được load thực sự trong `1/20`
+  session (`Read("artifact://skill/..." )`).
+- Trên 30 session gần nhất, Bash/exec được dùng `658` lần cho file
+  search/read/listing, so với `181` verify invocations và `129` git
+  invocations.
+- Trên 20 session gần nhất, có ít nhất `2` session trộn local reads với
+  remote/external lookups trong cùng một audit flow, cho thấy ambiguity
+  trong source-selection là có thật, không chỉ là hypothetical.
+
+Các số liệu này hỗ trợ ba kết luận:
+1. project instructions hiện là always-paid context cost;
+2. procedural memory qua skills đang bị underused mạnh;
+3. thiếu source-of-truth hierarchy dẫn tới mixed-source audits.
+
 ### Vấn đề 2: project instructions hiện là always-injected memory không có budget policy
 
 `src/config/instructions.rs`:
@@ -55,8 +77,9 @@ system, không phải bug một tool riêng lẻ.
 
 Trong repo hiện tại, `RULES.md` có kích thước lớn hơn 6 KB. Khi được
 inject nguyên xi mỗi turn, nó hoạt động như một always-loaded memory
-file. Điều này không sai về tính năng, nhưng thiếu policy nên dễ dẫn tới
-context bloat.
+file. Audit session thực tế cho thấy cost này đang bị trả trên mọi sampled
+turns có user work, không chỉ ở edge cases. Điều này không sai về tính
+năng, nhưng thiếu policy nên dễ dẫn tới context bloat.
 
 
 ### Prompt prefix stability và deterministic assembly
@@ -77,6 +100,10 @@ coi các nguyên tắc sau là quan trọng:
 - system prompt chỉ inject catalog (name + description + location)
 - thân skill chỉ được load khi agent gọi `Read("artifact://skill/..." )`
 
+Tuy nhiên audit session cho thấy behavior thực tế vẫn lệch khỏi ý định này:
+skills hiếm khi được load, ngay cả khi task có tín hiệu procedural khá rõ
+(ví dụ commit/simplify flows).
+
 Tuy nhiên current system prompt không có hierarchy rõ ràng giữa:
 - project instructions (always loaded)
 - skills (on demand)
@@ -88,6 +115,18 @@ cho detailed workflows và load khi cần. Luma hiện chưa encode principle
 này vào prompt hoặc config policy.
 
 ## Guide-level explanation
+
+
+### Naming note: project context vs memory
+
+Để tránh nhập nhằng với các hệ memory khác, RFC này dùng:
+- **project context / project memory** cho repo-wide instructions luôn có giá trị;
+- **session memory** cho handoff notes, progress state, persisted artifacts của work hiện tại;
+- **runtime context** cho env facts như cwd, shell, CLI availability;
+- **skills / procedural memory** cho workflows load on demand.
+
+Ở implementation hiện tại, `project_instructions` vẫn là tên code-level hợp
+lý; RFC chỉ làm rõ taxonomy ở tầng design.
 
 ### Mô hình context mới
 
@@ -108,7 +147,11 @@ Tier 4  Skills
         On-demand workflows and specialized instructions
         → load only when task matches the skill
 
-Tier 5  External sources
+Tier 5  Runtime context
+        cwd, shell, git branch, CLI availability, model/runtime flags
+        → per-run environment facts, not project policy
+
+Tier 6  External sources
         GitHub repos, vendor docs, blog posts, web search results
         → prior art, upstream docs, current facts
 ```
@@ -154,7 +197,7 @@ System prompt MUST chứa một section `# Evidence and Source of Truth` với
 
 ### Instruction classes
 
-Luma SHOULD formalize 4 context/instruction classes:
+Luma SHOULD formalize 5 context/instruction classes:
 
 1. **Memory / project instructions**
    - ALWAYS injected.
@@ -173,7 +216,11 @@ Luma SHOULD formalize 4 context/instruction classes:
    - MUST be for specialized workflows, multi-step procedures, or domain
      knowledge not needed on every task.
 
-4. **External references**
+4. **Runtime context**
+   - Per-run facts like cwd, shell, git branch, and available CLIs.
+   - MUST NOT be treated as project policy or durable memory.
+
+5. **External references**
    - Never pre-injected.
    - Fetched only when needed.
 
@@ -198,6 +245,10 @@ Project instruction files SHOULD:
 - avoid duplicated tool-usage guidance already covered by the base system
   prompt;
 - avoid embedding external documentation excerpts.
+
+A practical test from current audits: if a block is paid on every sampled
+turn but rarely changes the chosen workflow, it is a strong candidate to
+move out of always-injected memory.
 
 Project instruction files MUST NOT be silently truncated by the harness.
 If a repository wants smaller always-injected memory, it MUST author a
@@ -245,6 +296,11 @@ Add or update tests for:
 - `WebFetch` mentions external-only boundary;
 - `Read` mentions current workspace preference;
 - instruction discovery semantics remain unchanged.
+
+Add audit baselines (non-CI or fixture-based) for:
+- sampled sessions containing `<project_instructions>`;
+- sampled sessions loading skills via `artifact://skill/...`;
+- ratio of Bash file-inspection commands vs dedicated file tools.
 
 ### Rollout
 
@@ -335,3 +391,6 @@ when the system prompt lacks hierarchy.
 ## Implementation status
 
 Chưa implement.
+
+Session-audit evidence incorporated on 2026-04-14 from local store under
+`~/.config/luma/sessions/`.
