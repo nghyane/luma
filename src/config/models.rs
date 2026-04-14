@@ -22,12 +22,6 @@ pub struct ModelEntry {
     /// err on the safe side (tools fall back to metadata text).
     #[serde(default)]
     pub capabilities: Vec<String>,
-    /// Whether the provider honours prompt caching on this model. Used
-    /// by the cache-breakpoint quirk to gate the Anthropic-style
-    /// breakpoint injection per model. Unknown = `None` so the caller
-    /// keeps its existing per-gateway default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_caching: Option<bool>,
 }
 
 /// Agent mode.
@@ -68,8 +62,7 @@ pub(crate) struct Snapshot {
     #[serde(default)]
     synced_at: u64,
     /// luma version that wrote the snapshot. Used to force a re-sync
-    /// when upgrading catalogs or adding new ModelEntry fields that
-    /// older snapshots lack (e.g. `prompt_caching`).
+    /// when upgrading catalogs or adding new ModelEntry fields.
     #[serde(default)]
     luma_version: String,
 }
@@ -122,9 +115,6 @@ fn overlay_metadata(models: Vec<ModelEntry>) -> Vec<ModelEntry> {
                 }
                 if model.max_output_tokens.is_none() {
                     model.max_output_tokens = extra.max_output_tokens;
-                }
-                if model.prompt_caching.is_none() {
-                    model.prompt_caching = extra.prompt_caching;
                 }
             }
             model
@@ -305,7 +295,6 @@ async fn scan_anthropic() -> Result<Vec<ModelEntry>> {
                         context_window: None,
                         max_output_tokens: None,
                         capabilities: Vec::new(),
-                        prompt_caching: None,
                     })
                 })
                 .collect()
@@ -343,7 +332,6 @@ async fn scan_codex() -> Result<Vec<ModelEntry>> {
                         context_window: m["context_window"].as_u64(),
                         max_output_tokens: m["max_output_tokens"].as_u64(),
                         capabilities: Vec::new(),
-                        prompt_caching: None,
                     })
                 })
                 .collect()
@@ -403,14 +391,12 @@ async fn scan_kiro() -> Result<Vec<ModelEntry>> {
                     } else {
                         Vec::new()
                     };
-                    let prompt_caching = m["promptCaching"]["supportsPromptCaching"].as_bool();
                     Some(ModelEntry {
                         id,
                         source: "kiro".into(),
                         context_window: m["tokenLimits"]["maxInputTokens"].as_u64(),
                         max_output_tokens: m["tokenLimits"]["maxOutputTokens"].as_u64(),
                         capabilities,
-                        prompt_caching,
                     })
                 })
                 .collect()
@@ -449,7 +435,6 @@ mod tests {
             context_window: None,
             max_output_tokens: Some(123),
             capabilities: Vec::new(),
-            prompt_caching: None,
         }]);
         let model = &models[0];
         // context_window filled from catalog, max_output_tokens preserved.
