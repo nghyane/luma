@@ -1,6 +1,6 @@
 /// Event dispatch — routes events to document (model) or view.
 use super::state::{PickerMode, RunState};
-use super::{ABORT_HINT_TICKS, Action};
+use super::Action;
 use crate::auth::domain::AccountKey;
 use crate::auth::repo::FileAuthRepository;
 use crate::auth::service::AuthService;
@@ -95,13 +95,6 @@ impl super::App {
                     return Action::Continue;
                 }
                 self.view.tick();
-                if self.agent.state == RunState::PendingAbort {
-                    self.agent.abort_countdown = self.agent.abort_countdown.saturating_sub(1);
-                    if self.agent.abort_countdown == 0 {
-                        self.agent.state = RunState::Streaming;
-                    }
-                    return Action::Render;
-                }
                 if matches!(
                     self.agent.state,
                     RunState::Streaming | RunState::PendingAbort
@@ -278,17 +271,12 @@ impl super::App {
 
         // Esc: interrupt streaming only
         if is_esc {
-            if self.agent.state == RunState::PendingAbort {
+            if self.agent.state == RunState::Streaming {
                 self.agent.state = RunState::Aborting;
                 self.doc.abort();
                 if let Some(c) = &self.agent.cancel {
                     c.cancel();
                 }
-                return Action::Render;
-            }
-            if self.agent.state == RunState::Streaming {
-                self.agent.state = RunState::PendingAbort;
-                self.agent.abort_countdown = ABORT_HINT_TICKS;
                 return Action::Render;
             }
         }

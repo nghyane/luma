@@ -183,7 +183,7 @@ impl Provider for OpenAIResponsesRuntime {
                 &cancel,
             )
             .await?;
-            consume_responses_stream(sse, tools, &tx).await
+            consume_responses_stream(sse, tools, &tx, &cancel).await
         })
     }
 }
@@ -193,6 +193,7 @@ async fn consume_responses_stream(
     sse: SseEventStream,
     tools: &[ToolSchema],
     tx: &EventSender,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<StreamResponse> {
     let mut events = decode_responses_sse(sse, tools.to_vec());
     let mut blocks: Vec<ContentBlock> = Vec::new();
@@ -200,7 +201,14 @@ async fn consume_responses_stream(
     let mut stop_reason = StopReason::default();
     let mut saw_done = false;
 
-    while let Some(evt) = events.next().await {
+    loop {
+        let evt = tokio::select! {
+            _ = cancel.cancelled() => break,
+            evt = events.next() => evt,
+        };
+        let Some(evt) = evt else {
+            break;
+        };
         match evt? {
             StreamEvent::TextDelta(t) => {
                 let _ = tx.send(Event::Token(t)).await;
@@ -769,7 +777,10 @@ mod tests {
 
         let stream = stream_from_events(events, true);
         let (tx, mut rx) = event_bus::channel();
-        let result = consume_responses_stream(stream, &[], &tx).await.unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = consume_responses_stream(stream, &[], &tx, &cancel)
+            .await
+            .unwrap();
 
         assert_eq!(result.message.text(), "Hello world");
         assert_eq!(result.stop_reason, StopReason::EndTurn);
@@ -833,7 +844,8 @@ mod tests {
 
         let stream = stream_from_events(events, true);
         let (tx, mut rx) = event_bus::channel();
-        let result = consume_responses_stream(stream, &[tool], &tx)
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = consume_responses_stream(stream, &[tool], &tx, &cancel)
             .await
             .unwrap();
 
@@ -868,7 +880,8 @@ mod tests {
 
         let stream = stream_from_events(events, false);
         let (tx, _rx) = event_bus::channel();
-        let err = consume_responses_stream(stream, &[], &tx)
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let err = consume_responses_stream(stream, &[], &tx, &cancel)
             .await
             .unwrap_err()
             .to_string();
@@ -964,10 +977,7 @@ mod tests {
         assert_eq!(output[1]["type"], "input_image");
         // Responses API consumes images as data URLs in the `image_url`
         // field — no separate base64/media_type split like Anthropic.
-        assert_eq!(
-            output[1]["image_url"],
-            "data:image/png;base64,BASE64DATA"
-        );
+        assert_eq!(output[1]["image_url"], "data:image/png;base64,BASE64DATA");
     }
 
     #[test]
@@ -979,9 +989,7 @@ mod tests {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "call_1".into(),
                 content: ToolResultBody::Items(vec![
-                    ToolResultItem::Text {
-                        text: "txt".into(),
-                    },
+                    ToolResultItem::Text { text: "txt".into() },
                     ToolResultItem::Image {
                         media_type: "image/png".into(),
                         id: "missing".into(),

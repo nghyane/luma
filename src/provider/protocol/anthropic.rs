@@ -220,7 +220,14 @@ impl Provider for AnthropicRuntime {
             let mut stop_reason = StopReason::default();
             let mut saw_done = false;
 
-            while let Some(evt) = events.next().await {
+            loop {
+                let evt = tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    evt = events.next() => evt,
+                };
+                let Some(evt) = evt else {
+                    break;
+                };
                 match evt? {
                     StreamEvent::TextDelta(t) => {
                         let _ = tx.send(Event::Token(t)).await;
@@ -1128,9 +1135,7 @@ mod tests {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "tc_1".into(),
                 content: ToolResultBody::Items(vec![
-                    ToolResultItem::Text {
-                        text: "txt".into(),
-                    },
+                    ToolResultItem::Text { text: "txt".into() },
                     ToolResultItem::Image {
                         media_type: "image/png".into(),
                         id: "missing".into(),

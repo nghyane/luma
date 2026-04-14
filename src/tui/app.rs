@@ -26,7 +26,6 @@ use termina::Terminal as _;
 
 const TICK_INTERVAL: Duration = Duration::from_millis(80);
 const SCROLL_STEP: usize = 3;
-const ABORT_HINT_TICKS: u8 = 25;
 const DRAIN_BUDGET: usize = 256;
 
 const LOGO: &[&str] = &[

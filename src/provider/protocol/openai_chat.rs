@@ -114,7 +114,7 @@ impl Provider for OpenAIChatRuntime {
             )
             .await?;
 
-            consume_chat_stream(sse, &tx, &self.model).await
+            consume_chat_stream(sse, &tx, &self.model, &cancel).await
         })
     }
 }
@@ -125,6 +125,7 @@ async fn consume_chat_stream(
     sse: SseEventStream,
     tx: &crate::event_bus::Sender,
     model: &str,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<StreamResponse> {
     let mut events = decode_chat_sse(sse);
     let mut blocks: Vec<ContentBlock> = Vec::new();
@@ -132,7 +133,14 @@ async fn consume_chat_stream(
     let mut stop_reason = StopReason::default();
     let mut saw_done = false;
 
-    while let Some(evt) = events.next().await {
+    loop {
+        let evt = tokio::select! {
+            _ = cancel.cancelled() => break,
+            evt = events.next() => evt,
+        };
+        let Some(evt) = evt else {
+            break;
+        };
         match evt? {
             StreamEvent::TextDelta(t) => {
                 let _ = tx.send(Event::Token(t)).await;
