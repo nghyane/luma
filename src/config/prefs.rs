@@ -80,10 +80,13 @@ pub fn save_mode(mode: AgentMode) {
     update_prefs(|p| p.mode = mode.as_str().to_owned());
 }
 
-/// Save model for a mode.
-pub fn save_mode_model(mode: AgentMode, model: &str) {
+/// Save model for a mode. `key` is the composite `{source}/{id}` the
+/// picker emits — stored verbatim so restoring the preference routes to
+/// the exact gateway the user picked, even for ids that appear under
+/// multiple sources (e.g. `glm-5` on both `kiro` and `opencode-go`).
+pub fn save_mode_model(mode: AgentMode, key: &str) {
     update_prefs(|p| {
-        p.modes.entry(mode.as_str().to_owned()).or_default().model = Some(model.to_owned());
+        p.modes.entry(mode.as_str().to_owned()).or_default().model = Some(key.to_owned());
     });
 }
 

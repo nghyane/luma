@@ -191,7 +191,10 @@ impl super::App {
             let thinking_caps = self.current_thinking_capabilities();
             self.config.thinking = thinking_caps.coerce(self.config.thinking);
             crate::config::prefs::save_thinking(self.config.thinking);
-            crate::config::prefs::save_mode_model(self.config.mode, model_id);
+            // Persist the composite key so the prefs-restore path on next
+            // launch routes back to the exact (source, id) the user picked
+            // — bare ids can be ambiguous across sources.
+            crate::config::prefs::save_mode_model(self.config.mode, key);
             // Config drift is committed to the agent loop at submit time —
             // see `commit_pending_config`. Keep this path local-only so
             // picking a model doesn't mutate the transcript.
