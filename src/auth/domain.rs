@@ -73,6 +73,7 @@ pub enum AccountSubject {
     AccountId(String),
     Email(String),
     ExternalUserId(String),
+    ApiKeyFingerprint(String),
     Anonymous(String),
 }
 

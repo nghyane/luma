@@ -6,8 +6,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::auth::domain::{
-    AccountHealth, AccountKey, AccountMetadata, AccountRecord, AccountView, AuthFailure,
-    AuthState, AuthVendor, OAuthCredential, ReloginReason,
+    AccountHealth, AccountKey, AccountMetadata, AccountRecord, AccountSubject, AccountView,
+    ApiKeyCredential, AuthFailure, AuthState, AuthVendor, OAuthCredential, ReloginReason,
 };
 use crate::auth::error::AuthError;
 use crate::auth::repo::{AuthRepository, AuthStore};
@@ -104,6 +104,33 @@ impl<R: AuthRepository> AuthService<R> {
             .map(AccountView::from_record)
             .ok_or(AuthError::ReadBackFailed)?;
         Ok(saved)
+    }
+
+    pub fn save_api_key(&self, vendor: AuthVendor, token: &str) -> Result<AccountView, AuthError> {
+        let fingerprint = api_key_fingerprint(token);
+        let display_name = format!("{}:key:{}", vendor.as_str(), fingerprint);
+        let record = AccountRecord {
+            key: AccountKey {
+                vendor,
+                subject: AccountSubject::ApiKeyFingerprint(fingerprint),
+            },
+            display_name,
+            email: None,
+            auth: AuthState::ApiKey(ApiKeyCredential {
+                token: token.to_owned(),
+            }),
+            health: AccountHealth::Active,
+            metadata: AccountMetadata::default(),
+        };
+
+        self.mutate(|store| upsert_account(store, record.clone()))?;
+        let store = self.repo.load()?;
+        store
+            .accounts
+            .iter()
+            .find(|a| a.key == record.key)
+            .map(AccountView::from_record)
+            .ok_or(AuthError::ReadBackFailed)
     }
 
     pub async fn refresh_credential(
@@ -255,6 +282,15 @@ fn credential_from_record(record: AccountRecord) -> crate::config::auth::Credent
         profile_arn: record.metadata.profile_arn,
         account_key: Some(record.key),
     }
+}
+
+fn api_key_fingerprint(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let core = token.strip_prefix("sk-").unwrap_or(token);
+    let mut hasher = Sha256::new();
+    hasher.update(core.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    digest[..12.min(digest.len())].to_owned()
 }
 
 // =============================================================================

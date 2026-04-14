@@ -241,7 +241,7 @@ where
 /// tokens. If the current candidate's refresh fails, the account is flagged
 /// and the next healthy candidate is tried in the same call.
 pub async fn resolve(provider: AuthVendor) -> Result<Credential> {
-    if matches!(provider, AuthVendor::Anthropic | AuthVendor::OpenAI | AuthVendor::Kiro) {
+    if matches!(provider, AuthVendor::Anthropic | AuthVendor::OpenAI | AuthVendor::Kiro | AuthVendor::OpenCodeGo) {
         return crate::auth::service::AuthService::new(
             crate::auth::repo::FileAuthRepository::with_default_path(),
         )
@@ -261,7 +261,7 @@ pub async fn resolve(provider: AuthVendor) -> Result<Credential> {
 /// token (raw API keys); there is nothing to refresh and re-reading the
 /// same dead key would just loop.
 pub async fn force_refresh(provider: AuthVendor) -> Result<Credential> {
-    if matches!(provider, AuthVendor::Anthropic | AuthVendor::OpenAI | AuthVendor::Kiro) {
+    if matches!(provider, AuthVendor::Anthropic | AuthVendor::OpenAI | AuthVendor::Kiro | AuthVendor::OpenCodeGo) {
         let service = crate::auth::service::AuthService::new(
             crate::auth::repo::FileAuthRepository::with_default_path(),
         );
