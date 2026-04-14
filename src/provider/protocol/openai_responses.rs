@@ -12,8 +12,6 @@ use anyhow::Result;
 use futures::stream::{BoxStream, StreamExt};
 use std::collections::{BTreeMap, VecDeque};
 
-const CODEX_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
-
 /// Per-output-index tool-call accumulator used while the Codex Responses
 /// stream is in flight. Converted to `ContentBlock::ToolUse` at commit time.
 #[derive(Default, Clone, Debug)]
@@ -27,6 +25,7 @@ struct PendingTool {
 /// Codex provider using the Responses API.
 pub struct OpenAIResponsesRuntime {
     model: String,
+    base_url: String,
     api_key: String,
     account_id: Option<String>,
     thinking: ThinkingLevel,
@@ -35,10 +34,14 @@ pub struct OpenAIResponsesRuntime {
 }
 
 impl OpenAIResponsesRuntime {
-    /// Create with model, token, optional account ID, session ID for cache
-    /// routing, and pool account label.
+    /// Create with model, gateway base URL, token, optional account ID,
+    /// session ID for cache routing, and pool account label. `base_url`
+    /// is the gateway's scheme+host+path-prefix with no trailing slash
+    /// (e.g. `https://chatgpt.com/backend-api/codex`); the runtime
+    /// appends `/responses`.
     pub fn new(
         model: &str,
+        base_url: &str,
         api_key: &str,
         account_id: Option<String>,
         session_id: &str,
@@ -46,6 +49,7 @@ impl OpenAIResponsesRuntime {
     ) -> Self {
         Self {
             model: model.to_owned(),
+            base_url: base_url.to_owned(),
             api_key: api_key.to_owned(),
             account_id,
             thinking: ThinkingLevel::Low,
@@ -168,10 +172,11 @@ impl Provider for OpenAIResponsesRuntime {
                 header_vec.push(("session_id", sid.as_str()));
             }
 
+            let endpoint = format!("{}/responses", self.base_url);
             let sse = crate::provider::sse::post_sse(
                 "codex",
                 &self.account_label,
-                CODEX_ENDPOINT,
+                &endpoint,
                 &header_vec,
                 &body,
                 &tx,

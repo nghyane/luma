@@ -39,6 +39,7 @@ impl Gateway for Codex {
     ) -> Box<dyn Provider> {
         Box::new(OpenAIResponsesRuntime::new(
             &binding.model_id,
+            &binding.base_url,
             &credential.token,
             credential.account_id.clone(),
             session_id,
