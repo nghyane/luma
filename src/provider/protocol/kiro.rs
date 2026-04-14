@@ -261,6 +261,7 @@ fn msg_text(msg: &Message) -> String {
 }
 
 fn build_history(messages: &[Message], model_id: &str) -> Vec<serde_json::Value> {
+    let env_state = build_env_state();
     let mut result = Vec::new();
     for msg in messages {
         match msg.role {
@@ -280,6 +281,7 @@ fn build_history(messages: &[Message], model_id: &str) -> Vec<serde_json::Value>
                             "origin": "KIRO_CLI",
                             "modelId": model_id,
                             "userInputMessageContext": {
+                                "envState": env_state,
                                 "toolResults": tool_results,
                             }
                         }
@@ -290,7 +292,9 @@ fn build_history(messages: &[Message], model_id: &str) -> Vec<serde_json::Value>
                             "content": msg_text(msg),
                             "origin": "KIRO_CLI",
                             "modelId": model_id,
-                            "userInputMessageContext": {}
+                            "userInputMessageContext": {
+                                "envState": env_state,
+                            }
                         }
                     }));
                 }
@@ -311,6 +315,7 @@ fn build_history(messages: &[Message], model_id: &str) -> Vec<serde_json::Value>
 }
 
 fn build_current_message(msg: &Message, model_id: &str, tool_specs: &[serde_json::Value]) -> serde_json::Value {
+    let env_state = build_env_state();
     let tool_results = extract_tool_results(msg);
     if !tool_results.is_empty() {
         json!({
@@ -319,6 +324,7 @@ fn build_current_message(msg: &Message, model_id: &str, tool_specs: &[serde_json
                 "origin": "KIRO_CLI",
                 "modelId": model_id,
                 "userInputMessageContext": {
+                    "envState": env_state,
                     "tools": tool_specs,
                     "toolResults": tool_results,
                 }
@@ -331,11 +337,37 @@ fn build_current_message(msg: &Message, model_id: &str, tool_specs: &[serde_json
                 "origin": "KIRO_CLI",
                 "modelId": model_id,
                 "userInputMessageContext": {
+                    "envState": env_state,
                     "tools": tool_specs,
                 }
             }
         })
     }
+}
+
+/// `envState` payload Q Developer CLI ships on every `userInputMessage`.
+/// Captured via mitmproxy: just `{operatingSystem, currentWorkingDirectory}`.
+/// Resolved per call so the server sees the current shell cwd if the user
+/// `cd`s mid-session; a stable string (not a random fallback) keeps the
+/// request bytes identical across turns at the same cwd for prompt cache.
+fn build_env_state() -> serde_json::Value {
+    let os = if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "unknown"
+    };
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))
+        .unwrap_or_default();
+    json!({
+        "operatingSystem": os,
+        "currentWorkingDirectory": cwd,
+    })
 }
 
 fn extract_tool_uses(msg: &Message) -> Vec<serde_json::Value> {
@@ -562,7 +594,10 @@ impl<'a> FrameDecoder<'a> {
                     // Server value occasionally drifts slightly above 100
                     // on saturation; clamp for the UI.
                     let clamped = pct.clamp(0.0, 100.0) as f32;
+                    crate::dbg_log!("kiro contextUsageEvent pct={clamped}");
                     let _ = tx.send(Event::ContextUsage(clamped)).await;
+                } else {
+                    crate::dbg_log!("kiro contextUsageEvent missing pct: {v}");
                 }
             }
             _ => {}
@@ -920,5 +955,40 @@ mod tests {
             curr_tools[0]["toolSpecification"]["name"].as_str(),
             Some("fs_read")
         );
+    }
+
+    #[test]
+    fn every_user_turn_carries_env_state() {
+        // Q Developer CLI sends `envState: { operatingSystem, currentWorkingDirectory }`
+        // on every userInputMessage. Missing it trims ~100 bytes but, more
+        // importantly, drops a free signal the server uses to disambiguate
+        // file-path questions — keep parity with the official client.
+        let msgs = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: "hi".into() }],
+                origin: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text { text: "yo".into() }],
+                origin: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: "check cwd".into() }],
+                origin: None,
+            },
+        ];
+        let body = build_request_body(&msgs, "auto", "arn:x", &[], "cid", "kid");
+        // history[0] is the past user turn.
+        let past_ctx = &body["conversationState"]["history"][0]["userInputMessage"]
+            ["userInputMessageContext"];
+        assert!(past_ctx["envState"]["operatingSystem"].is_string());
+        assert!(past_ctx["envState"]["currentWorkingDirectory"].is_string());
+        // currentMessage.
+        let curr_ctx = &body["conversationState"]["currentMessage"]["userInputMessage"]
+            ["userInputMessageContext"];
+        assert!(curr_ctx["envState"]["operatingSystem"].is_string());
     }
 }

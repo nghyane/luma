@@ -251,6 +251,9 @@ impl super::App {
                     .map(|m| models::context_window(&m.id))
                     .unwrap_or(200_000);
                 let tokens = ((f64::from(pct) / 100.0) * ctx_window as f64).round() as u64;
+                crate::dbg_log!(
+                    "dispatch ContextUsage pct={pct} window={ctx_window} tokens={tokens}"
+                );
                 self.ui.status.set_context(tokens, pct.round() as u8);
                 Action::Render
             }
