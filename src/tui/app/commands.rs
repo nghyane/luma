@@ -62,15 +62,17 @@ impl super::App {
                     self.doc.error("no models — run 'luma sync'");
                 } else {
                     self.config.picker_mode = PickerMode::Model;
-                    let current = self
+                    let current_key = self
                         .config
                         .model
                         .as_ref()
-                        .map(|m| m.id.as_str())
-                        .unwrap_or("");
-                    self.ui
-                        .picker
-                        .open(all.iter().map(|m| m.id.clone()).collect(), current);
+                        .map(|m| format!("{}/{}", m.source, m.id))
+                        .unwrap_or_default();
+                    let items: Vec<String> = all
+                        .iter()
+                        .map(|m| format!("{}/{}", m.source, m.id))
+                        .collect();
+                    self.ui.picker.open(items, &current_key);
                 }
                 Action::Render
             }
@@ -172,9 +174,19 @@ impl super::App {
         self.ui.status.set_pool_health(health);
     }
 
-    pub(super) fn select_model(&mut self, model_id: &str) {
+    pub(super) fn select_model(&mut self, key: &str) {
+        // Picker items are formatted as `{source}/{id}`. Split on the first
+        // `/` so we match the exact (source, id) pair — some ids (e.g.
+        // `glm-5`, `minimax-m2.5`) appear under multiple sources, and a
+        // plain id-only lookup would silently route to the wrong gateway.
+        let Some((source, model_id)) = key.split_once('/') else {
+            return;
+        };
         let all = models::all_models();
-        if let Some(m) = all.iter().find(|m| m.id == model_id) {
+        if let Some(m) = all
+            .iter()
+            .find(|m| m.source == source && m.id == model_id)
+        {
             self.config.model = Some(m.clone());
             let thinking_caps = self.current_thinking_capabilities();
             self.config.thinking = thinking_caps.coerce(self.config.thinking);
