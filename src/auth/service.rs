@@ -167,6 +167,38 @@ impl<R: AuthRepository> AuthService<R> {
         })
     }
 
+    pub async fn resolve_credential(
+        &self,
+        vendor: AuthVendor,
+    ) -> Result<crate::config::auth::Credential, AuthError> {
+        let store = self.repo.load()?;
+        let candidates: Vec<_> = store
+            .accounts
+            .iter()
+            .filter(|a| a.key.vendor == vendor)
+            .cloned()
+            .collect();
+        let key = self
+            .selection
+            .select(&candidates)
+            .ok_or(AuthError::NoEligibleAccount {
+                vendor: vendor.as_str().to_owned(),
+            })?;
+        let record = candidates
+            .into_iter()
+            .find(|a| a.key == key)
+            .ok_or(AuthError::AccountNotFound)?;
+
+        if let AuthState::OAuth(cred) = &record.auth
+            && is_expired(cred.expires_at)
+            && cred.refresh_token.is_some()
+        {
+            return self.refresh_credential(&record.key).await;
+        }
+
+        Ok(credential_from_record(record))
+    }
+
     // -------------------------------------------------------------------------
 
     fn mutate(&self, f: impl FnOnce(&mut AuthStore)) -> Result<(), AuthError> {
@@ -193,6 +225,36 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn is_expired(expires_at: Option<u64>) -> bool {
+    const EXPIRY_GRACE_SECS: u64 = 300;
+    let Some(ts) = expires_at else {
+        return false;
+    };
+    now_unix() >= ts.saturating_sub(EXPIRY_GRACE_SECS)
+}
+
+fn credential_from_record(record: AccountRecord) -> crate::config::auth::Credential {
+    let (token, is_oauth, account_id) = match record.auth {
+        AuthState::OAuth(cred) => (
+            cred.access_token,
+            true,
+            match &record.key.subject {
+                crate::auth::domain::AccountSubject::AccountId(id) => Some(id.clone()),
+                _ => None,
+            },
+        ),
+        AuthState::ApiKey(cred) => (cred.token, false, None),
+    };
+    crate::config::auth::Credential {
+        token,
+        is_oauth,
+        account_id,
+        label: record.display_name,
+        profile_arn: record.metadata.profile_arn,
+        account_key: Some(record.key),
+    }
 }
 
 // =============================================================================

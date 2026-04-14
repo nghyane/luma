@@ -241,6 +241,14 @@ where
 /// tokens. If the current candidate's refresh fails, the account is flagged
 /// and the next healthy candidate is tried in the same call.
 pub async fn resolve(provider: AuthVendor) -> Result<Credential> {
+    if matches!(provider, AuthVendor::OpenAI | AuthVendor::Kiro) {
+        return crate::auth::service::AuthService::new(
+            crate::auth::repo::FileAuthRepository::with_default_path(),
+        )
+        .resolve_credential(provider.into())
+        .await
+        .map_err(anyhow::Error::from);
+    }
     resolve_inner(provider, false).await
 }
 
@@ -253,6 +261,24 @@ pub async fn resolve(provider: AuthVendor) -> Result<Credential> {
 /// token (raw API keys); there is nothing to refresh and re-reading the
 /// same dead key would just loop.
 pub async fn force_refresh(provider: AuthVendor) -> Result<Credential> {
+    if matches!(provider, AuthVendor::OpenAI | AuthVendor::Kiro) {
+        let service = crate::auth::service::AuthService::new(
+            crate::auth::repo::FileAuthRepository::with_default_path(),
+        );
+        let cred = service
+            .resolve_credential(provider.into())
+            .await
+            .map_err(anyhow::Error::from)?;
+        let key = cred
+            .account_key
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("resolved credential missing account key"))?
+            .clone();
+        return service
+            .refresh_credential(&key)
+            .await
+            .map_err(anyhow::Error::from);
+    }
     let entry = pick_candidate(provider)
         .ok_or_else(|| anyhow::anyhow!("no {} account in pool", provider.as_str()))?;
     if !entry.is_oauth || entry.refresh_token.is_none() {
