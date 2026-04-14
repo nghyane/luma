@@ -3,6 +3,9 @@ use super::{
     OPENAI_OAUTH_ENDPOINT, should_use_claude_ai_auth,
 };
 
+const KIRO_REFRESH_ENDPOINT: &str =
+    "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken";
+
 pub struct RefreshRequest {
     pub url: &'static str,
     pub body: String,
@@ -53,6 +56,14 @@ impl AuthVendor {
                 // OpenCode Go uses long-lived API keys — no refresh flow.
                 // Callers MUST gate build_refresh_request on is_oauth.
                 unreachable!("opencode-go does not use OAuth refresh")
+            }
+            Self::Kiro => {
+                let body = serde_json::json!({ "refreshToken": refresh_token });
+                RefreshRequest {
+                    url: KIRO_REFRESH_ENDPOINT,
+                    body: body.to_string(),
+                    content_type: "application/json",
+                }
             }
         }
     }

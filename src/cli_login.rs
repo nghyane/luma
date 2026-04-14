@@ -62,10 +62,12 @@ impl Choice {
             Self::Oauth(AuthVendor::Anthropic) => "Claude        (OAuth · Claude.ai subscriber)",
             Self::Oauth(AuthVendor::OpenAI) => "Codex         (OAuth · ChatGPT)",
             Self::ApiKey(AuthVendor::OpenCodeGo) => "OpenCode Go   (API key)",
+            Self::Oauth(AuthVendor::Kiro) => "Kiro          (OAuth · Google/GitHub)",
             // Placeholders — no other combinations wired today.
             Self::Oauth(AuthVendor::OpenCodeGo) => "OpenCode Go   (OAuth)",
             Self::ApiKey(AuthVendor::Anthropic) => "Anthropic     (API key)",
             Self::ApiKey(AuthVendor::OpenAI) => "OpenAI        (API key)",
+            Self::ApiKey(AuthVendor::Kiro) => "Kiro          (API key)",
         }
     }
 }
@@ -74,6 +76,7 @@ impl Choice {
 const CHOICES: &[Choice] = &[
     Choice::Oauth(AuthVendor::Anthropic),
     Choice::Oauth(AuthVendor::OpenAI),
+    Choice::Oauth(AuthVendor::Kiro),
     Choice::ApiKey(AuthVendor::OpenCodeGo),
 ];
 

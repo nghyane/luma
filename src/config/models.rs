@@ -170,7 +170,7 @@ pub fn resolve_default(mode: AgentMode) -> Option<ModelEntry> {
 
 /// Sync models from provider APIs, then overlay bundled metadata.
 pub async fn sync() -> Result<usize> {
-    let (anthropic, codex) = tokio::join!(scan_anthropic(), scan_codex());
+    let (anthropic, codex, kiro) = tokio::join!(scan_anthropic(), scan_codex(), scan_kiro());
 
     let mut models = Vec::new();
     match anthropic {
@@ -184,6 +184,13 @@ pub async fn sync() -> Result<usize> {
     match codex {
         Ok(found) => models.extend(found),
         Err(_) => models.extend(builtin_models().into_iter().filter(|m| m.source == "codex")),
+    }
+    match kiro {
+        Ok(found) => models.extend(found),
+        Err(e) => {
+            crate::dbg_log!("scan_kiro failed: {e}");
+            models.extend(builtin_models().into_iter().filter(|m| m.source == "kiro"))
+        }
     }
     // OpenCode Go has no list-models endpoint; ship the builtin set.
     models.extend(
@@ -276,6 +283,12 @@ async fn scan_codex() -> Result<Vec<ModelEntry>> {
                 .collect()
         })
         .unwrap_or_default())
+}
+
+async fn scan_kiro() -> Result<Vec<ModelEntry>> {
+    // Kiro list-models endpoint requires AWS SigV4 (Cognito credentials),
+    // not Bearer auth. Return builtin catalog instead.
+    anyhow::bail!("kiro: use builtin catalog")
 }
 
 #[cfg(test)]

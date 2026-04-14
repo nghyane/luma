@@ -73,6 +73,7 @@ pub enum AuthVendor {
     Anthropic,
     OpenAI,
     OpenCodeGo,
+    Kiro,
 }
 
 impl AuthVendor {
@@ -81,6 +82,7 @@ impl AuthVendor {
             AuthVendor::Anthropic => "anthropic",
             AuthVendor::OpenAI => "openai",
             AuthVendor::OpenCodeGo => "opencode-go",
+            AuthVendor::Kiro => "kiro",
         }
     }
 
@@ -89,6 +91,7 @@ impl AuthVendor {
             "anthropic" => Some(Self::Anthropic),
             "openai" | "codex" => Some(Self::OpenAI),
             "opencode-go" => Some(Self::OpenCodeGo),
+            "kiro" => Some(Self::Kiro),
             _ => None,
         }
     }
@@ -103,6 +106,7 @@ pub struct Credential {
     pub is_oauth: bool,
     pub account_id: Option<String>,
     pub label: String,
+    pub profile_arn: Option<String>,
 }
 
 /// UI-safe snapshot of a pooled account. No secrets.
@@ -168,6 +172,8 @@ struct AccountEntry {
     refresh_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile_arn: Option<String>,
     #[serde(default = "default_true")]
     is_oauth: bool,
     /// Unix seconds when the `access_token` expires.
@@ -315,6 +321,7 @@ pub fn upsert_api_key(vendor: AuthVendor, token: &str) -> String {
         access_token: token.to_owned(),
         refresh_token: None,
         account_id: None,
+        profile_arn: None,
         is_oauth: false,
         expires_at: None,
         scopes: None,
@@ -402,7 +409,7 @@ fn account_view(a: &AccountEntry) -> AccountView {
 
 async fn resolve_inner(provider: AuthVendor, force: bool) -> Result<Credential> {
     // Bootstrap the pool if it has no account for this provider.
-    ensure_bootstrapped(provider);
+    ensure_bootstrapped(provider).await;
     crate::dbg_log!(
         "auth resolve start provider={} force={}",
         provider.as_str(),
@@ -543,6 +550,7 @@ fn credential_from(e: &AccountEntry) -> Credential {
         is_oauth: e.is_oauth,
         account_id: e.account_id.clone(),
         label: e.label.clone(),
+        profile_arn: e.profile_arn.clone(),
     }
 }
 
@@ -635,8 +643,21 @@ fn upsert_by_label(pool: &mut PoolStore, mut entry: AccountEntry) {
 
 /// If the pool has no account for this provider, try to seed one from the
 /// upstream CLI's local credential store.
-fn ensure_bootstrapped(provider: AuthVendor) {
-    if let Some(seed) = load_local(provider) {
+async fn ensure_bootstrapped(provider: AuthVendor) {
+    if let Some(mut seed) = load_local(provider) {
+        // For Kiro, fetch real email via Cognito + SigV4
+        // Also replace "via google/github" placeholder with real email
+        let needs_real_email = provider == AuthVendor::Kiro && seed.email
+            .as_deref()
+            .map(|e| e.starts_with("via ") || e.is_empty())
+            .unwrap_or(true);
+        if needs_real_email {
+            let profile_arn = seed.profile_arn.clone().unwrap_or_default();
+            if let Some(email) = fetch_kiro_email_via_api(&seed.access_token, &profile_arn).await {
+                seed.label = derive_label(provider, Some(&email));
+                seed.email = Some(email);
+            }
+        }
         with_pool_mut(|p| upsert_by_label(p, seed));
     }
 }
@@ -709,6 +730,7 @@ fn load_local(provider: AuthVendor) -> Option<AccountEntry> {
         // OpenCode Go has no upstream CLI to bootstrap from; keys are
         // pasted interactively via `luma login`.
         AuthVendor::OpenCodeGo => None,
+        AuthVendor::Kiro => load_kiro_local(),
     }
 }
 
@@ -881,6 +903,7 @@ fn parse_claude_json(raw: &str) -> Option<AccountEntry> {
         access_token,
         refresh_token,
         account_id: None,
+        profile_arn: None,
         is_oauth: true,
         expires_at,
         scopes,
@@ -992,6 +1015,70 @@ fn parse_codex_json(raw: &str) -> Option<AccountEntry> {
         access_token,
         refresh_token,
         account_id,
+        profile_arn: None,
+        is_oauth: true,
+        expires_at,
+        scopes: None,
+        cooldown_until: None,
+        usage: UsageRec::default(),
+        needs_relogin: false,
+        disabled: false,
+    })
+}
+
+fn load_kiro_local() -> Option<AccountEntry> {
+    #[cfg(target_os = "macos")]
+    {
+        load_kiro_keychain()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn load_kiro_keychain() -> Option<AccountEntry> {
+    use std::process::Command;
+    let output = Command::new("security")
+        .args(["find-generic-password", "-s", "kirocli:social:token", "-w"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let access_token = v.get("access_token")?.as_str()?.to_owned();
+    let refresh_token = v
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+    let profile_arn = v
+        .get("profile_arn")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+    let expires_at = v
+        .get("expires_at")
+        .and_then(|v| v.as_str())
+        .and_then(|s| {
+            // ISO 8601 → unix timestamp via parse_expires_field
+            parse_expires_field(&serde_json::Value::String(s.to_owned()))
+        });
+    let provider_name = v
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("google");
+    let email_hint = Some(format!("via {provider_name}"));
+    let label = derive_label(AuthVendor::Kiro, email_hint.as_deref());
+    Some(AccountEntry {
+        label,
+        provider: AuthVendor::Kiro.as_str().to_owned(),
+        email: email_hint,
+        access_token,
+        refresh_token,
+        account_id: None,
+        profile_arn,
         is_oauth: true,
         expires_at,
         scopes: None,
@@ -1055,16 +1142,19 @@ async fn try_refresh(
         serde_json::from_str(&text).map_err(|e| format!("bad json response: {e}"))?;
     let new_access = json
         .get("access_token")
+        .or_else(|| json.get("accessToken"))
         .and_then(|v| v.as_str())
         .ok_or_else(|| "missing access_token in response".to_owned())?
         .to_owned();
     let new_refresh = json
         .get("refresh_token")
+        .or_else(|| json.get("refreshToken"))
         .and_then(|v| v.as_str())
         .map(std::borrow::ToOwned::to_owned)
         .or_else(|| entry.refresh_token.clone());
     let expires_at = json
         .get("expires_in")
+        .or_else(|| json.get("expiresIn"))
         .and_then(serde_json::Value::as_u64)
         .map(|secs| now_unix().saturating_add(secs))
         .or_else(|| {
@@ -1082,6 +1172,12 @@ async fn try_refresh(
                 .collect()
         })
         .or_else(|| entry.scopes.clone());
+    // Kiro returns profileArn in refresh response
+    let profile_arn = json
+        .get("profileArn")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned())
+        .or_else(|| entry.profile_arn.clone());
 
     Ok(AccountEntry {
         label: entry.label.clone(),
@@ -1090,6 +1186,7 @@ async fn try_refresh(
         access_token: new_access,
         refresh_token: new_refresh,
         account_id: entry.account_id.clone(),
+        profile_arn,
         is_oauth: true,
         expires_at,
         scopes,
@@ -1248,6 +1345,7 @@ fn legacy_to_account(le: LegacyEntry) -> Option<AccountEntry> {
         access_token: le.access_token,
         refresh_token: le.refresh_token,
         account_id: le.account_id,
+        profile_arn: None,
         is_oauth: le.is_oauth,
         expires_at,
         scopes: None,
@@ -1381,6 +1479,26 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 // =============================================================================
 // tests
 // =============================================================================
+
+pub(super) async fn fetch_kiro_email_via_api(access_token: &str, profile_arn: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let body = serde_json::json!({"profileArn": profile_arn, "isEmailRequired": true}).to_string();
+    let resp = client
+        .post("https://codewhisperer.us-east-1.amazonaws.com/")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("Content-Type", "application/x-amz-json-1.0")
+        .header("X-Amz-Target", "AmazonCodeWhispererService.GetUsageLimits")
+        .body(body)
+        .send()
+        .await
+        .ok()?;
+    let text = resp.text().await.ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("userInfo")?.get("email")?.as_str().map(|s| s.to_owned())
+}
 
 #[cfg(test)]
 mod tests {
@@ -1575,6 +1693,7 @@ mod tests {
             access_token: "old".into(),
             refresh_token: Some("r1".into()),
             account_id: None,
+            profile_arn: None,
             is_oauth: true,
             expires_at: Some(100),
             scopes: None,
@@ -1594,6 +1713,7 @@ mod tests {
             access_token: "new".into(),
             refresh_token: Some("r2".into()),
             account_id: None,
+            profile_arn: None,
             is_oauth: true,
             expires_at: Some(2_000),
             scopes: None,
@@ -1623,6 +1743,7 @@ mod tests {
             access_token: "old-token".into(),
             refresh_token: Some("same-refresh".into()),
             account_id: Some("acc-123".into()),
+            profile_arn: None,
             is_oauth: true,
             expires_at: Some(100),
             scopes: None,
@@ -1644,6 +1765,7 @@ mod tests {
                 access_token: "new-token".into(),
                 refresh_token: Some("same-refresh".into()),
                 account_id: Some("acc-123".into()),
+                profile_arn: None,
                 is_oauth: true,
                 expires_at: Some(200),
                 scopes: None,
@@ -1673,6 +1795,7 @@ mod tests {
                 access_token: "tok-a".into(),
                 refresh_token: Some("rt-a".into()),
                 account_id: None,
+                profile_arn: None,
                 is_oauth: true,
                 expires_at: Some(100),
                 scopes: None,
@@ -1688,6 +1811,7 @@ mod tests {
                 access_token: "tok-b".into(),
                 refresh_token: Some("rt-b".into()),
                 account_id: Some("acc-123".into()),
+                profile_arn: None,
                 is_oauth: true,
                 expires_at: Some(200),
                 scopes: None,

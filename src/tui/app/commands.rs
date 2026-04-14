@@ -135,6 +135,7 @@ impl super::App {
                     AuthVendor::Anthropic => "claude",
                     AuthVendor::OpenAI => "codex",
                     AuthVendor::OpenCodeGo => "opencode-go",
+                    AuthVendor::Kiro => "kiro",
                 };
                 let status = match a.health {
                     AccountHealth::Ok if a.disabled => "off",

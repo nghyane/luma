@@ -49,6 +49,8 @@ enum ExchangeFormat {
     Json { state: String },
     /// Form-encoded body (Codex).
     Form,
+    /// Kiro: JSON body with only code/code_verifier/redirect_uri, no grant_type/client_id.
+    KiroJson,
 }
 
 impl ProviderFlow {
@@ -110,6 +112,26 @@ impl ProviderFlow {
             exchange_format: ExchangeFormat::Form,
         }
     }
+
+    fn kiro(challenge: &str, state: &str, redirect_uri: &str) -> Self {
+        let url = format!(
+            "https://app.kiro.dev/signin\
+             ?state={state}\
+             &code_challenge={challenge}\
+             &code_challenge_method=S256\
+             &redirect_uri={redirect}\
+             &redirect_from=kirocli",
+            redirect = url_encode(redirect_uri),
+        );
+        Self {
+            provider: AuthVendor::Kiro,
+            authorize_url: url,
+            token_url: "https://prod.us-east-1.auth.desktop.kiro.dev/oauth/token",
+            client_id: "",
+            callback_path: "/oauth/callback",
+            exchange_format: ExchangeFormat::KiroJson,
+        }
+    }
 }
 
 // =============================================================================
@@ -162,6 +184,9 @@ where
         AuthVendor::OpenAI => {
             ProviderFlow::codex(&challenge, &state, &build_redirect_uri(provider, port))
         }
+        AuthVendor::Kiro => {
+            ProviderFlow::kiro(&challenge, &state, &build_redirect_uri(provider, port))
+        }
         AuthVendor::OpenCodeGo => unreachable!("guarded above"),
     };
 
@@ -169,7 +194,7 @@ where
     let _ = open_browser(&flow.authorize_url);
 
     let callback_path = flow.callback_path;
-    let (code, returned_state) = tokio::time::timeout(
+    let (code, returned_state, login_option) = tokio::time::timeout(
         std::time::Duration::from_secs(LOGIN_TIMEOUT_SECS),
         accept_callback(listener, callback_path),
     )
@@ -181,7 +206,19 @@ where
     }
 
     let tokens = exchange_code(&flow, &code, &verifier).await?;
-    let entry = build_account_entry(provider, tokens);
+    let mut entry = build_account_entry(provider, tokens);
+
+    // Kiro: fetch real email via Cognito + SigV4
+    if provider == AuthVendor::Kiro && entry.email.is_none() {
+        let profile_arn = entry.profile_arn.as_deref().unwrap_or("");
+        if let Some(email) = super::fetch_kiro_email_via_api(&entry.access_token, profile_arn).await {
+            entry.email = Some(email);
+        } else if let Some(opt) = login_option {
+            entry.email = Some(format!("via {opt}"));
+        }
+        entry.label = derive_label(provider, entry.email.as_deref());
+    }
+
     let outcome = LoginOutcome {
         label: entry.label.clone(),
         email: entry.email.clone(),
@@ -209,6 +246,7 @@ async fn bind_listener(provider: AuthVendor) -> Result<tokio::net::TcpListener> 
     let port = match provider {
         AuthVendor::Anthropic => 0,
         AuthVendor::OpenAI => CODEX_CALLBACK_PORT,
+        AuthVendor::Kiro => 3128,
         AuthVendor::OpenCodeGo => anyhow::bail!("opencode-go does not use PKCE"),
     };
     tokio::net::TcpListener::bind(("127.0.0.1", port))
@@ -234,6 +272,7 @@ fn build_redirect_uri(provider: AuthVendor, port: u16) -> String {
     match provider {
         AuthVendor::Anthropic => format!("http://localhost:{port}/callback"),
         AuthVendor::OpenAI => format!("http://localhost:{port}/auth/callback"),
+        AuthVendor::Kiro => format!("http://localhost:{port}"),
         AuthVendor::OpenCodeGo => unreachable!("opencode-go does not use PKCE"),
     }
 }
@@ -298,17 +337,17 @@ fn open_browser(url: &str) -> Result<()> {
 async fn accept_callback(
     listener: tokio::net::TcpListener,
     path: &str,
-) -> Result<(String, String)> {
+) -> Result<(String, String, Option<String>)> {
     loop {
         let (mut stream, _addr) = listener
             .accept()
             .await
             .context("callback listener accept failed")?;
         match read_request(&mut stream, path).await {
-            Ok(Some((code, state))) => {
+            Ok(Some((code, state, login_option))) => {
                 let _ = stream.write_all(SUCCESS_RESPONSE.as_bytes()).await;
                 let _ = stream.shutdown().await;
-                return Ok((code, state));
+                return Ok((code, state, login_option));
             }
             _ => {
                 let _ = stream.write_all(NOT_FOUND_RESPONSE.as_bytes()).await;
@@ -322,7 +361,7 @@ async fn accept_callback(
 async fn read_request(
     stream: &mut tokio::net::TcpStream,
     expected_path: &str,
-) -> Result<Option<(String, String)>> {
+) -> Result<Option<(String, String, Option<String>)>> {
     let mut buf = vec![0u8; 8192];
     let n = stream.read(&mut buf).await?;
     if n == 0 {
@@ -349,6 +388,7 @@ async fn read_request(
 
     let mut code = None;
     let mut state = None;
+    let mut login_option = None;
     for pair in query.split('&') {
         let Some((k, v)) = pair.split_once('=') else {
             continue;
@@ -356,11 +396,12 @@ async fn read_request(
         match k {
             "code" => code = Some(url_decode(v)),
             "state" => state = Some(url_decode(v)),
+            "login_option" => login_option = Some(url_decode(v)),
             _ => {}
         }
     }
     match (code, state) {
-        (Some(c), Some(s)) => Ok(Some((c, s))),
+        (Some(c), Some(s)) => Ok(Some((c, s, login_option))),
         _ => Ok(None),
     }
 }
@@ -458,6 +499,7 @@ struct TokenResponse {
     /// Codex: parsed from id_token JWT claims.
     email: Option<String>,
     account_id: Option<String>,
+    profile_arn: Option<String>,
 }
 
 async fn exchange_code(flow: &ProviderFlow, code: &str, verifier: &str) -> Result<TokenResponse> {
@@ -486,6 +528,18 @@ async fn exchange_code(flow: &ProviderFlow, code: &str, verifier: &str) -> Resul
             ),
             "application/x-www-form-urlencoded",
         ),
+        ExchangeFormat::KiroJson => (
+            // Kiro token exchange uses a fixed redirect_uri (registered in Cognito),
+            // different from the authorize URL's redirect_uri (which is just host:port).
+            // The login_option is appended by the portal after auth completes.
+            serde_json::json!({
+                "code": code,
+                "code_verifier": verifier,
+                "redirect_uri": "http://localhost:3128/oauth/callback?login_option=google",
+            })
+            .to_string(),
+            "application/json",
+        ),
     };
 
     let res = client
@@ -510,11 +564,13 @@ async fn exchange_code(flow: &ProviderFlow, code: &str, verifier: &str) -> Resul
 
     let access_token = json
         .get("access_token")
+        .or_else(|| json.get("accessToken"))
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("token response missing access_token"))?
         .to_owned();
     let refresh_token = json
         .get("refresh_token")
+        .or_else(|| json.get("refreshToken"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_owned());
 
@@ -567,6 +623,13 @@ async fn exchange_code(flow: &ProviderFlow, code: &str, verifier: &str) -> Resul
                 .and_then(|c| c.get("exp").and_then(|v| v.as_u64()));
             (email, account_id, expires_at)
         }
+        AuthVendor::Kiro => {
+            let expires_at = json
+                .get("expiresIn")
+                .and_then(|v| v.as_u64())
+                .map(|secs| now_unix().saturating_add(secs));
+            (None, None, expires_at)
+        }
         AuthVendor::OpenCodeGo => unreachable!("opencode-go does not use PKCE"),
     };
 
@@ -574,6 +637,10 @@ async fn exchange_code(flow: &ProviderFlow, code: &str, verifier: &str) -> Resul
         .get("scope")
         .and_then(|v| v.as_str())
         .map(|s| s.split_whitespace().map(|w| w.to_owned()).collect());
+    let profile_arn = json
+        .get("profileArn")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
 
     Ok(TokenResponse {
         access_token,
@@ -582,6 +649,7 @@ async fn exchange_code(flow: &ProviderFlow, code: &str, verifier: &str) -> Resul
         scopes,
         email,
         account_id,
+        profile_arn,
     })
 }
 
@@ -606,6 +674,7 @@ fn build_account_entry(provider: AuthVendor, tokens: TokenResponse) -> AccountEn
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         account_id: tokens.account_id,
+        profile_arn: tokens.profile_arn,
         is_oauth: true,
         expires_at: tokens.expires_at,
         scopes: tokens.scopes,

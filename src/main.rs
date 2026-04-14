@@ -78,6 +78,7 @@ async fn main() {
                 config::auth::AuthVendor::Anthropic,
                 config::auth::AuthVendor::OpenAI,
                 config::auth::AuthVendor::OpenCodeGo,
+                config::auth::AuthVendor::Kiro,
             ] {
                 let name = provider.as_str();
                 match config::auth::resolve(provider).await {
