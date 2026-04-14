@@ -302,6 +302,11 @@ pub fn remove_account(label: &str) {
     with_pool_mut(|p| p.accounts.retain(|a| a.label != label));
 }
 
+/// Mark an account as requiring a fresh login.
+pub fn mark_needs_relogin(label: &str) {
+    with_pool_mut(|p| set_needs_relogin(p, label));
+}
+
 /// Upsert a raw API key into the pool.
 ///
 /// Used by `luma login` for gateways that do not speak OAuth (today:
@@ -535,8 +540,9 @@ fn pick_candidate(provider: AuthVendor) -> Option<AccountEntry> {
         .cloned()
 }
 
-fn candidate_rank(a: &AccountEntry) -> (u8, u8, u8, u64) {
+fn candidate_rank(a: &AccountEntry) -> (u8, u8, u8, u8, u64) {
     (
+        u8::from(a.is_oauth),
         u8::from(a.email.is_some()),
         u8::from(a.account_id.is_some()),
         u8::from(a.refresh_token.is_some()),
@@ -647,10 +653,12 @@ async fn ensure_bootstrapped(provider: AuthVendor) {
     if let Some(mut seed) = load_local(provider) {
         // For Kiro, fetch real email via Cognito + SigV4
         // Also replace "via google/github" placeholder with real email
-        let needs_real_email = provider == AuthVendor::Kiro && seed.email
-            .as_deref()
-            .map(|e| e.starts_with("via ") || e.is_empty())
-            .unwrap_or(true);
+        let needs_real_email = provider == AuthVendor::Kiro
+            && seed
+                .email
+                .as_deref()
+                .map(|e| e.starts_with("via ") || e.is_empty())
+                .unwrap_or(true);
         if needs_real_email {
             let profile_arn = seed.profile_arn.clone().unwrap_or_default();
             if let Some(email) = fetch_kiro_email_via_api(&seed.access_token, &profile_arn).await {
@@ -1058,13 +1066,10 @@ fn load_kiro_keychain() -> Option<AccountEntry> {
         .get("profile_arn")
         .and_then(|v| v.as_str())
         .map(|s| s.to_owned());
-    let expires_at = v
-        .get("expires_at")
-        .and_then(|v| v.as_str())
-        .and_then(|s| {
-            // ISO 8601 → unix timestamp via parse_expires_field
-            parse_expires_field(&serde_json::Value::String(s.to_owned()))
-        });
+    let expires_at = v.get("expires_at").and_then(|v| v.as_str()).and_then(|s| {
+        // ISO 8601 → unix timestamp via parse_expires_field
+        parse_expires_field(&serde_json::Value::String(s.to_owned()))
+    });
     let provider_name = v
         .get("provider")
         .and_then(|v| v.as_str())
@@ -1480,7 +1485,10 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 // tests
 // =============================================================================
 
-pub(super) async fn fetch_kiro_email_via_api(access_token: &str, profile_arn: &str) -> Option<String> {
+pub(super) async fn fetch_kiro_email_via_api(
+    access_token: &str,
+    profile_arn: &str,
+) -> Option<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -1497,7 +1505,10 @@ pub(super) async fn fetch_kiro_email_via_api(access_token: &str, profile_arn: &s
         .ok()?;
     let text = resp.text().await.ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    v.get("userInfo")?.get("email")?.as_str().map(|s| s.to_owned())
+    v.get("userInfo")?
+        .get("email")?
+        .as_str()
+        .map(|s| s.to_owned())
 }
 
 #[cfg(test)]
@@ -1847,5 +1858,43 @@ mod tests {
         assert_eq!(account.provider, "anthropic");
         assert_eq!(account.label, "legacy@test");
         assert_eq!(account.expires_at, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn candidate_rank_prefers_oauth_over_api_key_for_openai() {
+        let oauth = AccountEntry {
+            label: "oauth@example".into(),
+            provider: "openai".into(),
+            email: Some("oauth@example.com".into()),
+            access_token: "oauth-token".into(),
+            refresh_token: Some("refresh-token".into()),
+            account_id: Some("account-123".into()),
+            profile_arn: None,
+            is_oauth: true,
+            expires_at: Some(100),
+            scopes: None,
+            cooldown_until: None,
+            usage: UsageRec::default(),
+            needs_relogin: false,
+            disabled: false,
+        };
+        let api_key = AccountEntry {
+            label: "openai:key:abcdef".into(),
+            provider: "openai".into(),
+            email: None,
+            access_token: "sk-local".into(),
+            refresh_token: None,
+            account_id: None,
+            profile_arn: None,
+            is_oauth: false,
+            expires_at: None,
+            scopes: None,
+            cooldown_until: None,
+            usage: UsageRec::default(),
+            needs_relogin: false,
+            disabled: false,
+        };
+
+        assert!(candidate_rank(&oauth) > candidate_rank(&api_key));
     }
 }
