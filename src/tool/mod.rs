@@ -41,7 +41,9 @@ impl ToolStyle {
     /// Default tool style for a given agent mode and provider source.
     pub fn for_mode(mode: crate::config::models::AgentMode, source: &str) -> Self {
         match mode {
-            crate::config::models::AgentMode::Rush | crate::config::models::AgentMode::Smart => Self::Native,
+            crate::config::models::AgentMode::Rush | crate::config::models::AgentMode::Smart => {
+                Self::Native
+            }
             crate::config::models::AgentMode::Deep => Self::for_source(source),
         }
     }
@@ -62,6 +64,9 @@ pub fn build_registry(style: ToolStyle, search: Option<web_search::SearchBackend
             reg.register(Box::new(grep::GrepTool));
         }
         ToolStyle::Patch => {
+            reg.register(Box::new(read::ReadTool));
+            reg.register(Box::new(glob::GlobTool));
+            reg.register(Box::new(grep::GrepTool));
             reg.register(Box::new(bash::BashTool::codex()));
             reg.register(Box::new(apply_patch::ApplyPatchTool));
         }

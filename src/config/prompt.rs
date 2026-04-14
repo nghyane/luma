@@ -51,9 +51,18 @@ mod tests {
         for mode in &[AgentMode::Smart, AgentMode::Deep] {
             for style in &[ToolStyle::Native, ToolStyle::Patch] {
                 let p = build(*mode, *style);
-                assert!(p.contains("# Git Safety"), "{mode:?}/{style:?} missing Git Safety");
-                assert!(p.contains("# Evidence and Source of Truth"), "{mode:?}/{style:?} missing Evidence section");
-                assert!(p.contains("# Response Style"), "{mode:?}/{style:?} missing Response Style");
+                assert!(
+                    p.contains("# Git Safety"),
+                    "{mode:?}/{style:?} missing Git Safety"
+                );
+                assert!(
+                    p.contains("# Evidence and Source of Truth"),
+                    "{mode:?}/{style:?} missing Evidence section"
+                );
+                assert!(
+                    p.contains("# Response Style"),
+                    "{mode:?}/{style:?} missing Response Style"
+                );
             }
         }
     }

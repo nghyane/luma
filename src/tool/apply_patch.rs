@@ -293,7 +293,10 @@ mod tests {
         let args = serde_json::json!({"patch": patch});
         let (tx, _rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
-        let result = tool.execute(args, tx, cancel, Default::default()).await.unwrap();
+        let result = tool
+            .execute(args, tx, cancel, Default::default())
+            .await
+            .unwrap();
         assert!(result.result.as_text().contains("Success"));
         let content = std::fs::read_to_string(&file).unwrap();
         assert!(content.contains("println!(\"new\")"));
@@ -316,7 +319,10 @@ mod tests {
         let args = serde_json::json!({"patch": patch});
         let (tx, _rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
-        let result = tool.execute(args, tx, cancel, Default::default()).await.unwrap();
+        let result = tool
+            .execute(args, tx, cancel, Default::default())
+            .await
+            .unwrap();
         assert!(result.result.as_text().contains("Success"));
         assert!(new_file.exists());
         let lib_content = std::fs::read_to_string(&existing).unwrap();

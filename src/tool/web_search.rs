@@ -15,9 +15,15 @@ const SEARCH_TIMEOUT_SECS: u64 = 15;
 /// Search backend configuration.
 #[derive(Clone)]
 pub enum SearchBackend {
-    Exa { api_key: String },
-    Tavily { api_key: String },
-    SearXNG { base_url: String },
+    Exa {
+        api_key: String,
+    },
+    Tavily {
+        api_key: String,
+    },
+    SearXNG {
+        base_url: String,
+    },
     /// Kiro's built-in `web_search` MCP tool. Routes the query through
     /// `AmazonCodeWhispererStreamingService.InvokeMCP` and costs 0
     /// credits (probed live). Auth + profile ARN are resolved from the

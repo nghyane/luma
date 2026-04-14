@@ -177,7 +177,9 @@ mod tests {
         let (tx, _rx) = mpsc::channel(64);
         let tool = GlobTool;
         let args = serde_json::json!({"pattern": "**/*", "path": "/nonexistent_dir_xyz"});
-        let result = tool.execute(args, tx, CancellationToken::new(), Default::default()).await;
+        let result = tool
+            .execute(args, tx, CancellationToken::new(), Default::default())
+            .await;
         assert!(result.is_err());
     }
 

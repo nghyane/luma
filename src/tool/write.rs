@@ -131,7 +131,12 @@ mod tests {
         let (tx, _rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
         let result = tool
-            .execute(serde_json::json!({"path": file.to_str().unwrap(), "content": "hello"}), tx, cancel, Default::default())
+            .execute(
+                serde_json::json!({"path": file.to_str().unwrap(), "content": "hello"}),
+                tx,
+                cancel,
+                Default::default(),
+            )
             .await
             .unwrap();
 
@@ -147,7 +152,12 @@ mod tests {
         let tool = WriteTool;
         let (tx, _rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
-        tool.execute(serde_json::json!({"path": file.to_str().unwrap(), "content": "deep"}), tx, cancel, Default::default())
+        tool.execute(
+            serde_json::json!({"path": file.to_str().unwrap(), "content": "deep"}),
+            tx,
+            cancel,
+            Default::default(),
+        )
         .await
         .unwrap();
 
