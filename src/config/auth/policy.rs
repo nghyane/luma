@@ -3,8 +3,7 @@ use super::{
     OPENAI_OAUTH_ENDPOINT, should_use_claude_ai_auth,
 };
 
-const KIRO_REFRESH_ENDPOINT: &str =
-    "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken";
+const KIRO_REFRESH_ENDPOINT: &str = "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken";
 
 pub struct RefreshRequest {
     pub url: &'static str,
