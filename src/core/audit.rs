@@ -121,7 +121,7 @@ pub fn audit_show(session_id: &str) -> Option<IncidentDetail> {
     if used_local_read && used_remote {
         failure_types.push("mixed_local_remote_source".into());
     }
-    if local_task && used_remote {
+    if local_task && used_local_read && used_remote {
         failure_types.push("premature_external_research".into());
     }
     if edited && !verified {
@@ -210,7 +210,7 @@ pub fn audit_incidents(limit: usize) -> Vec<Incident> {
                 severity: "medium".into(),
             });
         }
-        if local_task && used_remote {
+        if local_task && used_local_read && used_remote {
             incidents.push(Incident {
                 session_id: session.id.clone(),
                 title: session.title.clone(),
