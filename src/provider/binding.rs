@@ -21,6 +21,8 @@ pub enum ProtocolId {
     OpenAIChat,
     /// `/v1/responses` — OpenAI Responses API typed SSE (Codex).
     OpenAIResponses,
+    /// `/generateAssistantResponse` — AWS Event Stream binary (Kiro/Amazon Q).
+    KiroEventStream,
 }
 
 /// A selected model on a selected gateway. `protocol` and `base_url`

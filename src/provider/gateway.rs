@@ -23,6 +23,7 @@ use crate::provider::quirks::QuirkSet;
 pub enum GatewayId {
     Anthropic,
     Codex,
+    Kiro,
     OpenAI,
     OpenCodeGo,
 }

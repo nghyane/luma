@@ -81,6 +81,9 @@ impl Gateway for OpenCodeGo {
             ProtocolId::OpenAIResponses => {
                 unreachable!("opencode-go does not expose the Responses API")
             }
+            ProtocolId::KiroEventStream => {
+                unreachable!("opencode-go does not use Kiro Event Stream")
+            }
         }
     }
 }
