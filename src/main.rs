@@ -21,6 +21,7 @@ macro_rules! dbg_log {
     };
 }
 
+mod auth;
 mod cli_login;
 mod config;
 mod core;
@@ -152,24 +153,36 @@ async fn main() {
                     summary.sessions_with_skill_loads
                 );
                 println!(
-                    "mixed local/remote source sessions: {}",
-                    summary.mixed_local_remote_source_sessions
+                    "wrong source sessions:              {}",
+                    summary.wrong_source_sessions
                 );
                 println!(
                     "premature external research sessions: {}",
                     summary.premature_external_research_sessions
                 );
                 println!(
-                    "edited without verify sessions:    {}",
-                    summary.edited_without_verify_sessions
+                    "missing verification sessions:      {}",
+                    summary.missing_verification_sessions
                 );
                 println!(
-                    "bash verify commands:             {}",
+                    "bash verify commands:              {}",
                     summary.bash_verify_commands
                 );
                 println!(
-                    "bash file-inspection commands:    {}",
-                    summary.bash_file_inspection_commands
+                    "shell local read commands:         {}",
+                    summary.shell_local_read_commands
+                );
+                println!(
+                    "shell file counting commands:      {}",
+                    summary.shell_file_counting_commands
+                );
+                println!(
+                    "shell verify output slicing cmds:  {}",
+                    summary.shell_verify_output_slicing_commands
+                );
+                println!(
+                    "shell patch-style search commands: {}",
+                    summary.shell_patch_style_search_commands
                 );
             }
             Some("incidents") => {
@@ -179,11 +192,74 @@ async fn main() {
                     .unwrap_or(30);
                 for incident in crate::core::audit::audit_incidents(limit) {
                     println!(
-                        "{}	{}	{}	{}",
+                        "{}	{}	{}	{}	{}	{}",
                         incident.session_id,
                         incident.failure_type,
                         incident.severity,
+                        incident.task_family,
+                        incident.subsystem,
                         incident.title
+                    );
+                }
+            }
+            Some("packets") => {
+                let limit = args
+                    .get(3)
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(30);
+                for packet in crate::core::audit::audit_packets(limit) {
+                    println!("session: {}", packet.session_id);
+                    println!("title:   {}", packet.title);
+                    println!("task:    {}", packet.task_preview);
+                    println!("family:  {}", packet.task_family);
+                    println!("detector:{}", packet.detector_version);
+                    println!("severity:{}", packet.severity);
+                    println!("reviewer:{}", packet.reviewer_eligibility);
+                    println!("source:  {}", packet.source_of_truth_classification);
+                    println!("failures:");
+                    for failure in packet.failure_types {
+                        println!("  - {}", failure);
+                    }
+                    println!("tool sequence:");
+                    for tool in packet.tool_sequence_summary {
+                        println!("  - {}", tool);
+                    }
+                    println!("excerpts:");
+                    for excerpt in packet.representative_excerpts {
+                        println!("  - {}", excerpt);
+                    }
+                    println!("spans:");
+                    for span in packet.representative_spans {
+                        println!(
+                            "  - message={} block={} kind={} preview={}",
+                            span.message_index, span.block_index, span.kind, span.preview
+                        );
+                    }
+                    println!(
+                        "counts: tools={} local_reads={} remote_uses={} edits={} verify_signals={}",
+                        packet.supporting_counts.tool_uses,
+                        packet.supporting_counts.local_reads,
+                        packet.supporting_counts.remote_uses,
+                        packet.supporting_counts.edits,
+                        packet.supporting_counts.verify_signals
+                    );
+                    println!();
+                }
+            }
+            Some("clusters") => {
+                let limit = args
+                    .get(3)
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(30);
+                for cluster in crate::core::audit::audit_clusters(limit) {
+                    println!(
+                        "{}	{}	{}	{}	{}	{}",
+                        cluster.cluster_key,
+                        cluster.failure_type,
+                        cluster.count,
+                        cluster.highest_severity,
+                        cluster.task_family,
+                        cluster.subsystem
                     );
                 }
             }
@@ -199,6 +275,11 @@ async fn main() {
                 println!("session: {}", detail.session_id);
                 println!("title:   {}", detail.title);
                 println!("task:    {}", detail.task_preview);
+                println!("task family: {}", detail.task_family);
+                println!("detector:    {}", detail.detector_version);
+                println!("severity:    {}", detail.severity);
+                println!("reviewer:    {}", detail.reviewer_eligibility);
+                println!("source:      {}", detail.source_of_truth_classification);
                 println!(
                     "failures:{}",
                     if detail.failure_types.is_empty() {
@@ -235,6 +316,8 @@ async fn main() {
                 eprintln!(
                     "usage: luma audit sessions [limit]
        luma audit incidents [limit]
+       luma audit packets [limit]
+       luma audit clusters [limit]
        luma audit show <session-id>"
                 );
                 std::process::exit(1);
@@ -256,6 +339,7 @@ async fn main() {
                 };
                 println!("suggested route: {}", proposal.route);
                 println!("confidence:      {}", proposal.confidence);
+                println!("affected layer: {}", proposal.affected_layer);
                 if proposal.target_layers.is_empty() {
                     println!("target layers:   none");
                 } else {
@@ -266,6 +350,7 @@ async fn main() {
                 }
                 println!("reason:          {}", proposal.reason);
                 println!("note:            {}", proposal.note);
+                println!("validation:      {}", proposal.suggested_validation);
             }
             _ => {
                 eprintln!("usage: luma improve propose --session <session-id>");
