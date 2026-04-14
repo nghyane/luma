@@ -60,6 +60,22 @@ impl CodexProvider {
         let identity = resolve_identity(&tokens)?;
         Ok(LoginResult { identity, tokens })
     }
+
+    pub async fn refresh(&self, refresh_token: &str) -> Result<OAuthTokens, OAuthError> {
+        let json = crate::auth::oauth::shared::exchange_json_token(
+            TOKEN_URL,
+            serde_json::json!({
+                "client_id": CLIENT_ID,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            })
+            .to_string(),
+            &[],
+        )
+        .await
+        .map_err(|e| OAuthError::RefreshRejected(e.to_string()))?;
+        parse_tokens(&json)
+    }
 }
 
 fn parse_tokens(json: &serde_json::Value) -> Result<OAuthTokens, OAuthError> {

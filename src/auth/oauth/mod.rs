@@ -49,6 +49,13 @@ impl ProviderRef<'_> {
             Self::Kiro(p) => p.login().await,
         }
     }
+
+    pub async fn refresh(&self, refresh_token: &str) -> Result<OAuthTokens, OAuthError> {
+        match self {
+            Self::Codex(p) => p.refresh(refresh_token).await,
+            Self::Kiro(p) => p.refresh(refresh_token).await,
+        }
+    }
 }
 
 pub struct OAuthRegistry {

@@ -57,6 +57,17 @@ impl KiroProvider {
         let identity = resolve_identity(&tokens, callback.login_option).await?;
         Ok(LoginResult { identity, tokens })
     }
+
+    pub async fn refresh(&self, refresh_token: &str) -> Result<OAuthTokens, OAuthError> {
+        let json = exchange_json_token(
+            "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken",
+            serde_json::json!({ "refreshToken": refresh_token }).to_string(),
+            &[],
+        )
+        .await
+        .map_err(|e| OAuthError::RefreshRejected(e.to_string()))?;
+        parse_tokens(&json)
+    }
 }
 
 fn parse_tokens(json: &serde_json::Value) -> Result<OAuthTokens, OAuthError> {

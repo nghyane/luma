@@ -106,6 +106,67 @@ impl<R: AuthRepository> AuthService<R> {
         Ok(saved)
     }
 
+    pub async fn refresh_credential(
+        &self,
+        key: &AccountKey,
+    ) -> Result<crate::config::auth::Credential, AuthError> {
+        let store = self.repo.load()?;
+        let record = store
+            .accounts
+            .iter()
+            .find(|a| &a.key == key)
+            .ok_or(AuthError::AccountNotFound)?;
+        let refresh_token = match &record.auth {
+            AuthState::OAuth(cred) => cred
+                .refresh_token
+                .as_deref()
+                .ok_or_else(|| AuthError::OAuth(crate::auth::error::OAuthError::RefreshRejected(
+                    "missing refresh token".to_owned(),
+                )))?,
+            AuthState::ApiKey(_) => {
+                return Err(AuthError::OAuth(crate::auth::error::OAuthError::RefreshRejected(
+                    "api key cannot be refreshed".to_owned(),
+                )));
+            }
+        };
+
+        let oauth = crate::auth::oauth::OAuthRegistry::new();
+        let provider = oauth.get(record.key.vendor).ok_or(AuthError::NoEligibleAccount {
+            vendor: record.key.vendor.as_str().to_owned(),
+        })?;
+        let tokens = provider.refresh(refresh_token).await.map_err(AuthError::OAuth)?;
+
+        let refreshed = AccountRecord {
+            key: record.key.clone(),
+            display_name: record.display_name.clone(),
+            email: record.email.clone(),
+            auth: AuthState::OAuth(OAuthCredential {
+                access_token: tokens.access_token.clone(),
+                refresh_token: tokens.refresh_token.clone(),
+                expires_at: tokens.expires_at,
+                scopes: tokens.scopes.clone(),
+            }),
+            health: AccountHealth::Active,
+            metadata: AccountMetadata {
+                profile_arn: tokens.profile_arn.clone().or_else(|| record.metadata.profile_arn.clone()),
+                ..record.metadata.clone()
+            },
+        };
+
+        self.mutate(|store| upsert_account(store, refreshed.clone()))?;
+        Ok(crate::config::auth::Credential {
+            token: tokens.access_token,
+            is_oauth: true,
+            account_id: match &refreshed.key.subject {
+                crate::auth::domain::AccountSubject::AccountId(id) => Some(id.clone()),
+                _ => None,
+            },
+            label: refreshed.display_name,
+            profile_arn: refreshed.metadata.profile_arn,
+            account_key: Some(refreshed.key),
+        })
+    }
+
     // -------------------------------------------------------------------------
 
     fn mutate(&self, f: impl FnOnce(&mut AuthStore)) -> Result<(), AuthError> {

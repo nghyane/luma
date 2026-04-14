@@ -154,7 +154,17 @@ pub async fn run_chat_turn(
                     chunk: "token rejected, refreshing…".into(),
                 })
                 .await;
-            auth_cred = auth::force_refresh(provider_kind).await?;
+            if matches!(provider_kind, crate::config::auth::AuthVendor::OpenAI | crate::config::auth::AuthVendor::Kiro) {
+                let key = auth_cred
+                    .account_key
+                    .as_ref()
+                    .expect("resolved credential must carry account_key");
+                auth_cred = AuthService::new(FileAuthRepository::with_default_path())
+                    .refresh_credential(key)
+                    .await?;
+            } else {
+                auth_cred = auth::force_refresh(provider_kind).await?;
+            }
             continue;
         }
 
