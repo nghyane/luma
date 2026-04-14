@@ -25,6 +25,7 @@ use crate::core::types::{
 use crate::event::Event;
 use crate::event_bus::Sender as EventSender;
 use crate::provider::json_stream::{JsonStringExtractor, streamable_arg_for};
+use crate::provider::retry::ProviderUnauthorized;
 use crate::util::uuid_v4;
 
 /// User-Agent Kiro CLI sends. Captured via mitmproxy from a real
@@ -133,7 +134,22 @@ impl KiroRuntime {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             let snippet: String = text.chars().take(300).collect();
-            // Wrap as non-retryable so stream_with_retry doesn't loop
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(ProviderUnauthorized {
+                    provider: "kiro".to_owned(),
+                    status: status.as_u16(),
+                    detail: if snippet.is_empty() {
+                        "unauthorized".to_owned()
+                    } else {
+                        snippet
+                    },
+                }
+                .into());
+            }
+
+            // Wrap as non-retryable so stream_with_retry doesn't loop.
             return Err(anyhow::anyhow!("Kiro HTTP {status}: {snippet}"));
         }
 
@@ -175,8 +191,8 @@ fn derive_session_uuids(session_id: &str) -> (String, String) {
     // Continuation: rotate the last hex char of the trailing group so the
     // UUID stays valid but differs from conversation_id. If even that
     // trivial transform fails (string too short), fall back to a fresh v4.
-    let continuation_id = rotate_last_hex(&conversation_id)
-        .unwrap_or_else(|| uuid_v4().unwrap_or(fallback));
+    let continuation_id =
+        rotate_last_hex(&conversation_id).unwrap_or_else(|| uuid_v4().unwrap_or(fallback));
     (conversation_id, continuation_id)
 }
 
@@ -227,7 +243,10 @@ fn build_request_body(
         return json!({});
     }
 
-    let (history_msgs, current_msg) = (&messages[..messages.len() - 1], &messages[messages.len() - 1]);
+    let (history_msgs, current_msg) = (
+        &messages[..messages.len() - 1],
+        &messages[messages.len() - 1],
+    );
 
     let tool_specs = build_tool_specs(tools);
     let history = build_history(history_msgs, model_id);
@@ -247,13 +266,18 @@ fn build_request_body(
 }
 
 fn build_tool_specs(tools: &[crate::core::types::ToolSchema]) -> Vec<serde_json::Value> {
-    tools.iter().map(|t| json!({
-        "toolSpecification": {
-            "name": t.name,
-            "description": t.description,
-            "inputSchema": { "json": t.parameters }
-        }
-    })).collect()
+    tools
+        .iter()
+        .map(|t| {
+            json!({
+                "toolSpecification": {
+                    "name": t.name,
+                    "description": t.description,
+                    "inputSchema": { "json": t.parameters }
+                }
+            })
+        })
+        .collect()
 }
 
 fn msg_text(msg: &Message) -> String {
@@ -314,7 +338,11 @@ fn build_history(messages: &[Message], model_id: &str) -> Vec<serde_json::Value>
     result
 }
 
-fn build_current_message(msg: &Message, model_id: &str, tool_specs: &[serde_json::Value]) -> serde_json::Value {
+fn build_current_message(
+    msg: &Message,
+    model_id: &str,
+    tool_specs: &[serde_json::Value],
+) -> serde_json::Value {
     let env_state = build_env_state();
     let tool_results = extract_tool_results(msg);
     if !tool_results.is_empty() {
@@ -387,7 +415,12 @@ fn extract_tool_results(msg: &Message) -> Vec<serde_json::Value> {
     msg.content
         .iter()
         .filter_map(|b| {
-            if let ContentBlock::ToolResult { tool_use_id, content, .. } = b {
+            if let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } = b
+            {
                 let text = match content {
                     ToolResultBody::Text(t) => t.clone(),
                     ToolResultBody::Items(items) => items
@@ -477,19 +510,13 @@ impl<'a> FrameDecoder<'a> {
                 return None;
             }
             // Bounds checked above: next 4 bytes exist.
-            let total_len = u32::from_be_bytes(
-                self.buf[0..4]
-                    .try_into()
-                    .expect("4-byte slice"),
-            ) as usize;
+            let total_len =
+                u32::from_be_bytes(self.buf[0..4].try_into().expect("4-byte slice")) as usize;
             if total_len == 0 || self.buf.len() < total_len {
                 return None;
             }
-            let headers_len = u32::from_be_bytes(
-                self.buf[4..8]
-                    .try_into()
-                    .expect("4-byte slice"),
-            ) as usize;
+            let headers_len =
+                u32::from_be_bytes(self.buf[4..8].try_into().expect("4-byte slice")) as usize;
             let headers_end = 12 + headers_len;
             let payload_end = total_len.saturating_sub(4);
             if headers_end > payload_end || payload_end > total_len {
@@ -554,9 +581,7 @@ impl<'a> FrameDecoder<'a> {
                     );
                     self.tool_order.push(tool_use_id.clone());
                     if !name.is_empty() {
-                        let _ = tx
-                            .send(Event::ToolSelected { name: name.clone() })
-                            .await;
+                        let _ = tx.send(Event::ToolSelected { name: name.clone() }).await;
                     }
                 }
 
@@ -587,10 +612,7 @@ impl<'a> FrameDecoder<'a> {
             // stays zeroed. contextUsageEvent carries the authoritative
             // server-side context percentage (input tokens / model limit).
             Some("contextUsageEvent") => {
-                if let Some(pct) = v
-                    .get("contextUsagePercentage")
-                    .and_then(|p| p.as_f64())
-                {
+                if let Some(pct) = v.get("contextUsagePercentage").and_then(|p| p.as_f64()) {
                     // Server value occasionally drifts slightly above 100
                     // on saturation; clamp for the UI.
                     let clamped = pct.clamp(0.0, 100.0) as f32;
@@ -860,10 +882,7 @@ mod tests {
         // Server occasionally reports slightly >100 on saturation; the
         // UI takes an u8 after rounding, so clamp upstream to keep the
         // type contract obvious.
-        let wire = frame(
-            "contextUsageEvent",
-            br#"{"contextUsagePercentage":105.3}"#,
-        );
+        let wire = frame("contextUsageEvent", br#"{"contextUsagePercentage":105.3}"#);
         let (tx, mut rx) = event_bus::channel();
         let mut decoder = FrameDecoder::new(&[]);
         decoder.feed(&wire);
@@ -878,6 +897,22 @@ mod tests {
             }
         }
         assert_eq!(ctx, Some(100.0));
+    }
+
+    #[test]
+    fn treats_403_as_provider_unauthorized() {
+        let err = anyhow::Error::new(ProviderUnauthorized {
+            provider: "kiro".to_owned(),
+            status: 403,
+            detail: "access denied".to_owned(),
+        });
+
+        let unauth = err
+            .downcast_ref::<ProviderUnauthorized>()
+            .expect("typed error");
+        assert_eq!(unauth.provider, "kiro");
+        assert_eq!(unauth.status, 403);
+        assert_eq!(unauth.detail, "access denied");
     }
 
     #[test]
@@ -914,7 +949,9 @@ mod tests {
         let msgs = vec![
             Message {
                 role: Role::User,
-                content: vec![ContentBlock::Text { text: "hello".into() }],
+                content: vec![ContentBlock::Text {
+                    text: "hello".into(),
+                }],
                 origin: None,
             },
             Message {
@@ -924,7 +961,9 @@ mod tests {
             },
             Message {
                 role: Role::User,
-                content: vec![ContentBlock::Text { text: "do thing".into() }],
+                content: vec![ContentBlock::Text {
+                    text: "do thing".into(),
+                }],
                 origin: None,
             },
         ];
@@ -976,19 +1015,20 @@ mod tests {
             },
             Message {
                 role: Role::User,
-                content: vec![ContentBlock::Text { text: "check cwd".into() }],
+                content: vec![ContentBlock::Text {
+                    text: "check cwd".into(),
+                }],
                 origin: None,
             },
         ];
         let body = build_request_body(&msgs, "auto", "arn:x", &[], "cid", "kid");
         // history[0] is the past user turn.
-        let past_ctx = &body["conversationState"]["history"][0]["userInputMessage"]
-            ["userInputMessageContext"];
+        let past_ctx =
+            &body["conversationState"]["history"][0]["userInputMessage"]["userInputMessageContext"];
         assert!(past_ctx["envState"]["operatingSystem"].is_string());
         assert!(past_ctx["envState"]["currentWorkingDirectory"].is_string());
         // currentMessage.
-        let curr_ctx = &body["conversationState"]["currentMessage"]["userInputMessage"]
-            ["userInputMessageContext"];
+        let curr_ctx = &body["conversationState"]["currentMessage"]["userInputMessage"]["userInputMessageContext"];
         assert!(curr_ctx["envState"]["operatingSystem"].is_string());
     }
 }
