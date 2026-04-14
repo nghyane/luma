@@ -1,7 +1,9 @@
 use super::Action;
 /// App commands — slash commands, mode/model selection, session resume.
 use super::state::PickerMode;
-use crate::config::auth::{self, AccountHealth, AuthVendor};
+use crate::auth::domain::{AccountHealth, AccountKey};
+use crate::auth::repo::FileAuthRepository;
+use crate::auth::service::AuthService;
 use crate::config::models::{self, AgentMode};
 use crate::event::AgentCommand;
 use crate::tui::status::PoolHealth;
@@ -122,10 +124,14 @@ impl super::App {
         }
     }
 
+    fn auth_service() -> AuthService<FileAuthRepository> {
+        AuthService::new(FileAuthRepository::with_default_path())
+    }
+
     /// Open the /accounts dialog — centered modal with toggle + remove.
     pub(super) fn open_accounts_dialog(&mut self) {
         self.refresh_pool_health();
-        let accounts = auth::list_accounts();
+        let accounts = Self::auth_service().list_accounts().unwrap_or_default();
         if accounts.is_empty() {
             self.doc.info("no accounts · run `luma login` to add one");
             return;
@@ -133,26 +139,20 @@ impl super::App {
         let items = accounts
             .iter()
             .map(|a| {
-                let provider = match a.provider {
-                    AuthVendor::Anthropic => "claude",
-                    AuthVendor::OpenAI => "codex",
-                    AuthVendor::OpenCodeGo => "opencode-go",
-                    AuthVendor::Kiro => "kiro",
+                let provider = a.vendor.as_str();
+                let status = match &a.health {
+                    AccountHealth::Disabled => "off",
+                    AccountHealth::Active => "ok",
+                    AccountHealth::CoolingDown { .. } => "cooling",
+                    AccountHealth::NeedsRelogin { .. } => "relogin",
                 };
-                let status = match a.health {
-                    AccountHealth::Ok if a.disabled => "off",
-                    AccountHealth::Ok => "ok",
-                    AccountHealth::Cooldown { .. } => "cooling",
-                    AccountHealth::NeedsRelogin => "relogin",
-                };
-                // col1: email if available, else label; col2: provider · status
-                let col1 = a.email.clone().unwrap_or_else(|| a.label.clone());
+                let col1 = a.email.clone().unwrap_or_else(|| a.display_name.clone());
                 let col2 = format!("{provider}  {status}");
                 crate::tui::dialog::DialogItem {
-                    id: a.label.clone(),
+                    id: serde_json::to_string(&a.key).unwrap_or_default(),
                     col1,
                     col2,
-                    dim: a.disabled,
+                    dim: matches!(a.health, AccountHealth::Disabled),
                 }
             })
             .collect();
@@ -162,13 +162,14 @@ impl super::App {
     /// Re-read the pool and push a fresh health summary into the status bar.
     pub(super) fn refresh_pool_health(&mut self) {
         let mut health = PoolHealth::default();
-        for a in auth::list_accounts() {
+        for a in Self::auth_service().list_accounts().unwrap_or_default() {
             match a.health {
-                AccountHealth::Ok => {}
-                AccountHealth::Cooldown { .. } => health.cooling = health.cooling.saturating_add(1),
-                AccountHealth::NeedsRelogin => {
+                AccountHealth::Active => {}
+                AccountHealth::CoolingDown { .. } => health.cooling = health.cooling.saturating_add(1),
+                AccountHealth::NeedsRelogin { .. } => {
                     health.needs_relogin = health.needs_relogin.saturating_add(1)
                 }
+                AccountHealth::Disabled => {}
             }
         }
         self.ui.status.set_pool_health(health);
@@ -430,24 +431,26 @@ impl super::App {
 /// The picker is text-only (no per-item color), so we use unicode dot
 /// glyphs to convey health: `●` ok, `◐` cooling, `○` needs re-login.
 #[cfg(test)]
-fn format_account_row(a: &crate::config::auth::AccountView) -> String {
-    let dot = match a.health {
-        AccountHealth::Ok => "●",
-        AccountHealth::Cooldown { .. } => "◐",
-        AccountHealth::NeedsRelogin => "○",
+fn format_account_row(a: &crate::auth::domain::AccountView) -> String {
+    let dot = match &a.health {
+        AccountHealth::Active => "●",
+        AccountHealth::CoolingDown { .. } => "◐",
+        AccountHealth::NeedsRelogin { .. } => "○",
+        AccountHealth::Disabled => "✕",
     };
-    let who = a.email.as_deref().unwrap_or(a.label.as_str());
-    let provider = a.provider.as_str();
-    let status = match a.health {
-        AccountHealth::Ok => "ok".to_owned(),
-        AccountHealth::Cooldown { until_unix } => {
+    let who = a.email.as_deref().unwrap_or(a.display_name.as_str());
+    let provider = a.vendor.as_str();
+    let status = match &a.health {
+        AccountHealth::Active => "ok".to_owned(),
+        AccountHealth::CoolingDown { until_unix } => {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             format!("cooling {}s", until_unix.saturating_sub(now))
         }
-        AccountHealth::NeedsRelogin => "needs re-login".to_owned(),
+        AccountHealth::NeedsRelogin { .. } => "needs re-login".to_owned(),
+        AccountHealth::Disabled => "disabled".to_owned(),
     };
     format!("{dot}  {who}  ·  {provider}  ·  {status}")
 }
@@ -455,21 +458,21 @@ fn format_account_row(a: &crate::config::auth::AccountView) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::auth::AccountView;
+    use crate::auth::domain::{AccountKey, AccountMetadata, AccountRecord, AccountView, AuthState, AuthVendor, OAuthCredential};
 
     fn view(health: AccountHealth, email: Option<&str>) -> AccountView {
         AccountView {
-            label: "nghia@gmail".into(),
-            provider: AuthVendor::Anthropic,
+            key: AccountKey::anonymous(AuthVendor::Anthropic, "x"),
+            display_name: "nghia@gmail".into(),
+            vendor: AuthVendor::Anthropic,
             email: email.map(str::to_owned),
             health,
-            disabled: false,
         }
     }
 
     #[test]
     fn account_row_healthy() {
-        let row = format_account_row(&view(AccountHealth::Ok, Some("nghia@gmail.com")));
+        let row = format_account_row(&view(AccountHealth::Active, Some("nghia@gmail.com")));
         assert!(row.starts_with("●"));
         assert!(row.contains("nghia@gmail.com"));
         assert!(row.contains("anthropic"));
@@ -478,14 +481,15 @@ mod tests {
 
     #[test]
     fn account_row_needs_relogin() {
-        let row = format_account_row(&view(AccountHealth::NeedsRelogin, Some("x@y.com")));
+        use crate::auth::domain::ReloginReason;
+        let row = format_account_row(&view(AccountHealth::NeedsRelogin { reason: ReloginReason::RefreshFailed }, Some("x@y.com")));
         assert!(row.starts_with("○"));
         assert!(row.contains("needs re-login"));
     }
 
     #[test]
     fn account_row_falls_back_to_label_when_no_email() {
-        let row = format_account_row(&view(AccountHealth::Ok, None));
+        let row = format_account_row(&view(AccountHealth::Active, None));
         assert!(row.contains("nghia@gmail"));
     }
 }

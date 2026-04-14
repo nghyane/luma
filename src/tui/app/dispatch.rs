@@ -1,7 +1,9 @@
 /// Event dispatch — routes events to document (model) or view.
 use super::state::{PickerMode, RunState};
 use super::{ABORT_HINT_TICKS, Action};
-use crate::config::auth;
+use crate::auth::domain::AccountKey;
+use crate::auth::repo::FileAuthRepository;
+use crate::auth::service::AuthService;
 use crate::config::models;
 use crate::event::Event;
 use crate::tui::picker::PickerAction;
@@ -182,10 +184,17 @@ impl super::App {
             }
             Event::WebSearchStart { query } => {
                 crate::dbg_log!("web_search_start: {query}");
-                self.doc.tool_start("web_search", &query);
-                Action::Render
+                if query.is_empty() {
+                    Action::Continue
+                } else {
+                    self.doc.tool_start("web_search", &query);
+                    Action::Render
+                }
             }
             Event::WebSearchDone { query, results } => {
+                if query.is_empty() && results.is_empty() {
+                    return Action::Continue;
+                }
                 let end = if results.is_empty() {
                     "searched".to_owned()
                 } else {
@@ -295,12 +304,16 @@ impl super::App {
         if self.ui.dialog.is_active {
             use crate::tui::dialog::DialogAction;
             match self.ui.dialog.handle_key(&key) {
-                DialogAction::Toggle(label) => {
-                    auth::toggle_disabled(&label);
+                DialogAction::Toggle(id) => {
+                    if let Ok(key) = serde_json::from_str::<AccountKey>(&id) {
+                        let _ = AuthService::new(FileAuthRepository::with_default_path()).toggle_disabled(&key);
+                    }
                     self.open_accounts_dialog();
                 }
-                DialogAction::Remove(label) => {
-                    auth::remove_account(&label);
+                DialogAction::Remove(id) => {
+                    if let Ok(key) = serde_json::from_str::<AccountKey>(&id) {
+                        let _ = AuthService::new(FileAuthRepository::with_default_path()).remove_account(&key);
+                    }
                     self.refresh_pool_health();
                     if self.ui.dialog.items_is_empty() {
                         self.ui.dialog.close();

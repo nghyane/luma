@@ -107,7 +107,11 @@ async fn main() {
             }
         }
         Some("accounts") => {
-            let accounts = config::auth::list_accounts();
+            use auth::domain::AccountHealth;
+            use auth::repo::FileAuthRepository;
+            use auth::service::AuthService;
+            let svc = AuthService::new(FileAuthRepository::with_default_path());
+            let accounts = svc.list_accounts().unwrap_or_default();
             if accounts.is_empty() {
                 println!("no accounts · run 'luma login' to add one");
             } else {
@@ -117,14 +121,15 @@ async fn main() {
                     .unwrap_or(0);
                 for a in accounts {
                     let status = match a.health {
-                        config::auth::AccountHealth::Ok => "ok",
-                        config::auth::AccountHealth::Cooldown { .. } => "cooling",
-                        config::auth::AccountHealth::NeedsRelogin => "re-login",
+                        AccountHealth::Active => "ok",
+                        AccountHealth::CoolingDown { .. } => "cooling",
+                        AccountHealth::NeedsRelogin { .. } => "re-login",
+                        AccountHealth::Disabled => "disabled",
                     };
                     let email = a.email.as_deref().unwrap_or("-");
-                    println!("  {}  {}  {}", a.label, status, email);
+                    println!("  {}  {}  {}", a.display_name, status, email);
                 }
-                let _ = now; // used above via Cooldown pattern if needed later
+                let _ = now;
             }
         }
         Some("update") => {

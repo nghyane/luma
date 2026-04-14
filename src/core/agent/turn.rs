@@ -45,6 +45,9 @@ pub async fn run_chat_turn(
     tx: &EventSender,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
+    use crate::auth::domain::AuthFailure;
+    use crate::auth::repo::FileAuthRepository;
+    use crate::auth::service::AuthService;
     use crate::config::auth;
     use crate::provider::binding::GatewayId;
 
@@ -78,7 +81,12 @@ pub async fn run_chat_turn(
         if let Some(rl) = err.downcast_ref::<ProviderRateLimited>() {
             let label = rl.label.clone();
             let retry_after = rl.retry_after_secs;
-            auth::mark_rate_limited(&label, retry_after);
+            if let Some(key) = &auth_cred.account_key {
+                let _ = AuthService::new(FileAuthRepository::with_default_path())
+                    .mark_rate_limited(key, retry_after);
+            } else {
+                auth::mark_rate_limited(&label, retry_after);
+            }
             let _ = tx
                 .send(Event::ToolOutput {
                     name: String::new(),
@@ -96,12 +104,42 @@ pub async fn run_chat_turn(
             continue;
         }
 
-        // 401 / 403 — stale / revoked token (typed by the HTTP layer).
-        // OAuth credentials get one force-refresh attempt; api keys
-        // surface an actionable error and leave the pool untouched
-        // (matches the ecosystem convention: gh/aws/stripe CLIs never
-        // auto-delete credentials on a single auth failure).
+        // 401 / 403 — auth rejected by the server (typed by the HTTP
+        // layer). OAuth accounts treat 403 as account-specific access
+        // loss: mark this account `needs_relogin` and fail over to the
+        // next healthy account immediately. 401 still gets a
+        // force-refresh attempt on the same account. API keys surface an
+        // actionable error and leave the pool untouched.
         if let Some(unauth) = err.downcast_ref::<crate::provider::retry::ProviderUnauthorized>() {
+            if auth_cred.is_oauth && unauth.status == 403 {
+                let dead_label = auth_cred.label.clone();
+                if let Some(key) = &auth_cred.account_key {
+                    let _ = AuthService::new(FileAuthRepository::with_default_path())
+                        .mark_auth_failed(key, AuthFailure::Revoked);
+                } else {
+                    auth::mark_needs_relogin(&dead_label);
+                }
+                let _ = tx
+                    .send(Event::ToolOutput {
+                        name: String::new(),
+                        chunk: format!(
+                            "{} account {} rejected access (403), switching…",
+                            provider_kind.as_str(),
+                            dead_label
+                        ),
+                    })
+                    .await;
+                if attempt + 1 == MAX_AUTH_RETRIES {
+                    return Err(err);
+                }
+                auth_cred = auth::resolve(provider_kind).await?;
+                continue;
+            }
+
+            if attempt + 1 == MAX_AUTH_RETRIES {
+                return Err(err);
+            }
+
             if !auth_cred.is_oauth {
                 anyhow::bail!(
                     "{} key rejected ({}): {}. Run `luma login` to replace it.",
@@ -302,15 +340,10 @@ async fn run_turn(
         // a late client-side estimate is superseded if the server event
         // later pushes a better one.
         if usage.input_tokens == 0 && usage.output_tokens == 0 {
-            let est_chars: usize = session
-                .messages
-                .iter()
-                .map(|m| m.text().len())
-                .sum();
+            let est_chars: usize = session.messages.iter().map(|m| m.text().len()).sum();
             let ctx_window = crate::config::models::context_window(ctx.model_id);
             let est_tokens = (est_chars / 4) as u64;
-            let pct =
-                ((est_tokens as f64 / ctx_window as f64) * 100.0).clamp(0.0, 100.0) as f32;
+            let pct = ((est_tokens as f64 / ctx_window as f64) * 100.0).clamp(0.0, 100.0) as f32;
             let _ = ctx.tx.send(crate::event::Event::ContextUsage(pct)).await;
         }
 
@@ -578,7 +611,9 @@ async fn execute_one(
                 }
             });
 
-            let res = tool.execute(tu.input.clone(), output_tx, cancel, caps).await;
+            let res = tool
+                .execute(tu.input.clone(), output_tx, cancel, caps)
+                .await;
             fwd_handle.await.ok();
 
             match res {

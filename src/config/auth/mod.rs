@@ -107,6 +107,9 @@ pub struct Credential {
     pub account_id: Option<String>,
     pub label: String,
     pub profile_arn: Option<String>,
+    /// Stable key for the new AuthService. Populated when account_id or email
+    /// is available; None for anonymous entries that haven't been migrated yet.
+    pub account_key: Option<crate::auth::domain::AccountKey>,
 }
 
 /// UI-safe snapshot of a pooled account. No secrets.
@@ -551,12 +554,25 @@ fn candidate_rank(a: &AccountEntry) -> (u8, u8, u8, u8, u64) {
 }
 
 fn credential_from(e: &AccountEntry) -> Credential {
+    use crate::auth::domain::AccountKey;
+    let vendor = AuthVendor::from_str(&e.provider)
+        .map(crate::auth::domain::AuthVendor::from);
+    let account_key = vendor.and_then(|v| {
+        if let Some(id) = e.account_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(AccountKey::account_id(v, id))
+        } else if let Some(em) = e.email.as_deref().filter(|s| !s.is_empty()) {
+            Some(AccountKey::email(v, em))
+        } else {
+            None
+        }
+    });
     Credential {
         token: e.access_token.clone(),
         is_oauth: e.is_oauth,
         account_id: e.account_id.clone(),
         label: e.label.clone(),
         profile_arn: e.profile_arn.clone(),
+        account_key,
     }
 }
 
