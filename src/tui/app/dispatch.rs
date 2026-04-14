@@ -430,6 +430,11 @@ fn extract_image_path(text: &str) -> Option<String> {
 /// backslash as escaping the next character so spaces and other escaped bytes
 /// round-trip to the real filesystem path.
 fn unescape_pasted_path(path: &str) -> String {
+    // On Windows, backslash is the path separator, not an escape character.
+    // Only unescape `\ ` (escaped spaces) on Unix-like systems.
+    if cfg!(windows) {
+        return path.to_owned();
+    }
     let mut out = String::with_capacity(path.len());
     let mut chars = path.chars();
     while let Some(ch) = chars.next() {
@@ -468,10 +473,7 @@ mod tests {
 
     #[test]
     fn extract_image_path_accepts_png() {
-        let mut tmp = tempfile::Builder::new()
-            .suffix(".png")
-            .tempfile()
-            .unwrap();
+        let mut tmp = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
         tmp.write_all(b"fake").unwrap();
         let path = tmp.path().to_str().unwrap().to_owned();
         assert_eq!(extract_image_path(&path).as_deref(), Some(path.as_str()));
@@ -479,10 +481,7 @@ mod tests {
 
     #[test]
     fn extract_image_path_strips_file_scheme_and_quotes() {
-        let mut tmp = tempfile::Builder::new()
-            .suffix(".jpg")
-            .tempfile()
-            .unwrap();
+        let mut tmp = tempfile::Builder::new().suffix(".jpg").tempfile().unwrap();
         tmp.write_all(b"fake").unwrap();
         let path = tmp.path().to_str().unwrap().to_owned();
         let wrapped = format!("\"file://{path}\"");
@@ -491,16 +490,14 @@ mod tests {
 
     #[test]
     fn extract_image_path_case_insensitive_extension() {
-        let mut tmp = tempfile::Builder::new()
-            .suffix(".PNG")
-            .tempfile()
-            .unwrap();
+        let mut tmp = tempfile::Builder::new().suffix(".PNG").tempfile().unwrap();
         tmp.write_all(b"fake").unwrap();
         let path = tmp.path().to_str().unwrap().to_owned();
         assert_eq!(extract_image_path(&path).as_deref(), Some(path.as_str()));
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn extract_image_path_unescapes_backslash_escaped_spaces() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Khong co tieu de 8.png");
