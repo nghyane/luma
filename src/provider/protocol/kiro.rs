@@ -1,18 +1,30 @@
 //! Kiro (Amazon Q) protocol — AWS Event Stream binary framing.
 //!
 //! Endpoint: POST /generateAssistantResponse?origin=KIRO_CLI&profileArn=<arn>
-//! Response: AWS Event Stream frames, each containing a JSON payload.
+//! Response: chunked AWS Event Stream frames. Each frame carries a JSON
+//! payload plus an `:event-type` header. Relevant event types:
+//!
+//! * `assistantResponseEvent`: `{content: "<chunk>", modelId: ...}`
+//! * `toolUseEvent`: `{name, toolUseId, input?, stop?}` — `input` is a
+//!   raw argument-JSON fragment, concatenated across events and parsed
+//!   at stop. A `stop: true` frame terminates the tool call.
+//! * `meteringEvent`: credit usage (not token usage); ignored here.
 
 use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
+use futures::StreamExt;
 use serde_json::json;
+use std::collections::BTreeMap;
 
 use crate::core::provider::{Provider, StopReason, StreamRequest, StreamResponse};
 use crate::core::types::{
     ContentBlock, Message, Role, ThinkingLevel, ToolResultBody, ToolResultItem, Usage,
 };
+use crate::event::Event;
+use crate::event_bus::Sender as EventSender;
+use crate::provider::json_stream::{JsonStringExtractor, streamable_arg_for};
 use crate::util::uuid_v4;
 
 pub struct KiroRuntime {
@@ -20,23 +32,36 @@ pub struct KiroRuntime {
     base_url: String,
     token: String,
     profile_arn: Option<String>,
+    /// Stable identifiers derived from the app session. Live on the
+    /// runtime so every turn in the same session routes to the same
+    /// server-side conversation — useful for Kiro portal observability
+    /// even though the backend does not key its prompt cache on them.
+    conversation_id: String,
+    continuation_id: String,
 }
 
 impl KiroRuntime {
-    /// Create from model, gateway base URL, credential token, and optional
-    /// profile ARN. `base_url` is the gateway's scheme+host with no
-    /// trailing slash; the runtime appends `/generateAssistantResponse`.
+    /// Create from model, gateway base URL, credential token, optional
+    /// profile ARN, and the app session ID. `base_url` is the gateway's
+    /// scheme+host with no trailing slash; the runtime appends
+    /// `/generateAssistantResponse`. `session_id` is any stable token
+    /// (app session UUID); two UUIDs are derived from it per turn so
+    /// server-side session logs group by one conversation.
     pub fn new(
         model_id: &str,
         base_url: &str,
         token: &str,
         profile_arn: Option<String>,
+        session_id: &str,
     ) -> Self {
+        let (conversation_id, continuation_id) = derive_session_uuids(session_id);
         Self {
             model_id: model_id.to_owned(),
             base_url: base_url.to_owned(),
             token: token.to_owned(),
             profile_arn,
+            conversation_id,
+            continuation_id,
         }
     }
 }
@@ -65,7 +90,6 @@ impl KiroRuntime {
         let profile_arn = self.profile_arn.as_deref().unwrap_or("");
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|e| anyhow::anyhow!("Kiro client build: {e}"))?;
@@ -76,7 +100,14 @@ impl KiroRuntime {
             self.base_url
         );
 
-        let body = build_request_body(req.messages, &self.model_id, profile_arn, req.tools);
+        let body = build_request_body(
+            req.messages,
+            &self.model_id,
+            profile_arn,
+            req.tools,
+            &self.conversation_id,
+            &self.continuation_id,
+        );
 
         let resp = client
             .post(&url)
@@ -94,11 +125,23 @@ impl KiroRuntime {
             return Err(anyhow::anyhow!("Kiro HTTP {status}: {snippet}"));
         }
 
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| anyhow::anyhow!("Kiro read error: {e}"))?;
-        decode_event_stream(&bytes, &req)
+        // AWS Event Stream arrives over chunked transfer encoding. Decode
+        // frames as they land so the UI sees real-time tokens instead of
+        // a one-shot dump at end-of-body.
+        let mut decoder = FrameDecoder::new(req.tools);
+        let mut byte_stream = resp.bytes_stream();
+        while let Some(chunk) = byte_stream.next().await {
+            if req.cancel.is_cancelled() {
+                break;
+            }
+            let chunk = chunk.map_err(|e| anyhow::anyhow!("Kiro read error: {e}"))?;
+            decoder.feed(&chunk);
+            while let Some(frame) = decoder.pop_frame() {
+                decoder.handle_frame(&frame, &req.tx).await;
+            }
+        }
+
+        Ok(decoder.finish())
     }
 }
 
@@ -106,15 +149,68 @@ impl KiroRuntime {
 // Request builder
 // =============================================================================
 
+/// Derive two stable UUIDs from an app session ID. The app session ID is
+/// itself a UUID, so reuse it verbatim for the conversation. The
+/// continuation ID is a deterministic transform so both IDs are stable
+/// across turns in the same session but never collide.
+fn derive_session_uuids(session_id: &str) -> (String, String) {
+    let fallback = "00000000-0000-4000-8000-000000000000".to_owned();
+    let conversation_id = if is_uuid_shape(session_id) {
+        session_id.to_owned()
+    } else {
+        uuid_v4().unwrap_or_else(|| fallback.clone())
+    };
+    // Continuation: rotate the last hex char of the trailing group so the
+    // UUID stays valid but differs from conversation_id. If even that
+    // trivial transform fails (string too short), fall back to a fresh v4.
+    let continuation_id = rotate_last_hex(&conversation_id)
+        .unwrap_or_else(|| uuid_v4().unwrap_or(fallback));
+    (conversation_id, continuation_id)
+}
+
+fn is_uuid_shape(s: &str) -> bool {
+    // Minimal gate — Kiro rejects non-hex-and-dash cids with 400
+    // "Improperly formed request." Don't ship a corrupt id to the wire.
+    s.len() == 36
+        && s.as_bytes()
+            .iter()
+            .all(|b| b.is_ascii_hexdigit() || *b == b'-')
+}
+
+fn rotate_last_hex(uuid: &str) -> Option<String> {
+    let mut chars: Vec<char> = uuid.chars().collect();
+    let last = chars.last_mut()?;
+    let next = match *last {
+        '0' => '1',
+        '1' => '2',
+        '2' => '3',
+        '3' => '4',
+        '4' => '5',
+        '5' => '6',
+        '6' => '7',
+        '7' => '8',
+        '8' => '9',
+        '9' => 'a',
+        'a' => 'b',
+        'b' => 'c',
+        'c' => 'd',
+        'd' => 'e',
+        'e' => 'f',
+        'f' => '0',
+        _ => return None,
+    };
+    *last = next;
+    Some(chars.into_iter().collect())
+}
+
 fn build_request_body(
     messages: &[Message],
     model_id: &str,
     profile_arn: &str,
     tools: &[crate::core::types::ToolSchema],
+    conversation_id: &str,
+    continuation_id: &str,
 ) -> serde_json::Value {
-    let conversation_id = uuid_v4();
-    let continuation_id = uuid_v4();
-
     if messages.is_empty() {
         return json!({});
     }
@@ -275,99 +371,207 @@ fn extract_tool_results(msg: &Message) -> Vec<serde_json::Value> {
 // AWS Event Stream decoder
 // =============================================================================
 
-fn decode_event_stream(data: &[u8], req: &StreamRequest<'_>) -> Result<StreamResponse> {
-    let mut text = String::new();
-    // (tool_use_id, name, input_buf)
-    let mut tool_uses: Vec<(String, String, String)> = Vec::new();
-    let mut stop_reason = StopReason::EndTurn;
+// =============================================================================
+// AWS Event Stream decoder — incremental
+// =============================================================================
 
-    let mut pos = 0;
-    while pos < data.len() {
-        if pos + 12 > data.len() {
-            break;
+/// Per-tool-call accumulator. Mirrors `openai_responses::PendingTool`.
+struct PendingTool {
+    name: String,
+    arguments: String,
+    /// Incremental extractor for the streamable arg (Write `content`, etc.)
+    /// — `None` when the tool opts out.
+    arg_extractor: Option<JsonStringExtractor>,
+}
+
+/// One decoded AWS Event Stream frame.
+struct Frame {
+    event_type: Option<String>,
+    payload: Vec<u8>,
+}
+
+/// Incremental AWS Event Stream frame decoder.
+///
+/// `feed` appends bytes from the reqwest byte stream; `pop_frame` returns
+/// the next complete frame (or `None` if the buffer is short). `handle_frame`
+/// interprets one frame — forwarding UI events and updating the final
+/// `StreamResponse` state. `finish` materialises that state when the body
+/// ends.
+struct FrameDecoder<'a> {
+    tools: &'a [crate::core::types::ToolSchema],
+    buf: Vec<u8>,
+    text: String,
+    /// Ordered by first-seen tool_use_id so concurrent tool calls keep
+    /// their relative order in the final message.
+    tool_uses: BTreeMap<String, PendingTool>,
+    tool_order: Vec<String>,
+    stop_reason: StopReason,
+}
+
+impl<'a> FrameDecoder<'a> {
+    fn new(tools: &'a [crate::core::types::ToolSchema]) -> Self {
+        Self {
+            tools,
+            buf: Vec::new(),
+            text: String::new(),
+            tool_uses: BTreeMap::new(),
+            tool_order: Vec::new(),
+            stop_reason: StopReason::EndTurn,
         }
-        // Bounds checked above: `&data[pos..pos+4]` is exactly 4 bytes.
-        let total_len =
-            u32::from_be_bytes(data[pos..pos + 4].try_into().expect("4-byte slice")) as usize;
-        if total_len == 0 || pos + total_len > data.len() {
-            break;
-        }
-        let headers_len = u32::from_be_bytes(
-            data[pos + 4..pos + 8]
-                .try_into()
-                .expect("4-byte slice"),
-        ) as usize;
-        let headers_end = pos + 12 + headers_len;
-        let payload_end = pos + total_len - 4;
+    }
 
-        if headers_end > payload_end || payload_end > data.len() {
-            break;
-        }
+    fn feed(&mut self, chunk: &[u8]) {
+        self.buf.extend_from_slice(chunk);
+    }
 
-        let event_type = parse_event_type(&data[pos + 12..headers_end]);
-        let payload = &data[headers_end..payload_end];
-
-        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) {
-            match event_type.as_deref() {
-                Some("assistantResponseEvent") => {
-                    if let Some(chunk) = v.get("content").and_then(|c| c.as_str()) {
-                        text.push_str(chunk);
-                        let _ = req.tx.try_send(crate::event::Event::Token(chunk.to_owned()));
-                    }
-                }
-                Some("toolUseEvent") => {
-                    let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_owned();
-                    let tool_use_id = v
-                        .get("toolUseId")
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("")
-                        .to_owned();
-                    let is_stop = v.get("stop").and_then(|s| s.as_bool()).unwrap_or(false);
-                    let input_chunk = v.get("input").and_then(|i| i.as_str()).unwrap_or("").to_owned();
-
-                    if let Some(existing) = tool_uses.iter_mut().find(|(id, _, _)| id == &tool_use_id) {
-                        existing.2.push_str(&input_chunk);
-                    } else if !tool_use_id.is_empty() {
-                        tool_uses.push((tool_use_id.clone(), name.clone(), input_chunk));
-                        let _ = req.tx.try_send(crate::event::Event::ToolSelected {
-                            name: name.clone(),
-                        });
-                    }
-
-                    if is_stop {
-                        stop_reason = StopReason::ToolUse;
-                    }
-                }
-                _ => {}
+    fn pop_frame(&mut self) -> Option<Frame> {
+        loop {
+            if self.buf.len() < 12 {
+                return None;
             }
+            // Bounds checked above: next 4 bytes exist.
+            let total_len = u32::from_be_bytes(
+                self.buf[0..4]
+                    .try_into()
+                    .expect("4-byte slice"),
+            ) as usize;
+            if total_len == 0 || self.buf.len() < total_len {
+                return None;
+            }
+            let headers_len = u32::from_be_bytes(
+                self.buf[4..8]
+                    .try_into()
+                    .expect("4-byte slice"),
+            ) as usize;
+            let headers_end = 12 + headers_len;
+            let payload_end = total_len.saturating_sub(4);
+            if headers_end > payload_end || payload_end > total_len {
+                // Corrupt frame — skip it and try the next one. Return
+                // `None` only when the buffer genuinely has no more
+                // complete frames, so the outer loop doesn't stall.
+                self.buf.drain(..total_len);
+                continue;
+            }
+            let event_type = parse_event_type(&self.buf[12..headers_end]);
+            let payload = self.buf[headers_end..payload_end].to_vec();
+            self.buf.drain(..total_len);
+            return Some(Frame {
+                event_type,
+                payload,
+            });
         }
-
-        pos += total_len;
     }
 
-    let mut content = Vec::new();
-    if !text.is_empty() {
-        content.push(ContentBlock::Text { text });
-    }
-    for (id, name, input_str) in &tool_uses {
-        let input: serde_json::Value =
-            serde_json::from_str(input_str).unwrap_or_else(|_| json!({}));
-        content.push(ContentBlock::ToolUse {
-            id: id.clone(),
-            name: name.clone(),
-            input,
-        });
+    async fn handle_frame(&mut self, frame: &Frame, tx: &EventSender) {
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&frame.payload) else {
+            return;
+        };
+        match frame.event_type.as_deref() {
+            Some("assistantResponseEvent") => {
+                if let Some(chunk) = v.get("content").and_then(|c| c.as_str()) {
+                    self.text.push_str(chunk);
+                    let _ = tx.send(Event::Token(chunk.to_owned())).await;
+                }
+            }
+            Some("toolUseEvent") => {
+                let tool_use_id = v
+                    .get("toolUseId")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                if tool_use_id.is_empty() {
+                    return;
+                }
+                let name = v
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                let is_stop = v.get("stop").and_then(|s| s.as_bool()).unwrap_or(false);
+                let input_chunk = v.get("input").and_then(|i| i.as_str()).unwrap_or("");
+
+                let is_new = !self.tool_uses.contains_key(&tool_use_id);
+                if is_new {
+                    let arg_extractor = if name.is_empty() {
+                        None
+                    } else {
+                        streamable_arg_for(self.tools, &name).map(JsonStringExtractor::new)
+                    };
+                    self.tool_uses.insert(
+                        tool_use_id.clone(),
+                        PendingTool {
+                            name: name.clone(),
+                            arguments: String::new(),
+                            arg_extractor,
+                        },
+                    );
+                    self.tool_order.push(tool_use_id.clone());
+                    if !name.is_empty() {
+                        let _ = tx
+                            .send(Event::ToolSelected { name: name.clone() })
+                            .await;
+                    }
+                }
+
+                if !input_chunk.is_empty()
+                    && let Some(entry) = self.tool_uses.get_mut(&tool_use_id)
+                {
+                    entry.arguments.push_str(input_chunk);
+                    let tool_name = entry.name.clone();
+                    if let Some(ex) = entry.arg_extractor.as_mut() {
+                        let extracted = ex.feed(input_chunk);
+                        if !extracted.is_empty() {
+                            let _ = tx
+                                .send(Event::ToolInput {
+                                    name: tool_name,
+                                    chunk: extracted,
+                                })
+                                .await;
+                        }
+                    }
+                }
+
+                if is_stop {
+                    self.stop_reason = StopReason::ToolUse;
+                }
+            }
+            // meteringEvent, and anything else: ignore. Kiro reports
+            // usage in credits (float), not tokens — Usage::default()
+            // stays zeroed.
+            _ => {}
+        }
     }
 
-    Ok(StreamResponse {
-        message: Message {
-            role: Role::Assistant,
-            content,
-            origin: None,
-        },
-        usage: Usage::default(),
-        stop_reason,
-    })
+    fn finish(self) -> StreamResponse {
+        let mut content = Vec::new();
+        if !self.text.is_empty() {
+            content.push(ContentBlock::Text { text: self.text });
+        }
+        for id in self.tool_order {
+            let Some(tool) = self.tool_uses.get(&id) else {
+                continue;
+            };
+            let input: serde_json::Value = if tool.arguments.is_empty() {
+                json!({})
+            } else {
+                serde_json::from_str(&tool.arguments).unwrap_or_else(|_| json!({}))
+            };
+            content.push(ContentBlock::ToolUse {
+                id,
+                name: tool.name.clone(),
+                input,
+            });
+        }
+        StreamResponse {
+            message: Message {
+                role: Role::Assistant,
+                content,
+                origin: None,
+            },
+            usage: Usage::default(),
+            stop_reason: self.stop_reason,
+        }
+    }
 }
 
 fn parse_event_type(headers_data: &[u8]) -> Option<String> {
@@ -413,4 +617,190 @@ fn url_encode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event_bus;
+
+    /// Build one AWS Event Stream frame with a single `:event-type` header.
+    /// Total length = 4 (total_len) + 4 (headers_len) + 4 (prelude crc) +
+    /// headers + payload + 4 (message crc). CRCs aren't validated by the
+    /// decoder so we use zero placeholders — keeps the test fixture
+    /// hermetic.
+    fn frame(event_type: &str, payload: &[u8]) -> Vec<u8> {
+        // Header: 1 byte name_len | name | 1 byte val_type (7=string) |
+        // 2 bytes val_len (big-endian) | value
+        let name = b":event-type";
+        let mut headers = Vec::new();
+        headers.push(name.len() as u8);
+        headers.extend_from_slice(name);
+        headers.push(7);
+        headers.extend_from_slice(&(event_type.len() as u16).to_be_bytes());
+        headers.extend_from_slice(event_type.as_bytes());
+        let total_len = 4 + 4 + 4 + headers.len() + payload.len() + 4;
+        let headers_len = headers.len();
+        let mut out = Vec::with_capacity(total_len);
+        out.extend_from_slice(&(total_len as u32).to_be_bytes());
+        out.extend_from_slice(&(headers_len as u32).to_be_bytes());
+        out.extend_from_slice(&[0, 0, 0, 0]); // prelude crc (ignored)
+        out.extend_from_slice(&headers);
+        out.extend_from_slice(payload);
+        out.extend_from_slice(&[0, 0, 0, 0]); // message crc (ignored)
+        out
+    }
+
+    #[tokio::test]
+    async fn decoder_streams_assistant_text_across_partial_chunks() {
+        let wire = [
+            frame(
+                "assistantResponseEvent",
+                br#"{"content":"Hi","modelId":"claude"}"#,
+            ),
+            frame(
+                "assistantResponseEvent",
+                br#"{"content":" there","modelId":"claude"}"#,
+            ),
+        ]
+        .concat();
+
+        let (tx, mut rx) = event_bus::channel();
+        let mut decoder = FrameDecoder::new(&[]);
+
+        // Split mid-frame so the decoder has to buffer across feeds.
+        let mid = wire.len() / 2;
+        decoder.feed(&wire[..mid]);
+        while let Some(f) = decoder.pop_frame() {
+            decoder.handle_frame(&f, &tx).await;
+        }
+        decoder.feed(&wire[mid..]);
+        while let Some(f) = decoder.pop_frame() {
+            decoder.handle_frame(&f, &tx).await;
+        }
+
+        drop(tx);
+        let mut tokens = Vec::new();
+        while let Some(evt) = rx.recv().await {
+            if let Event::Token(t) = evt {
+                tokens.push(t);
+            }
+        }
+        // event_bus coalesces adjacent Token deltas — the combined string
+        // is what matters, not the chunk boundary.
+        assert_eq!(tokens.join(""), "Hi there");
+
+        let resp = decoder.finish();
+        assert_eq!(resp.stop_reason, StopReason::EndTurn);
+        match &resp.message.content[..] {
+            [ContentBlock::Text { text }] => assert_eq!(text, "Hi there"),
+            other => panic!("unexpected content: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn decoder_accumulates_tool_input_chunks_and_parses_on_stop() {
+        // Mirrors the live Kiro wire shape captured from a real probe:
+        // first frame = {name, toolUseId} (no input), then deltas with
+        // `input: "..."` fragments, terminated by `{stop: true}`.
+        let id = "tooluse_abc";
+        let wire = [
+            frame(
+                "toolUseEvent",
+                format!(r#"{{"name":"add","toolUseId":"{id}"}}"#).as_bytes(),
+            ),
+            frame(
+                "toolUseEvent",
+                format!(r#"{{"input":"{{\"a\":3","name":"add","toolUseId":"{id}"}}"#).as_bytes(),
+            ),
+            frame(
+                "toolUseEvent",
+                format!(r#"{{"input":",\"b\":4}}","name":"add","toolUseId":"{id}"}}"#).as_bytes(),
+            ),
+            frame(
+                "toolUseEvent",
+                format!(r#"{{"name":"add","stop":true,"toolUseId":"{id}"}}"#).as_bytes(),
+            ),
+        ]
+        .concat();
+
+        let (tx, mut rx) = event_bus::channel();
+        let mut decoder = FrameDecoder::new(&[]);
+        decoder.feed(&wire);
+        while let Some(f) = decoder.pop_frame() {
+            decoder.handle_frame(&f, &tx).await;
+        }
+
+        drop(tx);
+        let mut tool_selected = None;
+        while let Some(evt) = rx.recv().await {
+            if let Event::ToolSelected { name } = evt {
+                tool_selected = Some(name);
+            }
+        }
+        assert_eq!(tool_selected.as_deref(), Some("add"));
+
+        let resp = decoder.finish();
+        assert_eq!(resp.stop_reason, StopReason::ToolUse);
+        match &resp.message.content[..] {
+            [ContentBlock::ToolUse { name, input, .. }] => {
+                assert_eq!(name, "add");
+                assert_eq!(input["a"], 3);
+                assert_eq!(input["b"], 4);
+            }
+            other => panic!("unexpected content: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn decoder_drops_corrupt_frame_without_getting_stuck() {
+        // total_len claims 20 bytes, headers_len > total_len payload → invalid.
+        let mut bad = Vec::new();
+        bad.extend_from_slice(&20u32.to_be_bytes());
+        bad.extend_from_slice(&100u32.to_be_bytes());
+        bad.extend_from_slice(&[0; 12]);
+        let good = frame(
+            "assistantResponseEvent",
+            br#"{"content":"after","modelId":"c"}"#,
+        );
+
+        let (tx, _rx) = event_bus::channel();
+        let mut decoder = FrameDecoder::new(&[]);
+        decoder.feed(&bad);
+        decoder.feed(&good);
+        while let Some(f) = decoder.pop_frame() {
+            decoder.handle_frame(&f, &tx).await;
+        }
+
+        let resp = decoder.finish();
+        match &resp.message.content[..] {
+            [ContentBlock::Text { text }] => assert_eq!(text, "after"),
+            other => panic!("corrupt frame stalled decoder: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn derive_session_uuids_is_stable_and_distinct() {
+        let session = "7ba1f7e5-4c7a-4c5f-8a6d-8f9c7c3e1b2a";
+        let (cid1, kid1) = derive_session_uuids(session);
+        let (cid2, kid2) = derive_session_uuids(session);
+        // Same session → same IDs across turns (server-side observability).
+        assert_eq!(cid1, cid2);
+        assert_eq!(kid1, kid2);
+        // But conversation and continuation must differ.
+        assert_ne!(cid1, kid1);
+        // Kiro's regex wants proper UUID shape; our ids must pass.
+        assert!(is_uuid_shape(&cid1));
+        assert!(is_uuid_shape(&kid1));
+    }
+
+    #[test]
+    fn derive_session_uuids_handles_non_uuid_input() {
+        // App passes through session_id verbatim. If it isn't a UUID we
+        // generate one rather than emit "Improperly formed request" 400s.
+        let (cid, kid) = derive_session_uuids("not-a-uuid");
+        assert!(is_uuid_shape(&cid));
+        assert!(is_uuid_shape(&kid));
+        assert_ne!(cid, kid);
+    }
 }

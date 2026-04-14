@@ -35,13 +35,14 @@ impl Gateway for Kiro {
         &self,
         binding: &ModelBinding,
         credential: &Credential,
-        _session_id: &str,
+        session_id: &str,
     ) -> Box<dyn Provider> {
         Box::new(KiroRuntime::new(
             &binding.model_id,
             &binding.base_url,
             &credential.token,
             credential.profile_arn.clone(),
+            session_id,
         ))
     }
 }
