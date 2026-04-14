@@ -6,7 +6,8 @@
         "max_output_tokens": 64000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "claude-sonnet-4-6",
@@ -15,7 +16,8 @@
         "max_output_tokens": 64000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "claude-opus-4-6",
@@ -24,7 +26,8 @@
         "max_output_tokens": 128000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "claude-sonnet-4-5-20250929",
@@ -33,7 +36,8 @@
         "max_output_tokens": 64000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "claude-opus-4-5-20251101",
@@ -42,7 +46,8 @@
         "max_output_tokens": 64000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "claude-opus-4-1-20250805",
@@ -51,7 +56,8 @@
         "max_output_tokens": 32000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "claude-opus-4-20250514",
@@ -60,7 +66,8 @@
         "max_output_tokens": 32000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "claude-sonnet-4-20250514",
@@ -69,7 +76,8 @@
         "max_output_tokens": 64000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "claude-3-haiku-20240307",
@@ -78,7 +86,8 @@
         "max_output_tokens": 4096,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "gpt-5.4",
@@ -87,7 +96,8 @@
         "max_output_tokens": 128000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "gpt-5.4-mini",
@@ -96,7 +106,8 @@
         "max_output_tokens": 128000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "gpt-5-mini",
@@ -105,7 +116,8 @@
         "max_output_tokens": 128000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "codex-mini-latest",
@@ -114,7 +126,8 @@
         "max_output_tokens": 100000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "kimi-k2.5",
@@ -168,7 +181,8 @@
         "max_output_tokens": 64000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "claude-sonnet-4.5",
@@ -177,7 +191,8 @@
         "max_output_tokens": 64000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "claude-sonnet-4",
@@ -186,21 +201,24 @@
         "max_output_tokens": 64000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "deepseek-3.2",
         "source": "kiro",
         "context_window": 164000,
         "max_output_tokens": 64000,
-        "capabilities": []
+        "capabilities": [],
+        "prompt_caching": false
     },
     {
         "id": "minimax-m2.5",
         "source": "kiro",
         "context_window": 196000,
         "max_output_tokens": 64000,
-        "capabilities": []
+        "capabilities": [],
+        "prompt_caching": false
     },
     {
         "id": "minimax-m2.1",
@@ -209,14 +227,16 @@
         "max_output_tokens": 64000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": false
     },
     {
         "id": "glm-5",
         "source": "kiro",
         "context_window": 200000,
         "max_output_tokens": 64000,
-        "capabilities": []
+        "capabilities": [],
+        "prompt_caching": false
     },
     {
         "id": "qwen3-coder-next",
@@ -225,7 +245,8 @@
         "max_output_tokens": 64000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": false
     },
     {
         "id": "claude-opus-4.6",
@@ -234,7 +255,8 @@
         "max_output_tokens": 64000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "claude-opus-4.5",
@@ -243,7 +265,8 @@
         "max_output_tokens": 64000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "claude-sonnet-4.6",
@@ -252,7 +275,8 @@
         "max_output_tokens": 64000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     },
     {
         "id": "claude-haiku-4.5",
@@ -261,6 +285,7 @@
         "max_output_tokens": 64000,
         "capabilities": [
             "vision"
-        ]
+        ],
+        "prompt_caching": true
     }
 ]

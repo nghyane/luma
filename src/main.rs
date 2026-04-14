@@ -141,6 +141,11 @@ async fn main() {
                     std::process::exit(1);
                 }
                 println!("done");
+            } else {
+                // Stale-snapshot or post-upgrade refresh. Non-blocking —
+                // the UI launches against the existing snapshot; newly
+                // rolled models show up on the next start.
+                config::models::sync_in_background();
             }
 
             let env_context = build_env_context();

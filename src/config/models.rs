@@ -22,6 +22,12 @@ pub struct ModelEntry {
     /// err on the safe side (tools fall back to metadata text).
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Whether the provider honours prompt caching on this model. Used
+    /// by the cache-breakpoint quirk to gate the Anthropic-style
+    /// breakpoint injection per model. Unknown = `None` so the caller
+    /// keeps its existing per-gateway default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_caching: Option<bool>,
 }
 
 /// Agent mode.
@@ -56,7 +62,32 @@ impl AgentMode {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Snapshot {
     models: Vec<ModelEntry>,
+    /// Unix seconds at which this snapshot was written. Missing on
+    /// pre-2026-04 snapshots — `synced_at_or_zero` treats those as
+    /// "ancient" so auto-sync picks them up on next start.
+    #[serde(default)]
+    synced_at: u64,
+    /// luma version that wrote the snapshot. Used to force a re-sync
+    /// when upgrading catalogs or adding new ModelEntry fields that
+    /// older snapshots lack (e.g. `prompt_caching`).
+    #[serde(default)]
+    luma_version: String,
 }
+
+impl Snapshot {
+    fn is_stale(&self, now: u64, ttl_secs: u64) -> bool {
+        if self.luma_version != env!("CARGO_PKG_VERSION") {
+            return true;
+        }
+        self.synced_at == 0 || now.saturating_sub(self.synced_at) > ttl_secs
+    }
+}
+
+/// Snapshot age before `all_models()` callers should kick off a
+/// background re-sync. One week — long enough that normal use doesn't
+/// pay for a network call per launch, short enough that newly rolled
+/// provider models show up without requiring `luma sync`.
+const SNAPSHOT_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 
 fn snapshot_path() -> PathBuf {
     dirs_home().join(".config").join("luma").join("models.json")
@@ -92,6 +123,9 @@ fn overlay_metadata(models: Vec<ModelEntry>) -> Vec<ModelEntry> {
                 if model.max_output_tokens.is_none() {
                     model.max_output_tokens = extra.max_output_tokens;
                 }
+                if model.prompt_caching.is_none() {
+                    model.prompt_caching = extra.prompt_caching;
+                }
             }
             model
         })
@@ -111,6 +145,38 @@ fn normalize_models(models: Vec<ModelEntry>) -> Vec<ModelEntry> {
 /// Whether models have been synced before.
 pub fn has_synced() -> bool {
     snapshot_path().exists()
+}
+
+/// Whether the cached snapshot is missing, older than
+/// [`SNAPSHOT_TTL_SECS`], or was written by a different luma version.
+/// Callers surface this to decide whether to kick off a background sync.
+pub fn should_auto_sync() -> bool {
+    match load_snapshot() {
+        Some(s) => s.is_stale(now_unix(), SNAPSHOT_TTL_SECS),
+        None => true,
+    }
+}
+
+/// Fire-and-forget sync on a tokio task. Safe to call on every startup
+/// — noop if the snapshot is fresh and version-matched. Errors are
+/// logged via `dbg_log!` and don't propagate; the caller keeps running
+/// against the stale snapshot.
+pub fn sync_in_background() {
+    if !should_auto_sync() {
+        return;
+    }
+    tokio::spawn(async {
+        if let Err(e) = sync().await {
+            crate::dbg_log!("background sync failed: {e}");
+        }
+    });
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// All known models.
@@ -198,6 +264,8 @@ pub async fn sync() -> Result<usize> {
     );
     let snapshot = Snapshot {
         models: normalize_models(overlay_metadata(models)),
+        synced_at: now_unix(),
+        luma_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
 
     let path = snapshot_path();
@@ -237,6 +305,7 @@ async fn scan_anthropic() -> Result<Vec<ModelEntry>> {
                         context_window: None,
                         max_output_tokens: None,
                         capabilities: Vec::new(),
+                        prompt_caching: None,
                     })
                 })
                 .collect()
@@ -274,6 +343,7 @@ async fn scan_codex() -> Result<Vec<ModelEntry>> {
                         context_window: m["context_window"].as_u64(),
                         max_output_tokens: m["max_output_tokens"].as_u64(),
                         capabilities: Vec::new(),
+                        prompt_caching: None,
                     })
                 })
                 .collect()
@@ -333,12 +403,14 @@ async fn scan_kiro() -> Result<Vec<ModelEntry>> {
                     } else {
                         Vec::new()
                     };
+                    let prompt_caching = m["promptCaching"]["supportsPromptCaching"].as_bool();
                     Some(ModelEntry {
                         id,
                         source: "kiro".into(),
                         context_window: m["tokenLimits"]["maxInputTokens"].as_u64(),
                         max_output_tokens: m["tokenLimits"]["maxOutputTokens"].as_u64(),
                         capabilities,
+                        prompt_caching,
                     })
                 })
                 .collect()
@@ -377,10 +449,37 @@ mod tests {
             context_window: None,
             max_output_tokens: Some(123),
             capabilities: Vec::new(),
+            prompt_caching: None,
         }]);
         let model = &models[0];
         // context_window filled from catalog, max_output_tokens preserved.
         assert_eq!(model.context_window, Some(1_000_000));
         assert_eq!(model.max_output_tokens, Some(123));
+    }
+
+    #[test]
+    fn snapshot_is_stale_on_version_mismatch_or_age() {
+        let fresh = Snapshot {
+            models: Vec::new(),
+            synced_at: 1_000_000,
+            luma_version: env!("CARGO_PKG_VERSION").into(),
+        };
+        // Same version, within TTL → fresh.
+        assert!(!fresh.is_stale(1_000_100, SNAPSHOT_TTL_SECS));
+        // Past TTL → stale.
+        assert!(fresh.is_stale(1_000_000 + SNAPSHOT_TTL_SECS + 1, SNAPSHOT_TTL_SECS));
+
+        // Mismatched version is always stale, regardless of age.
+        let old_version = Snapshot {
+            models: Vec::new(),
+            synced_at: 1_000_000,
+            luma_version: "0.0.0-ancient".into(),
+        };
+        assert!(old_version.is_stale(1_000_100, SNAPSHOT_TTL_SECS));
+
+        // Default-deserialized (pre-metadata) snapshot has synced_at=0
+        // and empty version → stale.
+        let legacy: Snapshot = serde_json::from_str(r#"{"models":[]}"#).unwrap();
+        assert!(legacy.is_stale(9_999_999_999, SNAPSHOT_TTL_SECS));
     }
 }
