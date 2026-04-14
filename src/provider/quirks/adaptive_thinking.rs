@@ -24,7 +24,7 @@ pub fn build_thinking_config(
     }
     if is_adaptive_thinking_model(model) {
         let effort = match level {
-            ThinkingLevel::Off => return None,
+            ThinkingLevel::Off => unreachable!("Off short-circuits above"),
             ThinkingLevel::Low => "low",
             ThinkingLevel::Medium => "medium",
             ThinkingLevel::High => "high",

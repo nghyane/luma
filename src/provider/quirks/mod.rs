@@ -8,9 +8,7 @@
 //! `auth_kind` or hardcoding gateway names.
 //!
 //! The set is a bitflag `u32` wrapper: hand-rolled to keep the dependency
-//! allowlist short (no `bitflags` crate). Iteration order is intentional
-//! — quirks apply in ascending bit position so the wire output is
-//! deterministic across gateway configurations.
+//! allowlist short (no `bitflags` crate).
 
 pub mod adaptive_thinking;
 pub mod cache_breakpoint;
