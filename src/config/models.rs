@@ -12,8 +12,6 @@ const BUILTIN_MODELS_JSON: &str = include_str!("models.catalog.json");
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelEntry {
     pub id: String,
-    #[serde(default)]
-    pub display_name: Option<String>,
     pub source: String,
     #[serde(default)]
     pub context_window: Option<u64>,
@@ -88,9 +86,6 @@ fn overlay_metadata(models: Vec<ModelEntry>) -> Vec<ModelEntry> {
         .into_iter()
         .map(|mut model| {
             if let Some(extra) = meta.get(&(model.source.clone(), model.id.clone())) {
-                if model.display_name.is_none() {
-                    model.display_name = extra.display_name.clone();
-                }
                 if model.context_window.is_none() {
                     model.context_window = extra.context_window;
                 }
@@ -238,7 +233,6 @@ async fn scan_anthropic() -> Result<Vec<ModelEntry>> {
                 .filter_map(|m| {
                     Some(ModelEntry {
                         id: m["id"].as_str()?.to_owned(),
-                        display_name: None,
                         source: "anthropic".into(),
                         context_window: None,
                         max_output_tokens: None,
@@ -276,7 +270,6 @@ async fn scan_codex() -> Result<Vec<ModelEntry>> {
                     }
                     Some(ModelEntry {
                         id: slug.to_owned(),
-                        display_name: None,
                         source: "codex".into(),
                         context_window: m["context_window"].as_u64(),
                         max_output_tokens: m["max_output_tokens"].as_u64(),
@@ -289,9 +282,68 @@ async fn scan_codex() -> Result<Vec<ModelEntry>> {
 }
 
 async fn scan_kiro() -> Result<Vec<ModelEntry>> {
-    // Kiro list-models endpoint requires AWS SigV4 (Cognito credentials),
-    // not Bearer auth. Return builtin catalog instead.
-    anyhow::bail!("kiro: use builtin catalog")
+    let auth = auth::resolve(AuthVendor::Kiro).await?;
+    let profile_arn = auth
+        .profile_arn
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Kiro credential is missing profile_arn"))?;
+
+    // AWS CodeWhisperer coral service — Bearer OAuth (no SigV4 needed for
+    // this op), JSON/1.0 envelope, target in the header. Endpoint is the
+    // same host as /generateAssistantResponse, different dispatch.
+    let body = serde_json::json!({
+        "profileArn": profile_arn,
+        "origin": "KIRO_CLI",
+    });
+    let client = reqwest::Client::new();
+    let res = client
+        .post("https://q.us-east-1.amazonaws.com/")
+        .header("Authorization", format!("Bearer {}", auth.token))
+        .header("Content-Type", "application/x-amz-json-1.0")
+        .header(
+            "X-Amz-Target",
+            "AmazonCodeWhispererService.ListAvailableModels",
+        )
+        .json(&body)
+        .send()
+        .await?;
+
+    if !res.status().is_success() {
+        anyhow::bail!("Kiro: {}", res.status());
+    }
+
+    let data: serde_json::Value = res.json().await?;
+    Ok(data["models"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    let id = m["modelId"].as_str()?.to_owned();
+                    let supported = m["supportedInputTypes"]
+                        .as_array()
+                        .map(|types| {
+                            types
+                                .iter()
+                                .filter_map(|t| t.as_str())
+                                .any(|t| t.eq_ignore_ascii_case("IMAGE"))
+                        })
+                        .unwrap_or(false);
+                    let capabilities = if supported {
+                        vec!["vision".to_owned()]
+                    } else {
+                        Vec::new()
+                    };
+                    Some(ModelEntry {
+                        id,
+                        source: "kiro".into(),
+                        context_window: m["tokenLimits"]["maxInputTokens"].as_u64(),
+                        max_output_tokens: m["tokenLimits"]["maxOutputTokens"].as_u64(),
+                        capabilities,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -321,14 +373,13 @@ mod tests {
     fn overlay_metadata_fills_missing_fields_only() {
         let models = overlay_metadata(vec![ModelEntry {
             id: "gpt-5.4".into(),
-            display_name: None,
             source: "codex".into(),
             context_window: None,
             max_output_tokens: Some(123),
             capabilities: Vec::new(),
         }]);
         let model = &models[0];
-        assert_eq!(model.display_name.as_deref(), Some("GPT-5.4"));
+        // context_window filled from catalog, max_output_tokens preserved.
         assert_eq!(model.context_window, Some(1_000_000));
         assert_eq!(model.max_output_tokens, Some(123));
     }

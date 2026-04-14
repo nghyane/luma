@@ -1,7 +1,6 @@
 [
     {
         "id": "claude-haiku-4-5-20251001",
-        "display_name": "Claude Haiku 4.5",
         "source": "anthropic",
         "context_window": 200000,
         "max_output_tokens": 64000,
@@ -11,7 +10,6 @@
     },
     {
         "id": "claude-sonnet-4-6",
-        "display_name": "Claude Sonnet 4.6",
         "source": "anthropic",
         "context_window": 1000000,
         "max_output_tokens": 64000,
@@ -21,7 +19,6 @@
     },
     {
         "id": "claude-opus-4-6",
-        "display_name": "Claude Opus 4.6",
         "source": "anthropic",
         "context_window": 1000000,
         "max_output_tokens": 128000,
@@ -31,7 +28,6 @@
     },
     {
         "id": "claude-sonnet-4-5-20250929",
-        "display_name": "Claude Sonnet 4.5",
         "source": "anthropic",
         "context_window": 200000,
         "max_output_tokens": 64000,
@@ -41,7 +37,6 @@
     },
     {
         "id": "claude-opus-4-5-20251101",
-        "display_name": "Claude Opus 4.5",
         "source": "anthropic",
         "context_window": 200000,
         "max_output_tokens": 64000,
@@ -51,7 +46,6 @@
     },
     {
         "id": "claude-opus-4-1-20250805",
-        "display_name": "Claude Opus 4.1",
         "source": "anthropic",
         "context_window": 200000,
         "max_output_tokens": 32000,
@@ -61,7 +55,6 @@
     },
     {
         "id": "claude-opus-4-20250514",
-        "display_name": "Claude Opus 4",
         "source": "anthropic",
         "context_window": 200000,
         "max_output_tokens": 32000,
@@ -71,7 +64,6 @@
     },
     {
         "id": "claude-sonnet-4-20250514",
-        "display_name": "Claude Sonnet 4",
         "source": "anthropic",
         "context_window": 200000,
         "max_output_tokens": 64000,
@@ -81,7 +73,6 @@
     },
     {
         "id": "claude-3-haiku-20240307",
-        "display_name": "Claude 3 Haiku",
         "source": "anthropic",
         "context_window": 200000,
         "max_output_tokens": 4096,
@@ -91,7 +82,6 @@
     },
     {
         "id": "gpt-5.4",
-        "display_name": "GPT-5.4",
         "source": "codex",
         "context_window": 1000000,
         "max_output_tokens": 128000,
@@ -101,7 +91,6 @@
     },
     {
         "id": "gpt-5.4-mini",
-        "display_name": "GPT-5.4 mini",
         "source": "codex",
         "context_window": 400000,
         "max_output_tokens": 128000,
@@ -111,7 +100,6 @@
     },
     {
         "id": "gpt-5-mini",
-        "display_name": "GPT-5 mini",
         "source": "codex",
         "context_window": 400000,
         "max_output_tokens": 128000,
@@ -121,7 +109,6 @@
     },
     {
         "id": "codex-mini-latest",
-        "display_name": "Codex mini",
         "source": "codex",
         "context_window": 200000,
         "max_output_tokens": 100000,
@@ -131,35 +118,30 @@
     },
     {
         "id": "kimi-k2.5",
-        "display_name": "Kimi K2.5",
         "source": "opencode-go",
         "context_window": 200000,
         "max_output_tokens": 16000
     },
     {
         "id": "glm-5",
-        "display_name": "GLM-5",
         "source": "opencode-go",
         "context_window": 200000,
         "max_output_tokens": 16000
     },
     {
         "id": "glm-5.1",
-        "display_name": "GLM-5.1",
         "source": "opencode-go",
         "context_window": 200000,
         "max_output_tokens": 16000
     },
     {
         "id": "mimo-v2-pro",
-        "display_name": "MiMo-V2-Pro",
         "source": "opencode-go",
         "context_window": 200000,
         "max_output_tokens": 16000
     },
     {
         "id": "mimo-v2-omni",
-        "display_name": "MiMo-V2-Omni",
         "source": "opencode-go",
         "context_window": 200000,
         "max_output_tokens": 16000,
@@ -169,21 +151,18 @@
     },
     {
         "id": "minimax-m2.5",
-        "display_name": "MiniMax M2.5",
         "source": "opencode-go",
         "context_window": 200000,
         "max_output_tokens": 16000
     },
     {
         "id": "minimax-m2.7",
-        "display_name": "MiniMax M2.7",
         "source": "opencode-go",
         "context_window": 200000,
         "max_output_tokens": 16000
     },
     {
         "id": "auto",
-        "display_name": "Amazon Q (auto)",
         "source": "kiro",
         "context_window": 1000000,
         "max_output_tokens": 64000,
@@ -193,7 +172,6 @@
     },
     {
         "id": "claude-sonnet-4.5",
-        "display_name": "Claude Sonnet 4.5 (Kiro)",
         "source": "kiro",
         "context_window": 200000,
         "max_output_tokens": 64000,
@@ -203,7 +181,6 @@
     },
     {
         "id": "claude-sonnet-4",
-        "display_name": "Claude Sonnet 4 (Kiro)",
         "source": "kiro",
         "context_window": 200000,
         "max_output_tokens": 64000,
@@ -213,7 +190,6 @@
     },
     {
         "id": "deepseek-3.2",
-        "display_name": "DeepSeek 3.2 (Kiro)",
         "source": "kiro",
         "context_window": 164000,
         "max_output_tokens": 64000,
@@ -221,7 +197,6 @@
     },
     {
         "id": "minimax-m2.5",
-        "display_name": "MiniMax M2.5 (Kiro)",
         "source": "kiro",
         "context_window": 196000,
         "max_output_tokens": 64000,
@@ -229,7 +204,6 @@
     },
     {
         "id": "minimax-m2.1",
-        "display_name": "MiniMax M2.1 (Kiro)",
         "source": "kiro",
         "context_window": 196000,
         "max_output_tokens": 64000,
@@ -239,7 +213,6 @@
     },
     {
         "id": "glm-5",
-        "display_name": "GLM-5 (Kiro)",
         "source": "kiro",
         "context_window": 200000,
         "max_output_tokens": 64000,
@@ -247,7 +220,6 @@
     },
     {
         "id": "qwen3-coder-next",
-        "display_name": "Qwen3 Coder Next (Kiro)",
         "source": "kiro",
         "context_window": 256000,
         "max_output_tokens": 64000,
@@ -257,7 +229,6 @@
     },
     {
         "id": "claude-opus-4.6",
-        "display_name": "Claude Opus 4.6 (Kiro)",
         "source": "kiro",
         "context_window": 1000000,
         "max_output_tokens": 64000,
@@ -267,7 +238,6 @@
     },
     {
         "id": "claude-opus-4.5",
-        "display_name": "Claude Opus 4.5 (Kiro)",
         "source": "kiro",
         "context_window": 200000,
         "max_output_tokens": 64000,
@@ -277,7 +247,6 @@
     },
     {
         "id": "claude-sonnet-4.6",
-        "display_name": "Claude Sonnet 4.6 (Kiro)",
         "source": "kiro",
         "context_window": 1000000,
         "max_output_tokens": 64000,
@@ -287,7 +256,6 @@
     },
     {
         "id": "claude-haiku-4.5",
-        "display_name": "Claude Haiku 4.5 (Kiro)",
         "source": "kiro",
         "context_window": 200000,
         "max_output_tokens": 64000,
