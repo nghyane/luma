@@ -1,11 +1,16 @@
 use crate::core::tool::Tool;
 use crate::core::types::ToolSchema;
 /// Tool registry — client tools (we execute) and server capabilities.
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Stores registered tools and declared server capabilities.
+///
+/// Uses `BTreeMap` so `schemas()` yields a deterministic order across
+/// runs. Providers that hash request bytes for prompt caching (Kiro,
+/// Anthropic cache_control) would otherwise see different tool ordering
+/// each launch and miss the server-side cache on every turn.
 pub struct Registry {
-    tools: HashMap<String, Box<dyn Tool>>,
+    tools: BTreeMap<String, Box<dyn Tool>>,
     /// Server capability names (e.g. "web_search").
     /// Provider maps these to its own schema format.
     server_capabilities: Vec<String>,
@@ -14,7 +19,7 @@ pub struct Registry {
 impl Registry {
     pub fn new() -> Self {
         Self {
-            tools: HashMap::new(),
+            tools: BTreeMap::new(),
             server_capabilities: Vec::new(),
         }
     }
@@ -129,5 +134,58 @@ mod tests {
         reg.add_server_capability("web_search");
         reg.add_server_capability("web_search");
         assert_eq!(reg.server_capabilities().len(), 1);
+    }
+
+    struct NamedTool(&'static str);
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema {
+                name: self.0.into(),
+                description: String::new(),
+                parameters: serde_json::json!({}),
+                streamable_arg: None,
+            }
+        }
+        fn execute(
+            &self,
+            _args: serde_json::Value,
+            _output_tx: mpsc::Sender<String>,
+            _cancel: CancellationToken,
+            _caps: crate::core::tool::ModelCaps,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<ToolExecution>> + Send + '_>,
+        > {
+            Box::pin(async {
+                Ok(ToolExecution {
+                    result: crate::core::types::ToolResultBody::Text(String::new()),
+                    artifact: None,
+                })
+            })
+        }
+    }
+
+    /// `schemas()` order must be stable across registrations in different
+    /// orders — otherwise server-side prompt caches (Kiro, Anthropic
+    /// cache_control) miss on every turn because the tool-list bytes drift.
+    #[test]
+    fn schemas_are_sorted_regardless_of_register_order() {
+        let mut a = Registry::new();
+        for n in ["bash", "read", "edit", "glob", "grep"] {
+            a.register(Box::new(NamedTool(n)));
+        }
+        let mut b = Registry::new();
+        for n in ["grep", "glob", "edit", "read", "bash"] {
+            b.register(Box::new(NamedTool(n)));
+        }
+        let a_names: Vec<_> = a.schemas().iter().map(|s| s.name.clone()).collect();
+        let b_names: Vec<_> = b.schemas().iter().map(|s| s.name.clone()).collect();
+        assert_eq!(a_names, b_names);
+        // And it's actually sorted — not merely equal by luck.
+        let mut sorted = a_names.clone();
+        sorted.sort();
+        assert_eq!(a_names, sorted);
     }
 }

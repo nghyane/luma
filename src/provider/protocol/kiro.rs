@@ -230,7 +230,7 @@ fn build_request_body(
     let (history_msgs, current_msg) = (&messages[..messages.len() - 1], &messages[messages.len() - 1]);
 
     let tool_specs = build_tool_specs(tools);
-    let history = build_history(history_msgs, &tool_specs, model_id);
+    let history = build_history(history_msgs, model_id);
     let current = build_current_message(current_msg, model_id, &tool_specs);
 
     json!({
@@ -260,21 +260,26 @@ fn msg_text(msg: &Message) -> String {
     Message::content_text(&msg.content)
 }
 
-fn build_history(messages: &[Message], tool_specs: &[serde_json::Value], model_id: &str) -> Vec<serde_json::Value> {
+fn build_history(messages: &[Message], model_id: &str) -> Vec<serde_json::Value> {
     let mut result = Vec::new();
     for msg in messages {
         match msg.role {
             Role::User => {
                 let tool_results = extract_tool_results(msg);
                 if !tool_results.is_empty() {
-                    // Tool result turn — include in history
+                    // Tool result turn — include in history.
+                    // Intentionally omit `tools` here: Q Developer CLI only
+                    // ships the tools list in `currentMessage`, and
+                    // repeating it on every turn (a) bloats the request
+                    // (~10KB × N) and (b) breaks server-side prompt cache
+                    // because the tool set varies across turns in some
+                    // sessions.
                     result.push(json!({
                         "userInputMessage": {
                             "content": "",
                             "origin": "KIRO_CLI",
                             "modelId": model_id,
                             "userInputMessageContext": {
-                                "tools": tool_specs,
                                 "toolResults": tool_results,
                             }
                         }
@@ -285,9 +290,7 @@ fn build_history(messages: &[Message], tool_specs: &[serde_json::Value], model_i
                             "content": msg_text(msg),
                             "origin": "KIRO_CLI",
                             "modelId": model_id,
-                            "userInputMessageContext": {
-                                "tools": tool_specs,
-                            }
+                            "userInputMessageContext": {}
                         }
                     }));
                 }
@@ -865,5 +868,57 @@ mod tests {
         assert!(is_uuid_shape(&cid));
         assert!(is_uuid_shape(&kid));
         assert_ne!(cid, kid);
+    }
+
+    #[test]
+    fn history_does_not_repeat_tool_specs() {
+        // Tools must ride only on `currentMessage`. Repeating them in
+        // every history turn bloats the body and — more importantly —
+        // breaks server-side prompt cache byte-identity when the tool
+        // list shifts (new tool registered, capability toggled).
+        let msgs = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: "hello".into() }],
+                origin: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text { text: "hi".into() }],
+                origin: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: "do thing".into() }],
+                origin: None,
+            },
+        ];
+        let tools = vec![crate::core::types::ToolSchema {
+            name: "fs_read".into(),
+            description: "read".into(),
+            parameters: json!({"type":"object"}),
+            streamable_arg: None,
+        }];
+        let body = build_request_body(&msgs, "auto", "arn:x", &tools, "cid", "kid");
+        let history = body["conversationState"]["history"].as_array().unwrap();
+        // 2 messages in history (user + assistant); tools must not appear.
+        assert_eq!(history.len(), 2);
+        for turn in history {
+            let s = turn.to_string();
+            assert!(
+                !s.contains("toolSpecification"),
+                "tool spec leaked into history: {s}"
+            );
+        }
+        // But currentMessage does carry tools.
+        let curr_tools = body["conversationState"]["currentMessage"]
+            ["userInputMessage"]["userInputMessageContext"]["tools"]
+            .as_array()
+            .unwrap();
+        assert_eq!(curr_tools.len(), 1);
+        assert_eq!(
+            curr_tools[0]["toolSpecification"]["name"].as_str(),
+            Some("fs_read")
+        );
     }
 }
