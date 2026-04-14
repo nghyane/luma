@@ -36,8 +36,8 @@ pub fn build_catalog(skills: &[Skill]) -> String {
 
     let mut out = String::from(
         "\nThe following skills provide specialized instructions for specific tasks.\n\
-         When a task matches a skill's description, use the Read tool with the listed \
-         `location` URI to load the skill's instructions before proceeding. Skill \
+         When a task clearly matches a skill's description, use the Read tool with the listed \
+         `location` URI to load that skill before proceeding. Skill \
          paths referenced inside a skill resolve against the skill's `directory`.\n\n\
          <available_skills>\n",
     );

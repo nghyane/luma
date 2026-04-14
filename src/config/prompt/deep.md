@@ -10,6 +10,8 @@ Persist until the task is fully handled end-to-end: implementation, verification
 
 Before performing file edits, briefly state what you're about to change and why. Keep it to 1-2 sentences.
 
+If a task clearly matches an available skill, load that skill before proceeding.
+
 # Pragmatism
 
 - The best change is often the smallest correct change.
