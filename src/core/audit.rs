@@ -4,6 +4,24 @@ use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
 
+/// A single heuristic incident detected in a saved session.
+#[derive(Debug, Clone, Serialize)]
+pub struct Incident {
+    pub session_id: String,
+    pub title: String,
+    pub failure_type: String,
+    pub severity: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IncidentDetail {
+    pub session_id: String,
+    pub title: String,
+    pub task_preview: String,
+    pub failure_types: Vec<String>,
+    pub tool_uses: Vec<String>,
+}
+
 /// Top-level metrics from a local session scan.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AuditSummary {
@@ -18,6 +36,161 @@ pub struct AuditSummary {
 }
 
 /// Scan the most recent `limit` saved sessions and compute lightweight metrics.
+
+/// List heuristic incidents from the most recent `limit` saved sessions.
+
+/// Show detailed heuristic findings for a single session id.
+pub fn audit_show(session_id: &str) -> Option<IncidentDetail> {
+    let session = load_recent_sessions(usize::MAX)
+        .into_iter()
+        .find(|s| s.id == session_id)?;
+
+    let mut failure_types = Vec::new();
+    let mut tool_uses = Vec::new();
+    let mut used_remote = false;
+    let mut used_local_read = false;
+    let mut edited = false;
+    let mut verified = false;
+    let mut local_task = false;
+
+    for msg in &session.messages {
+        if msg.role == Role::User {
+            let t = msg.text().to_lowercase();
+            if !(t.contains("http://") || t.contains("https://") || t.contains("github.com") || t.contains("latest") || t.contains("current") || t.contains("news")) {
+                local_task = true;
+            }
+        }
+        for block in &msg.content {
+            if let ContentBlock::ToolUse { name, input, .. } = block {
+                tool_uses.push(match name.as_str() {
+                    "Bash" | "exec_command" => format!("{} {}", name, input["command"].as_str().unwrap_or("")),
+                    _ => format!("{} {}", name, input),
+                });
+                match name.as_str() {
+                    "Read" => {
+                        let path = input["path"].as_str().unwrap_or("");
+                        if !path.is_empty() && !path.starts_with("artifact://") {
+                            used_local_read = true;
+                        }
+                    }
+                    "GhFile" | "GhLs" | "GhSearch" | "WebFetch" | "WebSearch" => used_remote = true,
+                    "Edit" | "MultiEdit" | "Write" | "apply_patch" => edited = true,
+                    "Bash" | "exec_command" => {
+                        let command = input["command"].as_str().unwrap_or("");
+                        if is_verify_command(command) {
+                            verified = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    if used_local_read && used_remote {
+        failure_types.push("mixed_local_remote_source".into());
+    }
+    if local_task && used_remote {
+        failure_types.push("premature_external_research".into());
+    }
+    if edited && !verified {
+        failure_types.push("edited_without_verify".into());
+    }
+
+    Some(IncidentDetail {
+        session_id: session.id,
+        title: session.title,
+        task_preview: session
+            .messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.text().lines().next().unwrap_or_default().to_owned())
+            .unwrap_or_default(),
+        failure_types,
+        tool_uses,
+    })
+}
+
+pub fn audit_incidents(limit: usize) -> Vec<Incident> {
+    let mut incidents = Vec::new();
+    for session in load_recent_sessions(limit) {
+        let mut has_project_instructions = false;
+        let mut has_skill_load = false;
+        let mut used_remote = false;
+        let mut used_local_read = false;
+        let mut edited = false;
+        let mut verified = false;
+        let mut local_task = false;
+
+        for msg in &session.messages {
+            if msg.role == Role::System && msg.text().contains("<project_instructions>") {
+                has_project_instructions = true;
+            }
+            if msg.role == Role::User {
+                let t = msg.text().to_lowercase();
+                if !(t.contains("http://") || t.contains("https://") || t.contains("github.com") || t.contains("latest") || t.contains("current") || t.contains("news")) {
+                    local_task = true;
+                }
+            }
+            for block in &msg.content {
+                if let ContentBlock::ToolUse { name, input, .. } = block {
+                    match name.as_str() {
+                        "Read" => {
+                            let path = input["path"].as_str().unwrap_or("");
+                            if path.starts_with("artifact://skill/") {
+                                has_skill_load = true;
+                            } else if !path.is_empty() && !path.starts_with("artifact://") {
+                                used_local_read = true;
+                            }
+                        }
+                        "GhFile" | "GhLs" | "GhSearch" | "WebFetch" | "WebSearch" => {
+                            used_remote = true;
+                        }
+                        "Edit" | "MultiEdit" | "Write" | "apply_patch" => {
+                            edited = true;
+                        }
+                        "Bash" | "exec_command" => {
+                            let command = input["command"].as_str().unwrap_or("");
+                            if is_verify_command(command) {
+                                verified = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        if used_local_read && used_remote {
+            incidents.push(Incident {
+                session_id: session.id.clone(),
+                title: session.title.clone(),
+                failure_type: "mixed_local_remote_source".into(),
+                severity: "medium".into(),
+            });
+        }
+        if local_task && used_remote {
+            incidents.push(Incident {
+                session_id: session.id.clone(),
+                title: session.title.clone(),
+                failure_type: "premature_external_research".into(),
+                severity: "medium".into(),
+            });
+        }
+        if edited && !verified {
+            incidents.push(Incident {
+                session_id: session.id.clone(),
+                title: session.title.clone(),
+                failure_type: "edited_without_verify".into(),
+                severity: "low".into(),
+            });
+        }
+        if has_project_instructions && !has_skill_load && local_task {
+            // Weak signal for future routing; do not classify as high severity.
+        }
+    }
+    incidents
+}
+
 pub fn audit_sessions(limit: usize) -> AuditSummary {
     let mut summary = AuditSummary::default();
     for session in load_recent_sessions(limit) {

@@ -148,8 +148,75 @@ async fn main() {
                 println!("bash verify commands:             {}", summary.bash_verify_commands);
                 println!("bash file-inspection commands:    {}", summary.bash_file_inspection_commands);
             }
+            Some("incidents") => {
+                let limit = args
+                    .get(3)
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(30);
+                for incident in crate::core::audit::audit_incidents(limit) {
+                    println!(
+                        "{}	{}	{}	{}",
+                        incident.session_id, incident.failure_type, incident.severity, incident.title
+                    );
+                }
+            }
+            Some("show") => {
+                let Some(session_id) = args.get(3) else {
+                    eprintln!("usage: luma audit show <session-id>");
+                    std::process::exit(1);
+                };
+                let Some(detail) = crate::core::audit::audit_show(session_id) else {
+                    eprintln!("session not found: {session_id}");
+                    std::process::exit(1);
+                };
+                println!("session: {}", detail.session_id);
+                println!("title:   {}", detail.title);
+                println!("task:    {}", detail.task_preview);
+                println!("failures:{}", if detail.failure_types.is_empty() { " none" } else { "" });
+                for failure in detail.failure_types {
+                    println!("  - {}", failure);
+                }
+                println!("tool uses:");
+                for tool in detail.tool_uses.into_iter().take(25) {
+                    println!("  - {}", tool);
+                }
+            }
             _ => {
-                eprintln!("usage: luma audit sessions [limit]");
+                eprintln!("usage: luma audit sessions [limit]
+       luma audit incidents [limit]
+       luma audit show <session-id>");
+                std::process::exit(1);
+            }
+        },
+        Some("improve") => match args.get(2).map(std::string::String::as_str) {
+            Some("propose") => {
+                if args.get(3).map(std::string::String::as_str) != Some("--session") {
+                    eprintln!("usage: luma improve propose --session <session-id>");
+                    std::process::exit(1);
+                }
+                let Some(session_id) = args.get(4) else {
+                    eprintln!("usage: luma improve propose --session <session-id>");
+                    std::process::exit(1);
+                };
+                let Some(proposal) = crate::core::improve::propose_from_session(session_id) else {
+                    eprintln!("session not found: {session_id}");
+                    std::process::exit(1);
+                };
+                println!("suggested route: {}", proposal.route);
+                println!("confidence:      {}", proposal.confidence);
+                if proposal.target_layers.is_empty() {
+                    println!("target layers:   none");
+                } else {
+                    println!("target layers:");
+                    for layer in proposal.target_layers {
+                        println!("  - {}", layer);
+                    }
+                }
+                println!("reason:          {}", proposal.reason);
+                println!("note:            {}", proposal.note);
+            }
+            _ => {
+                eprintln!("usage: luma improve propose --session <session-id>");
                 std::process::exit(1);
             }
         },
