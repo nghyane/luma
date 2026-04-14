@@ -58,7 +58,16 @@ pub async fn run_chat_turn(
     let mut auth_cred = auth::resolve(provider_kind).await?;
     for attempt in 0..MAX_AUTH_RETRIES {
         let provider = build_provider(config, &auth_cred, &session.id);
-        let outcome = run_turn(session, &*provider, registry, tx, cancel.clone(), caps).await;
+        let outcome = run_turn(
+            session,
+            &*provider,
+            &config.model_id,
+            registry,
+            tx,
+            cancel.clone(),
+            caps,
+        )
+        .await;
         let err = match outcome {
             Ok(()) => return Ok(()),
             Err(e) => e,
@@ -145,6 +154,7 @@ fn is_stream_retryable(err: &anyhow::Error) -> bool {
 /// Shared context for turn execution — fixed across iterations and retries.
 struct TurnCtx<'a> {
     provider: &'a dyn Provider,
+    model_id: &'a str,
     schemas: &'a [crate::core::types::ToolSchema],
     server_schemas: &'a [serde_json::Value],
     resolve_image: &'a crate::core::provider::ImageResolver,
@@ -223,6 +233,7 @@ async fn stream_with_retry(
 async fn run_turn(
     session: &mut Session,
     provider: &dyn Provider,
+    model_id: &str,
     registry: &Registry,
     tx: &EventSender,
     cancel: tokio_util::sync::CancellationToken,
@@ -233,6 +244,7 @@ async fn run_turn(
     let resolve_image = crate::core::session::image_resolver(&session.id);
     let ctx = TurnCtx {
         provider,
+        model_id,
         schemas: &schemas,
         server_schemas: &server_schemas,
         resolve_image: &*resolve_image,
@@ -280,6 +292,27 @@ async fn run_turn(
         session.messages.push(response.clone());
         // Mid-turn save: persist after each assistant message.
         session.save();
+
+        // Client-side context-usage fallback for providers that don't
+        // report tokens per turn (Kiro returns credits, not tokens, and
+        // only emits contextUsageEvent on prompts large enough to be
+        // interesting server-side). Estimate from the current message
+        // history using the common ~4 chars/token heuristic. The handler
+        // in the TUI takes the latest value for a Token-merge window, so
+        // a late client-side estimate is superseded if the server event
+        // later pushes a better one.
+        if usage.input_tokens == 0 && usage.output_tokens == 0 {
+            let est_chars: usize = session
+                .messages
+                .iter()
+                .map(|m| m.text().len())
+                .sum();
+            let ctx_window = crate::config::models::context_window(ctx.model_id);
+            let est_tokens = (est_chars / 4) as u64;
+            let pct =
+                ((est_tokens as f64 / ctx_window as f64) * 100.0).clamp(0.0, 100.0) as f32;
+            let _ = ctx.tx.send(crate::event::Event::ContextUsage(pct)).await;
+        }
 
         if cancel.is_cancelled() {
             anyhow::bail!("Aborted");
