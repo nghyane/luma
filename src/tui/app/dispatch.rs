@@ -238,11 +238,20 @@ impl super::App {
                 Action::Render
             }
             Event::ContextUsage(pct) => {
-                // Server-authoritative percentage (Kiro). Trusted over the
-                // client-side token estimate — set directly without going
-                // through update_context_from_tokens, which derives pct
-                // from a possibly-zero token count.
-                self.ui.status.set_context(0, pct.round() as u8);
+                // Server-authoritative percentage (Kiro). Back-calculate
+                // the token count from the model's context window so the
+                // status bar shows both `X tokens` and `X%` consistently
+                // — the UI's set_context formatter assumes tokens is
+                // populated, and 0 would render as "0 (N%)" which reads
+                // as "no tokens used".
+                let ctx_window = self
+                    .config
+                    .model
+                    .as_ref()
+                    .map(|m| models::context_window(&m.id))
+                    .unwrap_or(200_000);
+                let tokens = ((f64::from(pct) / 100.0) * ctx_window as f64).round() as u64;
+                self.ui.status.set_context(tokens, pct.round() as u8);
                 Action::Render
             }
         }
