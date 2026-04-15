@@ -1,7 +1,7 @@
 //! OAuth providers and shared contract.
 
-pub mod codex;
 pub mod claude;
+pub mod codex;
 pub mod kiro;
 pub mod shared;
 

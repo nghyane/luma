@@ -2,11 +2,11 @@
 
 use crate::auth::domain::{AccountKey, AuthVendor};
 use crate::auth::error::OAuthError;
-use crate::auth::oauth::{AccountIdentity, LoginResult, OAuthTokens};
 use crate::auth::oauth::shared::{
     LOGIN_TIMEOUT_SECS, accept_callback, bind_loopback, decode_jwt_payload, exchange_json_token,
     form_encode, gen_challenge, gen_state, gen_verifier, open_browser,
 };
+use crate::auth::oauth::{AccountIdentity, LoginResult, OAuthTokens};
 
 pub struct ClaudeProvider;
 
@@ -51,7 +51,9 @@ impl ClaudeProvider {
         .map_err(|_| OAuthError::Timeout)
         .and_then(|r| r.map_err(|e| OAuthError::ExchangeFailed(e.to_string())))?;
         if callback.state != state {
-            return Err(OAuthError::ExchangeFailed("oauth state mismatch".to_owned()));
+            return Err(OAuthError::ExchangeFailed(
+                "oauth state mismatch".to_owned(),
+            ));
         }
 
         let body = serde_json::json!({
@@ -90,7 +92,9 @@ fn parse_tokens(json: &serde_json::Value) -> Result<OAuthTokens, OAuthError> {
         .get("access_token")
         .or_else(|| json.get("accessToken"))
         .and_then(|v| v.as_str())
-        .ok_or_else(|| OAuthError::ExchangeFailed("token response missing access_token".to_owned()))?
+        .ok_or_else(|| {
+            OAuthError::ExchangeFailed("token response missing access_token".to_owned())
+        })?
         .to_owned();
     let refresh_token = json
         .get("refresh_token")
@@ -101,7 +105,11 @@ fn parse_tokens(json: &serde_json::Value) -> Result<OAuthTokens, OAuthError> {
         .get("expires_in")
         .and_then(|v| v.as_u64())
         .map(|secs| now_unix().saturating_add(secs))
-        .or_else(|| decode_jwt_payload(&access_token).as_ref().and_then(|c| c.get("exp")?.as_u64()));
+        .or_else(|| {
+            decode_jwt_payload(&access_token)
+                .as_ref()
+                .and_then(|c| c.get("exp")?.as_u64())
+        });
     let scopes = json
         .get("scope")
         .and_then(|v| v.as_str())
@@ -145,9 +153,18 @@ fn resolve_identity(
     };
     let display_name = email
         .as_deref()
-        .and_then(|e| e.split_once('@').map(|(l, d)| format!("{}@{}", l, d.split('.').next().unwrap_or(d))))
-        .ok_or_else(|| OAuthError::IdentityFailed("claude login returned no email for display name".to_owned()))?;
-    Ok(AccountIdentity { key, display_name, email })
+        .and_then(|e| {
+            e.split_once('@')
+                .map(|(l, d)| format!("{}@{}", l, d.split('.').next().unwrap_or(d)))
+        })
+        .ok_or_else(|| {
+            OAuthError::IdentityFailed("claude login returned no email for display name".to_owned())
+        })?;
+    Ok(AccountIdentity {
+        key,
+        display_name,
+        email,
+    })
 }
 
 fn now_unix() -> u64 {

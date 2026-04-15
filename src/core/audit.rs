@@ -358,7 +358,8 @@ fn inspect_session(session: &Session) -> SessionFacts {
                                 facts.subsystem = name.to_lowercase();
                             }
                             if facts.representative_remote_use.is_none() {
-                                facts.representative_remote_use = Some(format!("{} {}", name, input));
+                                facts.representative_remote_use =
+                                    Some(format!("{} {}", name, input));
                             }
                         }
                         "Edit" | "MultiEdit" | "Write" | "apply_patch" => {

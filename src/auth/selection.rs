@@ -34,9 +34,9 @@ fn is_eligible(a: &AccountRecord, now: u64) -> bool {
 }
 
 fn rank(a: &AccountRecord) -> (u8, u8, u8) {
-    let is_oauth = matches!(a.auth, AuthState::OAuth(_)) as u8;
-    let has_email = a.email.is_some() as u8;
-    let has_refresh = matches!(&a.auth, AuthState::OAuth(c) if c.refresh_token.is_some()) as u8;
+    let is_oauth = u8::from(matches!(a.auth, AuthState::OAuth(_)));
+    let has_email = u8::from(a.email.is_some());
+    let has_refresh = u8::from(matches!(&a.auth, AuthState::OAuth(c) if c.refresh_token.is_some()));
     (is_oauth, has_email, has_refresh)
 }
 
@@ -66,7 +66,13 @@ mod tests {
     #[test]
     fn selects_active_over_cooling() {
         let accounts = vec![
-            make(AuthVendor::Anthropic, AccountHealth::CoolingDown { until_unix: u64::MAX }, false),
+            make(
+                AuthVendor::Anthropic,
+                AccountHealth::CoolingDown {
+                    until_unix: u64::MAX,
+                },
+                false,
+            ),
             make(AuthVendor::Anthropic, AccountHealth::Active, false),
         ];
         let key = DefaultSelectionPolicy.select(&accounts).unwrap();
@@ -77,7 +83,13 @@ mod tests {
     fn excludes_needs_relogin_and_disabled() {
         use crate::auth::domain::ReloginReason;
         let accounts = vec![
-            make(AuthVendor::Anthropic, AccountHealth::NeedsRelogin { reason: ReloginReason::RefreshFailed }, false),
+            make(
+                AuthVendor::Anthropic,
+                AccountHealth::NeedsRelogin {
+                    reason: ReloginReason::RefreshFailed,
+                },
+                false,
+            ),
             make(AuthVendor::Anthropic, AccountHealth::Disabled, false),
         ];
         assert!(DefaultSelectionPolicy.select(&accounts).is_none());

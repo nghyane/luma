@@ -2,11 +2,11 @@
 
 use crate::auth::domain::{AccountKey, AuthVendor};
 use crate::auth::error::OAuthError;
-use crate::auth::oauth::{AccountIdentity, LoginResult, OAuthTokens};
 use crate::auth::oauth::shared::{
     LOGIN_TIMEOUT_SECS, accept_callback_any, bind_loopback, decode_jwt_payload,
     exchange_json_token, gen_challenge, gen_state, gen_verifier, open_browser, url_encode,
 };
+use crate::auth::oauth::{AccountIdentity, LoginResult, OAuthTokens};
 
 pub struct KiroProvider;
 
@@ -40,11 +40,14 @@ impl KiroProvider {
         .map_err(|_| OAuthError::Timeout)
         .and_then(|r| r.map_err(|e| OAuthError::ExchangeFailed(e.to_string())))?;
         if callback.state != state {
-            return Err(OAuthError::ExchangeFailed("oauth state mismatch".to_owned()));
+            return Err(OAuthError::ExchangeFailed(
+                "oauth state mismatch".to_owned(),
+            ));
         }
 
         let opt = callback.login_option.as_deref().unwrap_or("google");
-        let fixed_redirect = format!("http://localhost:{CALLBACK_PORT}{CALLBACK_PATH}?login_option={opt}");
+        let fixed_redirect =
+            format!("http://localhost:{CALLBACK_PORT}{CALLBACK_PATH}?login_option={opt}");
         let body = serde_json::json!({
             "code": callback.code,
             "code_verifier": verifier,
@@ -76,7 +79,9 @@ fn parse_tokens(json: &serde_json::Value) -> Result<OAuthTokens, OAuthError> {
         .get("access_token")
         .or_else(|| json.get("accessToken"))
         .and_then(|v| v.as_str())
-        .ok_or_else(|| OAuthError::ExchangeFailed("token response missing access_token".to_owned()))?
+        .ok_or_else(|| {
+            OAuthError::ExchangeFailed("token response missing access_token".to_owned())
+        })?
         .to_owned();
     let refresh_token = json
         .get("refresh_token")
@@ -87,7 +92,10 @@ fn parse_tokens(json: &serde_json::Value) -> Result<OAuthTokens, OAuthError> {
         .get("expiresIn")
         .and_then(|v| v.as_u64())
         .map(|secs| now_unix().saturating_add(secs));
-    let profile_arn = json.get("profileArn").and_then(|v| v.as_str()).map(str::to_owned);
+    let profile_arn = json
+        .get("profileArn")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
     Ok(OAuthTokens {
         access_token,
         refresh_token,
@@ -131,8 +139,7 @@ async fn fetch_email(access_token: &str, profile_arn: &str) -> Option<String> {
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .ok()?;
-    let body =
-        serde_json::json!({"profileArn": profile_arn, "isEmailRequired": true}).to_string();
+    let body = serde_json::json!({"profileArn": profile_arn, "isEmailRequired": true}).to_string();
     let resp = client
         .post("https://codewhisperer.us-east-1.amazonaws.com/")
         .header("Authorization", format!("Bearer {access_token}"))

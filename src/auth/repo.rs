@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::domain::{
-    AccountHealth, AccountKey, AccountMetadata, AccountRecord, AuthState,
-    AuthVendor, ApiKeyCredential, OAuthCredential, ReloginReason, UsageSnapshot,
+    AccountHealth, AccountKey, AccountMetadata, AccountRecord, ApiKeyCredential, AuthState,
+    AuthVendor, OAuthCredential, ReloginReason, UsageSnapshot,
 };
 use crate::auth::error::AuthStoreError;
 
@@ -70,7 +70,10 @@ impl AuthRepository for FileAuthRepository {
         let raw = match fs::read_to_string(&self.path) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(AuthStore { version: STORE_VERSION, accounts: vec![] });
+                return Ok(AuthStore {
+                    version: STORE_VERSION,
+                    accounts: vec![],
+                });
             }
             Err(e) => return Err(AuthStoreError::Io(e)),
         };
@@ -103,16 +106,16 @@ fn atomic_write(path: &Path, store: &AuthStore) -> Result<(), AuthStoreError> {
 
 fn load_and_migrate(raw: &str) -> Result<AuthStore, AuthStoreError> {
     // Try v3 first.
-    if let Ok(store) = serde_json::from_str::<AuthStore>(raw) {
-        if store.version >= 3 {
-            return Ok(store);
-        }
+    if let Ok(store) = serde_json::from_str::<AuthStore>(raw)
+        && store.version >= 3
+    {
+        return Ok(store);
     }
     // Try v2 (current on-disk format).
-    if let Ok(v2) = serde_json::from_str::<V2Store>(raw) {
-        if v2.version >= 2 || !v2.accounts.is_empty() {
-            return Ok(migrate_v2(v2));
-        }
+    if let Ok(v2) = serde_json::from_str::<V2Store>(raw)
+        && (v2.version >= 2 || !v2.accounts.is_empty())
+    {
+        return Ok(migrate_v2(v2));
     }
     // Try legacy v1 (`{ "credentials": [...] }`).
     if let Ok(v1) = serde_json::from_str::<V1Store>(raw) {
@@ -186,14 +189,26 @@ struct V2Usage {
 }
 
 fn migrate_v2(v2: V2Store) -> AuthStore {
-    let accounts = v2.accounts.into_iter().filter_map(v2_account_to_record).collect();
-    AuthStore { version: STORE_VERSION, accounts }
+    let accounts = v2
+        .accounts
+        .into_iter()
+        .filter_map(v2_account_to_record)
+        .collect();
+    AuthStore {
+        version: STORE_VERSION,
+        accounts,
+    }
 }
 
 fn v2_account_to_record(a: V2Account) -> Option<AccountRecord> {
     let vendor = AuthVendor::from_str(&a.provider)?;
 
-    let key = derive_key(vendor, a.account_id.as_deref(), a.email.as_deref(), &a.label);
+    let key = derive_key(
+        vendor,
+        a.account_id.as_deref(),
+        a.email.as_deref(),
+        &a.label,
+    );
 
     let auth = if a.is_oauth {
         AuthState::OAuth(OAuthCredential {
@@ -203,14 +218,18 @@ fn v2_account_to_record(a: V2Account) -> Option<AccountRecord> {
             scopes: a.scopes.unwrap_or_default(),
         })
     } else {
-        AuthState::ApiKey(ApiKeyCredential { token: a.access_token })
+        AuthState::ApiKey(ApiKeyCredential {
+            token: a.access_token,
+        })
     };
 
     let now = now_unix();
     let health = if a.disabled {
         AccountHealth::Disabled
     } else if a.needs_relogin {
-        AccountHealth::NeedsRelogin { reason: ReloginReason::RefreshFailed }
+        AccountHealth::NeedsRelogin {
+            reason: ReloginReason::RefreshFailed,
+        }
     } else if let Some(until) = a.cooldown_until.filter(|&t| t > now) {
         AccountHealth::CoolingDown { until_unix: until }
     } else {
@@ -262,43 +281,58 @@ struct V1Entry {
 }
 
 fn migrate_v1(v1: V1Store) -> AuthStore {
-    let accounts = v1.credentials.into_iter().filter_map(|e| {
-        let vendor = AuthVendor::from_str(&e.provider)?;
-        let email = extract_email_from_jwt(&e.access_token);
-        let key = derive_key(vendor, e.account_id.as_deref(), email.as_deref(), "");
-        let display_name = email
-            .as_deref()
-            .and_then(|em| em.split_once('@').map(|(l, d)| {
-                format!("{}@{}", l, d.split('.').next().unwrap_or(d))
-            }))
-            .unwrap_or_else(|| format!("{}-migrated", vendor.as_str()));
-        let auth = if e.is_oauth {
-            AuthState::OAuth(OAuthCredential {
-                access_token: e.access_token,
-                refresh_token: e.refresh_token,
-                expires_at: None,
-                scopes: vec![],
+    let accounts = v1
+        .credentials
+        .into_iter()
+        .filter_map(|e| {
+            let vendor = AuthVendor::from_str(&e.provider)?;
+            let email = extract_email_from_jwt(&e.access_token);
+            let key = derive_key(vendor, e.account_id.as_deref(), email.as_deref(), "");
+            let display_name = email
+                .as_deref()
+                .and_then(|em| {
+                    em.split_once('@')
+                        .map(|(l, d)| format!("{}@{}", l, d.split('.').next().unwrap_or(d)))
+                })
+                .unwrap_or_else(|| format!("{}-migrated", vendor.as_str()));
+            let auth = if e.is_oauth {
+                AuthState::OAuth(OAuthCredential {
+                    access_token: e.access_token,
+                    refresh_token: e.refresh_token,
+                    expires_at: None,
+                    scopes: vec![],
+                })
+            } else {
+                AuthState::ApiKey(ApiKeyCredential {
+                    token: e.access_token,
+                })
+            };
+            Some(AccountRecord {
+                key,
+                display_name,
+                email,
+                auth,
+                health: AccountHealth::Active,
+                metadata: AccountMetadata::default(),
             })
-        } else {
-            AuthState::ApiKey(ApiKeyCredential { token: e.access_token })
-        };
-        Some(AccountRecord {
-            key,
-            display_name,
-            email,
-            auth,
-            health: AccountHealth::Active,
-            metadata: AccountMetadata::default(),
         })
-    }).collect();
-    AuthStore { version: STORE_VERSION, accounts }
+        .collect();
+    AuthStore {
+        version: STORE_VERSION,
+        accounts,
+    }
 }
 
 // =============================================================================
 // Key derivation from v2/v1 data
 // =============================================================================
 
-fn derive_key(vendor: AuthVendor, account_id: Option<&str>, email: Option<&str>, label: &str) -> AccountKey {
+fn derive_key(
+    vendor: AuthVendor,
+    account_id: Option<&str>,
+    email: Option<&str>,
+    label: &str,
+) -> AccountKey {
     if let Some(id) = account_id.filter(|s| !s.is_empty()) {
         return AccountKey::account_id(vendor, id);
     }
@@ -353,8 +387,12 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
             n |= val << (18 - 6 * i);
         }
         out.push((n >> 16) as u8);
-        if chunk.len() > 2 { out.push((n >> 8) as u8); }
-        if chunk.len() > 3 { out.push(n as u8); }
+        if chunk.len() > 2 {
+            out.push((n >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(n as u8);
+        }
     }
     Some(out)
 }
@@ -414,7 +452,10 @@ mod tests {
     fn save_is_atomic_temp_file_renamed() {
         let dir = TempDir::new().unwrap();
         let repo = make_repo(&dir);
-        let store = AuthStore { version: STORE_VERSION, accounts: vec![] };
+        let store = AuthStore {
+            version: STORE_VERSION,
+            accounts: vec![],
+        };
         repo.save(&store).unwrap();
         // Temp file must not remain after successful save.
         assert!(!dir.path().join("auth.json.tmp").exists());
@@ -453,7 +494,9 @@ mod tests {
         assert_eq!(acc.display_name, "me@example");
         assert_eq!(acc.email.as_deref(), Some("me@example.com"));
         assert_eq!(acc.health, AccountHealth::Active);
-        let AuthState::OAuth(cred) = &acc.auth else { panic!("expected oauth") };
+        let AuthState::OAuth(cred) = &acc.auth else {
+            panic!("expected oauth")
+        };
         assert_eq!(cred.access_token, "tok");
         assert_eq!(cred.refresh_token.as_deref(), Some("ref"));
     }

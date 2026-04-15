@@ -196,7 +196,8 @@ fn dispatch_api_key(vendor: AuthVendor) -> Result<()> {
         anyhow::bail!("no key provided");
     }
 
-    let view = AuthService::new(FileAuthRepository::with_default_path()).save_api_key(vendor.into(), key)?;
+    let view = AuthService::new(FileAuthRepository::with_default_path())
+        .save_api_key(vendor.into(), key)?;
     println!("saved · {}", view.display_name);
     Ok(())
 }

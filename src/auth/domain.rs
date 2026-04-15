@@ -55,15 +55,24 @@ pub struct AccountKey {
 
 impl AccountKey {
     pub fn account_id(vendor: AuthVendor, id: impl Into<String>) -> Self {
-        Self { vendor, subject: AccountSubject::AccountId(id.into()) }
+        Self {
+            vendor,
+            subject: AccountSubject::AccountId(id.into()),
+        }
     }
 
     pub fn email(vendor: AuthVendor, email: impl Into<String>) -> Self {
-        Self { vendor, subject: AccountSubject::Email(email.into().to_ascii_lowercase()) }
+        Self {
+            vendor,
+            subject: AccountSubject::Email(email.into().to_ascii_lowercase()),
+        }
     }
 
     pub fn anonymous(vendor: AuthVendor, uuid: impl Into<String>) -> Self {
-        Self { vendor, subject: AccountSubject::Anonymous(uuid.into()) }
+        Self {
+            vendor,
+            subject: AccountSubject::Anonymous(uuid.into()),
+        }
     }
 }
 
@@ -261,10 +270,7 @@ mod tests {
     #[test]
     fn account_key_email_is_lowercased() {
         let key = AccountKey::email(AuthVendor::Anthropic, "Me@Example.COM");
-        assert_eq!(
-            key.subject,
-            AccountSubject::Email("me@example.com".into())
-        );
+        assert_eq!(key.subject, AccountSubject::Email("me@example.com".into()));
     }
 
     #[test]

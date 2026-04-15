@@ -26,7 +26,6 @@ impl AuthVendor {
             Self::Kiro => "kiro",
         }
     }
-
 }
 
 #[derive(Debug, Clone)]
@@ -50,10 +49,12 @@ pub struct UsageSnapshot {
 }
 
 pub async fn resolve(provider: AuthVendor) -> Result<Credential> {
-    crate::auth::service::AuthService::new(crate::auth::repo::FileAuthRepository::with_default_path())
-        .resolve_credential(provider.into())
-        .await
-        .map_err(anyhow::Error::from)
+    crate::auth::service::AuthService::new(
+        crate::auth::repo::FileAuthRepository::with_default_path(),
+    )
+    .resolve_credential(provider.into())
+    .await
+    .map_err(anyhow::Error::from)
 }
 
 pub async fn force_refresh(provider: AuthVendor) -> Result<Credential> {

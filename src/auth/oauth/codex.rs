@@ -2,11 +2,11 @@
 
 use crate::auth::domain::{AccountKey, AuthVendor};
 use crate::auth::error::OAuthError;
-use crate::auth::oauth::{AccountIdentity, LoginResult, OAuthTokens};
 use crate::auth::oauth::shared::{
     LOGIN_TIMEOUT_SECS, accept_callback, bind_loopback, decode_jwt_payload, exchange_form_token,
     gen_challenge, gen_state, gen_verifier, open_browser, url_encode,
 };
+use crate::auth::oauth::{AccountIdentity, LoginResult, OAuthTokens};
 
 pub struct CodexProvider;
 
@@ -43,7 +43,9 @@ impl CodexProvider {
         .map_err(|_| OAuthError::Timeout)
         .and_then(|r| r.map_err(|e| OAuthError::ExchangeFailed(e.to_string())))?;
         if callback.state != state {
-            return Err(OAuthError::ExchangeFailed("oauth state mismatch".to_owned()));
+            return Err(OAuthError::ExchangeFailed(
+                "oauth state mismatch".to_owned(),
+            ));
         }
 
         let body = format!(
@@ -83,9 +85,14 @@ fn parse_tokens(json: &serde_json::Value) -> Result<OAuthTokens, OAuthError> {
         .get("access_token")
         .or_else(|| json.get("accessToken"))
         .and_then(|v| v.as_str())
-        .ok_or_else(|| OAuthError::ExchangeFailed("token response missing access_token".to_owned()))?
+        .ok_or_else(|| {
+            OAuthError::ExchangeFailed("token response missing access_token".to_owned())
+        })?
         .to_owned();
-    let id_token = json.get("id_token").and_then(|v| v.as_str()).map(str::to_owned);
+    let id_token = json
+        .get("id_token")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
     let refresh_token = json
         .get("refresh_token")
         .or_else(|| json.get("refreshToken"))
@@ -115,7 +122,13 @@ fn resolve_identity(tokens: &OAuthTokens) -> Result<AccountIdentity, OAuthError>
     let email = id_claims
         .as_ref()
         .and_then(|c| c.get("email")?.as_str().map(str::to_owned))
-        .or_else(|| access_claims.as_ref()?.get("email")?.as_str().map(str::to_owned));
+        .or_else(|| {
+            access_claims
+                .as_ref()?
+                .get("email")?
+                .as_str()
+                .map(str::to_owned)
+        });
     let account_id = id_claims
         .as_ref()
         .and_then(extract_account_id)
@@ -131,9 +144,18 @@ fn resolve_identity(tokens: &OAuthTokens) -> Result<AccountIdentity, OAuthError>
     };
     let display_name = email
         .as_deref()
-        .and_then(|e| e.split_once('@').map(|(l, d)| format!("{}@{}", l, d.split('.').next().unwrap_or(d))))
-        .ok_or_else(|| OAuthError::IdentityFailed("codex login returned no email for display name".to_owned()))?;
-    Ok(AccountIdentity { key, display_name, email })
+        .and_then(|e| {
+            e.split_once('@')
+                .map(|(l, d)| format!("{}@{}", l, d.split('.').next().unwrap_or(d)))
+        })
+        .ok_or_else(|| {
+            OAuthError::IdentityFailed("codex login returned no email for display name".to_owned())
+        })?;
+    Ok(AccountIdentity {
+        key,
+        display_name,
+        email,
+    })
 }
 
 fn extract_account_id(claims: &serde_json::Value) -> Option<String> {

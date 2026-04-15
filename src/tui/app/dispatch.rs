@@ -1,6 +1,6 @@
+use super::Action;
 /// Event dispatch — routes events to document (model) or view.
 use super::state::{PickerMode, RunState};
-use super::Action;
 use crate::auth::domain::AccountKey;
 use crate::auth::repo::FileAuthRepository;
 use crate::auth::service::AuthService;
@@ -270,15 +270,13 @@ impl super::App {
             key.code == KeyCode::Char('c') && key.modifiers.contains(Modifiers::CONTROL);
 
         // Esc: interrupt streaming only
-        if is_esc {
-            if self.agent.state == RunState::Streaming {
-                self.agent.state = RunState::Aborting;
-                self.doc.abort();
-                if let Some(c) = &self.agent.cancel {
-                    c.cancel();
-                }
-                return Action::Render;
+        if is_esc && self.agent.state == RunState::Streaming {
+            self.agent.state = RunState::Aborting;
+            self.doc.abort();
+            if let Some(c) = &self.agent.cancel {
+                c.cancel();
             }
+            return Action::Render;
         }
         // Ctrl+C: clear buffer or quit
         if is_ctrl_c {
@@ -294,13 +292,15 @@ impl super::App {
             match self.ui.dialog.handle_key(&key) {
                 DialogAction::Toggle(id) => {
                     if let Ok(key) = serde_json::from_str::<AccountKey>(&id) {
-                        let _ = AuthService::new(FileAuthRepository::with_default_path()).toggle_disabled(&key);
+                        let _ = AuthService::new(FileAuthRepository::with_default_path())
+                            .toggle_disabled(&key);
                     }
                     self.open_accounts_dialog();
                 }
                 DialogAction::Remove(id) => {
                     if let Ok(key) = serde_json::from_str::<AccountKey>(&id) {
-                        let _ = AuthService::new(FileAuthRepository::with_default_path()).remove_account(&key);
+                        let _ = AuthService::new(FileAuthRepository::with_default_path())
+                            .remove_account(&key);
                     }
                     self.refresh_pool_health();
                     if self.ui.dialog.items_is_empty() {

@@ -29,12 +29,25 @@ impl<R: AuthRepository> AuthService<R> {
     pub fn list_accounts(&self) -> Result<Vec<AccountView>, AuthError> {
         let store = self.repo.load()?;
         let selected = self.selection.select(&store.accounts);
-        let mut views: Vec<_> = store.accounts.iter().map(AccountView::from_record).collect();
-        views.sort_by_key(|view| (Some(&view.key) != selected.as_ref(), view.display_name.clone()));
+        let mut views: Vec<_> = store
+            .accounts
+            .iter()
+            .map(AccountView::from_record)
+            .collect();
+        views.sort_by_key(|view| {
+            (
+                Some(&view.key) != selected.as_ref(),
+                view.display_name.clone(),
+            )
+        });
         Ok(views)
     }
 
-    pub fn mark_rate_limited(&self, key: &AccountKey, retry_after_secs: u64) -> Result<(), AuthError> {
+    pub fn mark_rate_limited(
+        &self,
+        key: &AccountKey,
+        retry_after_secs: u64,
+    ) -> Result<(), AuthError> {
         let until = now_unix().saturating_add(retry_after_secs.max(1));
         self.mutate(|store| {
             if let Some(a) = find_mut(store, key) {
@@ -43,7 +56,11 @@ impl<R: AuthRepository> AuthService<R> {
         })
     }
 
-    pub fn mark_auth_failed(&self, key: &AccountKey, failure: AuthFailure) -> Result<(), AuthError> {
+    pub fn mark_auth_failed(
+        &self,
+        key: &AccountKey,
+        failure: AuthFailure,
+    ) -> Result<(), AuthError> {
         let reason = match failure {
             AuthFailure::Revoked => ReloginReason::TokenRevoked,
             AuthFailure::MissingRefreshToken => ReloginReason::MissingRefreshToken,
@@ -139,14 +156,22 @@ impl<R: AuthRepository> AuthService<R> {
         usage: crate::config::auth::UsageSnapshot,
     ) -> Result<(), AuthError> {
         self.mutate(|store| {
-            if let Some(account) = store.accounts.iter_mut().find(|a| a.display_name == display_name) {
+            if let Some(account) = store
+                .accounts
+                .iter_mut()
+                .find(|a| a.display_name == display_name)
+            {
                 account.metadata.usage = crate::auth::domain::UsageSnapshot {
                     requests_remaining: usage.requests_remaining,
                     requests_limit: usage.requests_limit,
                     tokens_remaining: usage.tokens_remaining,
                     tokens_limit: usage.tokens_limit,
                     reset_at: usage.reset_at,
-                    updated_at: if usage.updated_at == 0 { now_unix() } else { usage.updated_at },
+                    updated_at: if usage.updated_at == 0 {
+                        now_unix()
+                    } else {
+                        usage.updated_at
+                    },
                 };
             }
         })
@@ -163,24 +188,30 @@ impl<R: AuthRepository> AuthService<R> {
             .find(|a| &a.key == key)
             .ok_or(AuthError::AccountNotFound)?;
         let refresh_token = match &record.auth {
-            AuthState::OAuth(cred) => cred
-                .refresh_token
-                .as_deref()
-                .ok_or_else(|| AuthError::OAuth(crate::auth::error::OAuthError::RefreshRejected(
+            AuthState::OAuth(cred) => cred.refresh_token.as_deref().ok_or_else(|| {
+                AuthError::OAuth(crate::auth::error::OAuthError::RefreshRejected(
                     "missing refresh token".to_owned(),
-                )))?,
+                ))
+            })?,
             AuthState::ApiKey(_) => {
-                return Err(AuthError::OAuth(crate::auth::error::OAuthError::RefreshRejected(
-                    "api key cannot be refreshed".to_owned(),
-                )));
+                return Err(AuthError::OAuth(
+                    crate::auth::error::OAuthError::RefreshRejected(
+                        "api key cannot be refreshed".to_owned(),
+                    ),
+                ));
             }
         };
 
         let oauth = crate::auth::oauth::OAuthRegistry::new();
-        let provider = oauth.get(record.key.vendor).ok_or(AuthError::NoEligibleAccount {
-            vendor: record.key.vendor.as_str().to_owned(),
-        })?;
-        let tokens = provider.refresh(refresh_token).await.map_err(AuthError::OAuth)?;
+        let provider = oauth
+            .get(record.key.vendor)
+            .ok_or(AuthError::NoEligibleAccount {
+                vendor: record.key.vendor.as_str().to_owned(),
+            })?;
+        let tokens = provider
+            .refresh(refresh_token)
+            .await
+            .map_err(AuthError::OAuth)?;
 
         let refreshed = AccountRecord {
             key: record.key.clone(),
@@ -194,7 +225,10 @@ impl<R: AuthRepository> AuthService<R> {
             }),
             health: AccountHealth::Active,
             metadata: AccountMetadata {
-                profile_arn: tokens.profile_arn.clone().or_else(|| record.metadata.profile_arn.clone()),
+                profile_arn: tokens
+                    .profile_arn
+                    .clone()
+                    .or_else(|| record.metadata.profile_arn.clone()),
                 ..record.metadata.clone()
             },
         };
@@ -254,7 +288,10 @@ impl<R: AuthRepository> AuthService<R> {
     }
 }
 
-fn find_mut<'a>(store: &'a mut AuthStore, key: &AccountKey) -> Option<&'a mut crate::auth::domain::AccountRecord> {
+fn find_mut<'a>(
+    store: &'a mut AuthStore,
+    key: &AccountKey,
+) -> Option<&'a mut crate::auth::domain::AccountRecord> {
     store.accounts.iter_mut().find(|a| &a.key == key)
 }
 
@@ -332,7 +369,10 @@ mod tests {
 
     impl MemRepo {
         fn new(accounts: Vec<AccountRecord>) -> Self {
-            Self(RefCell::new(AuthStore { version: STORE_VERSION, accounts }))
+            Self(RefCell::new(AuthStore {
+                version: STORE_VERSION,
+                accounts,
+            }))
         }
     }
 
@@ -375,7 +415,10 @@ mod tests {
     #[test]
     fn mark_rate_limited_sets_cooling_down() {
         let key = AccountKey::account_id(AuthVendor::Anthropic, "acc1");
-        let svc = AuthService::new(MemRepo::new(vec![active_record(AuthVendor::Anthropic, "acc1")]));
+        let svc = AuthService::new(MemRepo::new(vec![active_record(
+            AuthVendor::Anthropic,
+            "acc1",
+        )]));
         svc.mark_rate_limited(&key, 60).unwrap();
         let views = svc.list_accounts().unwrap();
         assert!(matches!(views[0].health, AccountHealth::CoolingDown { .. }));
@@ -384,26 +427,45 @@ mod tests {
     #[test]
     fn mark_auth_failed_sets_needs_relogin() {
         let key = AccountKey::account_id(AuthVendor::Anthropic, "acc1");
-        let svc = AuthService::new(MemRepo::new(vec![active_record(AuthVendor::Anthropic, "acc1")]));
-        svc.mark_auth_failed(&key, AuthFailure::RefreshRejected).unwrap();
+        let svc = AuthService::new(MemRepo::new(vec![active_record(
+            AuthVendor::Anthropic,
+            "acc1",
+        )]));
+        svc.mark_auth_failed(&key, AuthFailure::RefreshRejected)
+            .unwrap();
         let views = svc.list_accounts().unwrap();
-        assert!(matches!(views[0].health, AccountHealth::NeedsRelogin { .. }));
+        assert!(matches!(
+            views[0].health,
+            AccountHealth::NeedsRelogin { .. }
+        ));
     }
 
     #[test]
     fn toggle_disabled_roundtrip() {
         let key = AccountKey::account_id(AuthVendor::Anthropic, "acc1");
-        let svc = AuthService::new(MemRepo::new(vec![active_record(AuthVendor::Anthropic, "acc1")]));
+        let svc = AuthService::new(MemRepo::new(vec![active_record(
+            AuthVendor::Anthropic,
+            "acc1",
+        )]));
         svc.toggle_disabled(&key).unwrap();
-        assert!(matches!(svc.list_accounts().unwrap()[0].health, AccountHealth::Disabled));
+        assert!(matches!(
+            svc.list_accounts().unwrap()[0].health,
+            AccountHealth::Disabled
+        ));
         svc.toggle_disabled(&key).unwrap();
-        assert!(matches!(svc.list_accounts().unwrap()[0].health, AccountHealth::Active));
+        assert!(matches!(
+            svc.list_accounts().unwrap()[0].health,
+            AccountHealth::Active
+        ));
     }
 
     #[test]
     fn remove_account_deletes_entry() {
         let key = AccountKey::account_id(AuthVendor::Anthropic, "acc1");
-        let svc = AuthService::new(MemRepo::new(vec![active_record(AuthVendor::Anthropic, "acc1")]));
+        let svc = AuthService::new(MemRepo::new(vec![active_record(
+            AuthVendor::Anthropic,
+            "acc1",
+        )]));
         svc.remove_account(&key).unwrap();
         assert!(svc.list_accounts().unwrap().is_empty());
     }
@@ -416,9 +478,15 @@ mod tests {
 
     #[test]
     fn mark_rate_limited_unknown_key_is_noop() {
-        let svc = AuthService::new(MemRepo::new(vec![active_record(AuthVendor::Anthropic, "acc1")]));
+        let svc = AuthService::new(MemRepo::new(vec![active_record(
+            AuthVendor::Anthropic,
+            "acc1",
+        )]));
         let unknown = AccountKey::account_id(AuthVendor::OpenAI, "nope");
         svc.mark_rate_limited(&unknown, 60).unwrap(); // must not error
-        assert!(matches!(svc.list_accounts().unwrap()[0].health, AccountHealth::Active));
+        assert!(matches!(
+            svc.list_accounts().unwrap()[0].health,
+            AccountHealth::Active
+        ));
     }
 }

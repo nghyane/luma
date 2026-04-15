@@ -165,7 +165,9 @@ impl super::App {
         for a in Self::auth_service().list_accounts().unwrap_or_default() {
             match a.health {
                 AccountHealth::Active => {}
-                AccountHealth::CoolingDown { .. } => health.cooling = health.cooling.saturating_add(1),
+                AccountHealth::CoolingDown { .. } => {
+                    health.cooling = health.cooling.saturating_add(1)
+                }
                 AccountHealth::NeedsRelogin { .. } => {
                     health.needs_relogin = health.needs_relogin.saturating_add(1)
                 }
@@ -482,7 +484,12 @@ mod tests {
     #[test]
     fn account_row_needs_relogin() {
         use crate::auth::domain::ReloginReason;
-        let row = format_account_row(&view(AccountHealth::NeedsRelogin { reason: ReloginReason::RefreshFailed }, Some("x@y.com")));
+        let row = format_account_row(&view(
+            AccountHealth::NeedsRelogin {
+                reason: ReloginReason::RefreshFailed,
+            },
+            Some("x@y.com"),
+        ));
         assert!(row.starts_with("○"));
         assert!(row.contains("needs re-login"));
     }

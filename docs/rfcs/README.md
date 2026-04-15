@@ -55,6 +55,7 @@ mục narrative (motivation, rationale) dùng tiếng Việt/Anh tự nhiên.
 | 0008 | Session-Audit Self-Improvement Loop | Draft (scoped down) | Audit pipeline implemented. Intent matching and complex routing removed. Audit is detector/triage only. |
 | 0009 | Auth, Routing, and Provider Runtime Rearchitecture | Draft | Replaces singleton auth mutation and hidden bootstrap with explicit auth/routing services and typed error handling. |
 | 0010 | Device Flow and Interactive Auth Lanes | Draft | Adds shared device-flow architecture for Builder ID and future providers while keeping browser PKCE as a separate lane. |
+| 0011 | Image Attachment Routing | Draft | Unifies image handling around a provider-neutral attachment reference routed by runtime. |
 
 ## Template
 

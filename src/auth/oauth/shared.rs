@@ -61,7 +61,8 @@ pub fn url_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len()
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
             && let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
         {
             out.push((h << 4) | l);
@@ -269,7 +270,10 @@ async fn post_token(
     let status = res.status();
     let text = res.text().await.unwrap_or_default();
     if !status.is_success() {
-        bail!("token exchange HTTP {status}: {}", &text[..text.len().min(300)]);
+        bail!(
+            "token exchange HTTP {status}: {}",
+            &text[..text.len().min(300)]
+        );
     }
     serde_json::from_str(&text).context("bad token exchange json")
 }
