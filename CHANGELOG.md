@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-beta.14] - 2026-04-15
+
+### Added
+- RFC 0011: Image Attachment Routing
+- Image preprocessing for `Read` via the `image` crate, including decode, resize, and compression before attachment
+
+### Changed
+- Tool-result image routing is now selected centrally per provider (`inline`, `user attachment`, or adapter-managed text fallback)
+- Kiro now receives images from `Read` through the user attachment path instead of silently dropping image tool results
+- OpenAI Chat keeps provider-specific text fallback for multimodal tool results while Anthropic and OpenAI Responses continue to send real image bytes inline
+- Login/account persistence now flows through the new auth service and repository layer across CLI, config compatibility shims, and TUI integration
+
+### Removed
+- Provider-specific ad hoc image-routing logic that previously lived inside individual adapters
+
 ## [0.4.0-beta.13] - 2026-04-14
 
 ### Added
