@@ -7,9 +7,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub const LOGIN_TIMEOUT_SECS: u64 = 300;
 
 pub struct CallbackPayload {
-    pub code: String,
+    pub code: Option<String>,
     pub state: String,
     pub login_option: Option<String>,
+    pub issuer_url: Option<String>,
+    pub idc_region: Option<String>,
 }
 
 pub fn gen_verifier() -> String {
@@ -184,6 +186,8 @@ async fn read_callback_request(
     let mut code = None;
     let mut state = None;
     let mut login_option = None;
+    let mut issuer_url = None;
+    let mut idc_region = None;
     for pair in query.split('&') {
         let Some((k, v)) = pair.split_once('=') else {
             continue;
@@ -192,15 +196,19 @@ async fn read_callback_request(
             "code" => code = Some(url_decode(v)),
             "state" => state = Some(url_decode(v)),
             "login_option" => login_option = Some(url_decode(v)),
+            "issuer_url" => issuer_url = Some(url_decode(v)),
+            "idc_region" => idc_region = Some(url_decode(v)),
             _ => {}
         }
     }
 
-    match (code, state) {
-        (Some(code), Some(state)) => Ok(Some(CallbackPayload {
+    match state {
+        Some(state) => Ok(Some(CallbackPayload {
             code,
             state,
             login_option,
+            issuer_url,
+            idc_region,
         })),
         _ => Ok(None),
     }

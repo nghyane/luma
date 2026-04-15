@@ -363,9 +363,36 @@ async fn main() {
             }
         },
         Some("version" | "--version" | "-v") => println!("luma {}", env!("CARGO_PKG_VERSION")),
+        Some("export") => {
+            let src = auth::repo::FileAuthRepository::default_path();
+            match std::fs::read(&src) {
+                Ok(bytes) => {
+                    use base64::Engine;
+                    println!("{}", base64::engine::general_purpose::STANDARD.encode(&bytes));
+                }
+                Err(e) => { eprintln!("export failed: {e}"); std::process::exit(1); }
+            }
+        }
+        Some("import") => {
+            let Some(encoded) = args.get(2) else {
+                eprintln!("usage: luma import <base64-string>");
+                std::process::exit(1);
+            };
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded.trim())
+                .unwrap_or_else(|e| { eprintln!("invalid base64: {e}"); std::process::exit(1); });
+            let _: serde_json::Value = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|e| { eprintln!("invalid auth data: {e}"); std::process::exit(1); });
+            let dest = auth::repo::FileAuthRepository::default_path();
+            if let Some(p) = dest.parent() { let _ = std::fs::create_dir_all(p); }
+            std::fs::write(&dest, &bytes)
+                .unwrap_or_else(|e| { eprintln!("import failed: {e}"); std::process::exit(1); });
+            println!("imported ok");
+        }
         Some("help" | "--help" | "-h") => {
             println!(
-                "luma - lightweight coding agent\n\nusage:\n  luma                     start TUI\n  luma sync                sync models\n  luma auth                show resolved auth per provider\n  luma login [provider]    add an account (anthropic|openai|opencode-go); omit for picker\n  luma accounts            list accounts in the pool\n  luma update              update to latest\n  luma version             show version"
+                "luma - lightweight coding agent\n\nusage:\n  luma                     start TUI\n  luma sync                sync models\n  luma auth                show resolved auth per provider\n  luma login [provider]    add an account; omit for picker\n  luma accounts            list accounts in the pool\n  luma export              print auth as base64 (share via chat/slack)\n  luma import <string>     import auth from base64 string\n  luma update              update to latest\n  luma version             show version"
             );
         }
         Some(unknown) => {

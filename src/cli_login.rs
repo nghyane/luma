@@ -1,16 +1,6 @@
 //! `luma login` interactive flow.
-//!
-//! Single-binary subcommand; no TUI app integration. Uses raw-mode via
-//! `termina` to drive an arrow-key provider picker, then dispatches:
-//!
-//! * OAuth providers → `AuthService::login`.
-//! * API-key providers → `AuthService::save_api_key`.
-//!
-//! The menu restores cooked mode before printing results or spawning the
-//! browser so users see normal terminal output. Raw mode only bounds the
-//! picker loop itself.
 
-use crate::auth::repo::FileAuthRepository;
+use crate::auth::repo::{AuthRepository, FileAuthRepository};
 use crate::auth::service::AuthService;
 use crate::config::auth::AuthVendor;
 use anyhow::{Context, Result};
@@ -20,11 +10,6 @@ use termina::{
     event::{KeyCode, KeyEventKind, Modifiers},
 };
 
-/// Entry point for `luma login [<arg>]`.
-///
-/// If `arg` is `Some`, route directly (CI-friendly shortcut); otherwise
-/// show the picker. The picker always echoes the final result in cooked
-/// mode regardless of which path was taken.
 pub async fn run(arg: Option<&str>) -> Result<()> {
     let choice = match arg {
         Some(name) => Choice::parse(name)?,
@@ -34,16 +19,22 @@ pub async fn run(arg: Option<&str>) -> Result<()> {
     match choice {
         Choice::Oauth(vendor) => dispatch_oauth(vendor).await,
         Choice::ApiKey(vendor) => dispatch_api_key(vendor),
+        Choice::KiroBuilderId => {
+            dispatch_device_flow("https://view.awsapps.com/start", "us-east-1").await
+        }
+        Choice::KiroIdc => {
+            let (start_url, region) = prompt_idc_params()?;
+            dispatch_device_flow(&start_url, &region).await
+        }
     }
 }
 
-/// A selected provider + auth flow. Each variant carries exactly the
-/// data the dispatcher needs; vendor parsing lives in `Choice::parse` so
-/// CLI arg handling and menu selection share one source of truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Choice {
     Oauth(AuthVendor),
     ApiKey(AuthVendor),
+    KiroBuilderId,
+    KiroIdc,
 }
 
 impl Choice {
@@ -52,8 +43,11 @@ impl Choice {
             "anthropic" | "claude" => Ok(Self::Oauth(AuthVendor::Anthropic)),
             "openai" | "codex" => Ok(Self::Oauth(AuthVendor::OpenAI)),
             "opencode-go" => Ok(Self::ApiKey(AuthVendor::OpenCodeGo)),
+            "kiro" => Ok(Self::Oauth(AuthVendor::Kiro)),
+            "kiro-idc" | "idc" | "awsidc" => Ok(Self::KiroIdc),
+            "kiro-builder" | "builder-id" => Ok(Self::KiroBuilderId),
             other => anyhow::bail!(
-                "unknown provider: {other}\nusage: luma login [anthropic|openai|opencode-go]"
+                "unknown provider: {other}\nusage: luma login [anthropic|openai|kiro|kiro-idc|builder-id|opencode-go]"
             ),
         }
     }
@@ -62,9 +56,10 @@ impl Choice {
         match self {
             Self::Oauth(AuthVendor::Anthropic) => "Claude        (OAuth · Claude.ai subscriber)",
             Self::Oauth(AuthVendor::OpenAI) => "Codex         (OAuth · ChatGPT)",
-            Self::ApiKey(AuthVendor::OpenCodeGo) => "OpenCode Go   (API key)",
             Self::Oauth(AuthVendor::Kiro) => "Kiro          (OAuth · Google/GitHub)",
-            // Placeholders — no other combinations wired today.
+            Self::KiroBuilderId => "Kiro          (Builder ID · free)",
+            Self::KiroIdc => "Kiro          (IAM Identity Center · pro)",
+            Self::ApiKey(AuthVendor::OpenCodeGo) => "OpenCode Go   (API key)",
             Self::Oauth(AuthVendor::OpenCodeGo) => "OpenCode Go   (OAuth)",
             Self::ApiKey(AuthVendor::Anthropic) => "Anthropic     (API key)",
             Self::ApiKey(AuthVendor::OpenAI) => "OpenAI        (API key)",
@@ -73,42 +68,30 @@ impl Choice {
     }
 }
 
-/// All selectable choices, in display order.
 const CHOICES: &[Choice] = &[
     Choice::Oauth(AuthVendor::Anthropic),
     Choice::Oauth(AuthVendor::OpenAI),
     Choice::Oauth(AuthVendor::Kiro),
+    Choice::KiroBuilderId,
+    Choice::KiroIdc,
     Choice::ApiKey(AuthVendor::OpenCodeGo),
 ];
 
-/// Open an arrow-key menu on stderr and return the selected choice.
-/// Restores the terminal before returning, even on error.
 fn pick_choice() -> Result<Choice> {
     let mut term = PlatformTerminal::new().context("could not open terminal for login menu")?;
     term.enter_raw_mode()
         .context("could not enter raw mode for login menu")?;
     let reader = term.event_reader();
-
     let result = run_picker(&reader);
-
-    // Always restore cooked mode, even on error — don't leave the user
-    // stuck with no echo.
     let _ = term.enter_cooked_mode();
-    // Clear picker frame and park the cursor at column 0 before the
-    // caller prints anything.
     let mut err = io::stderr();
     let _ = write!(err, "\r\x1b[J");
     let _ = err.flush();
-
     result
 }
 
 fn run_picker(reader: &termina::EventReader) -> Result<Choice> {
     let mut selected: usize = 0;
-    // Clear the whole screen and park the cursor at home (1,1) so the
-    // menu renders over any existing terminal content. Raw mode disables
-    // the LF→CRLF translation cooked mode provides, so every line break
-    // below MUST be `\r\n` — bare `\n` cascades each line further right.
     write!(io::stderr(), "\x1b[2J\x1b[H")?;
     io::stderr().flush()?;
     render_menu(selected, false)?;
@@ -143,18 +126,10 @@ fn run_picker(reader: &termina::EventReader) -> Result<Choice> {
     }
 }
 
-/// Render the menu. On redraw, move the cursor back to the top of the
-/// previously drawn block so each frame overwrites the last cleanly.
-///
-/// Raw mode does not translate `\n` into CRLF, so every line break here
-/// MUST be `\r\n` or the second+ line drifts right across the terminal.
 fn render_menu(selected: usize, redraw: bool) -> Result<()> {
-    let lines = 3 + CHOICES.len() + 2; // title+blank + items + blank+help
-
+    let lines = 3 + CHOICES.len() + 2;
     let mut out = io::stderr();
     if redraw {
-        // Cursor up `lines` lines, carriage-return to col 0, then clear
-        // from cursor down to end-of-screen.
         write!(out, "\x1b[{lines}A\r\x1b[J")?;
     } else {
         write!(out, "\r")?;
@@ -175,29 +150,72 @@ async fn dispatch_oauth(vendor: AuthVendor) -> Result<()> {
         .login(vendor.into())
         .await?;
     let who = view.email.as_deref().unwrap_or(view.display_name.as_str());
-    println!(
-        "signed in as {who} ({}) · provider: {}",
-        view.display_name,
-        view.vendor.as_str()
-    );
+    println!("signed in as {who} ({}) · provider: {}", view.display_name, view.vendor.as_str());
     Ok(())
 }
 
 fn dispatch_api_key(vendor: AuthVendor) -> Result<()> {
     eprint!("paste {} API key: ", vendor.as_str());
     io::stderr().flush().ok();
-
     let mut key = String::new();
-    io::stdin()
-        .read_line(&mut key)
-        .context("could not read API key from stdin")?;
+    io::stdin().read_line(&mut key).context("could not read API key from stdin")?;
     let key = key.trim();
     if key.is_empty() {
         anyhow::bail!("no key provided");
     }
-
     let view = AuthService::new(FileAuthRepository::with_default_path())
         .save_api_key(vendor.into(), key)?;
     println!("saved · {}", view.display_name);
+    Ok(())
+}
+
+fn prompt_idc_params() -> Result<(String, String)> {
+    eprint!("Start URL (e.g. https://d-xxxxxxxxxx.awsapps.com/start): ");
+    io::stderr().flush().ok();
+    let mut start_url = String::new();
+    io::stdin().read_line(&mut start_url)?;
+    let start_url = start_url.trim().to_owned();
+    if start_url.is_empty() {
+        anyhow::bail!("no start URL provided");
+    }
+    eprint!("Region [us-east-1]: ");
+    io::stderr().flush().ok();
+    let mut region = String::new();
+    io::stdin().read_line(&mut region)?;
+    let region = region.trim();
+    let region = if region.is_empty() { "us-east-1" } else { region }.to_owned();
+    Ok((start_url, region))
+}
+
+async fn dispatch_device_flow(start_url: &str, region: &str) -> Result<()> {
+    eprintln!("logging in via IAM Identity Center…");
+    let result = crate::auth::oauth::kiro::KiroProvider::login_device(start_url, region).await?;
+    let repo = FileAuthRepository::with_default_path();
+    let mut store = repo.load().unwrap_or_default();
+    store.version = crate::auth::repo::STORE_VERSION;
+    let record = crate::auth::domain::AccountRecord {
+        key: result.identity.key.clone(),
+        display_name: result.identity.display_name.clone(),
+        email: result.identity.email.clone(),
+        auth: crate::auth::domain::AuthState::OAuth(crate::auth::domain::OAuthCredential {
+            access_token: result.tokens.access_token,
+            refresh_token: result.tokens.refresh_token,
+            expires_at: result.tokens.expires_at,
+            scopes: result.tokens.scopes,
+        }),
+        health: crate::auth::domain::AccountHealth::Active,
+        metadata: crate::auth::domain::AccountMetadata {
+            profile_arn: result.tokens.profile_arn,
+            ..Default::default()
+        },
+    };
+    if let Some(existing) = store.accounts.iter_mut().find(|a| a.key == record.key) {
+        *existing = record.clone();
+    } else {
+        store.accounts.push(record.clone());
+    }
+    repo.save(&store)?;
+    let who = result.identity.email.as_deref().unwrap_or(&result.identity.display_name);
+    println!("signed in as {who} · provider: kiro (idc)");
     Ok(())
 }

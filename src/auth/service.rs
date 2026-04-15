@@ -208,8 +208,12 @@ impl<R: AuthRepository> AuthService<R> {
             .ok_or(AuthError::NoEligibleAccount {
                 vendor: record.key.vendor.as_str().to_owned(),
             })?;
+        let scopes = match &record.auth {
+            AuthState::OAuth(cred) => Some(cred.scopes.as_slice()),
+            _ => None,
+        };
         let tokens = provider
-            .refresh(refresh_token)
+            .refresh(refresh_token, scopes)
             .await
             .map_err(AuthError::OAuth)?;
 

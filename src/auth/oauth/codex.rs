@@ -48,9 +48,10 @@ impl CodexProvider {
             ));
         }
 
+        let code = callback.code.ok_or(OAuthError::ExchangeFailed("missing code".to_owned()))?;
         let body = format!(
             "grant_type=authorization_code&code={}&redirect_uri={}&client_id={}&code_verifier={}",
-            url_encode(&callback.code),
+            url_encode(&code),
             url_encode(&redirect_uri),
             url_encode(CLIENT_ID),
             url_encode(&verifier),

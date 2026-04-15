@@ -58,7 +58,7 @@ impl ClaudeProvider {
 
         let body = serde_json::json!({
             "grant_type": "authorization_code",
-            "code": callback.code,
+            "code": callback.code.ok_or(OAuthError::ExchangeFailed("missing code".to_owned()))?,
             "redirect_uri": redirect_uri,
             "client_id": CLIENT_ID,
             "code_verifier": verifier,

@@ -46,11 +46,15 @@ impl ProviderRef<'_> {
         }
     }
 
-    pub async fn refresh(&self, refresh_token: &str) -> Result<OAuthTokens, OAuthError> {
+    pub async fn refresh(
+        &self,
+        refresh_token: &str,
+        scopes: Option<&[String]>,
+    ) -> Result<OAuthTokens, OAuthError> {
         match self {
             Self::Claude(p) => p.refresh(refresh_token).await,
             Self::Codex(p) => p.refresh(refresh_token).await,
-            Self::Kiro(p) => p.refresh(refresh_token).await,
+            Self::Kiro(p) => p.refresh(refresh_token, scopes).await,
         }
     }
 }
