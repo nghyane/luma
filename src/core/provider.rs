@@ -172,6 +172,21 @@ pub enum StreamEvent {
 /// Resolves image id → base64 data. Passed to providers so they don't touch filesystem.
 pub type ImageResolver = dyn Fn(&str) -> String + Send + Sync;
 
+/// How a provider handles `ToolResultItem::Image` entries.
+///
+/// Declared by each provider so the runtime can rewrite messages once,
+/// centrally, before sending — rather than each adapter doing ad-hoc routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolResultImageRouting {
+    /// Image blocks are valid inside tool-result content (Anthropic, OpenAI Responses).
+    Inline,
+    /// Provider has no image variant in tool-result; images must be promoted
+    /// to the next user-turn attachment slot (Kiro).
+    UserAttachment,
+    /// Provider has no image path at all; flatten to text (OpenAI Chat).
+    TextOnly,
+}
+
 /// Per-call input to [`Provider::stream`]. Bundled to keep the trait signature small.
 pub struct StreamRequest<'a> {
     pub messages: &'a [Message],
@@ -182,6 +197,94 @@ pub struct StreamRequest<'a> {
     pub max_tokens_override: Option<u32>,
     pub tx: EventSender,
     pub cancel: CancellationToken,
+}
+
+/// Rewrite `messages` so that `ToolResultItem::Image` entries are routed
+/// according to `routing`. Returns a `Cow`-style owned copy only when a
+/// rewrite is needed; otherwise returns the slice unchanged via the
+/// `Borrowed` variant so the common path (Inline) pays no allocation.
+pub fn route_tool_result_images<'a>(
+    messages: &'a [Message],
+    routing: ToolResultImageRouting,
+) -> std::borrow::Cow<'a, [Message]> {
+    match routing {
+        // Inline: providers handle images natively — no rewrite needed.
+        ToolResultImageRouting::Inline => std::borrow::Cow::Borrowed(messages),
+
+        // TextOnly providers handle flattening in their own adapter because
+        // the explanatory text is provider-specific. Runtime leaves the
+        // transcript shape untouched.
+        ToolResultImageRouting::TextOnly => std::borrow::Cow::Borrowed(messages),
+
+        // UserAttachment: promote Image items from tool-result turns into
+        // ContentBlock::Image on the same user message so provider adapters
+        // that support user-turn images (e.g. Kiro) can pick them up via
+        // their existing `msg_images` path.
+        ToolResultImageRouting::UserAttachment => route_user_attachment(messages),
+    }
+}
+
+fn route_user_attachment<'a>(messages: &'a [Message]) -> std::borrow::Cow<'a, [Message]> {
+    use crate::core::types::{ContentBlock, ToolResultBody, ToolResultItem};
+
+    let mut rewritten = Vec::with_capacity(messages.len());
+    let mut changed = false;
+
+    for msg in messages {
+        let mut content = Vec::with_capacity(msg.content.len());
+        let mut promoted = Vec::new();
+        let mut msg_changed = false;
+
+        for block in &msg.content {
+            if let ContentBlock::ToolResult {
+                tool_use_id,
+                content: body,
+                is_error,
+                evidence_id,
+            } = block
+                && let ToolResultBody::Items(items) = body
+                && items.iter().any(|item| matches!(item, ToolResultItem::Image { .. }))
+            {
+                msg_changed = true;
+                let text = body.as_text();
+                content.push(ContentBlock::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    content: ToolResultBody::Text(text),
+                    is_error: *is_error,
+                    evidence_id: evidence_id.clone(),
+                });
+                for item in items {
+                    if let ToolResultItem::Image { media_type, id } = item {
+                        promoted.push(ContentBlock::Image {
+                            media_type: media_type.clone(),
+                            id: id.clone(),
+                        });
+                    }
+                }
+                continue;
+            }
+            content.push(block.clone());
+        }
+
+        if !promoted.is_empty() {
+            msg_changed = true;
+            content.extend(promoted);
+        }
+
+        if msg_changed {
+            changed = true;
+        }
+        rewritten.push(Message {
+            content,
+            ..msg.clone()
+        });
+    }
+
+    if changed {
+        std::borrow::Cow::Owned(rewritten)
+    } else {
+        std::borrow::Cow::Borrowed(messages)
+    }
 }
 
 /// An LLM provider that streams responses as Events. Object-safe.
@@ -209,6 +312,12 @@ pub trait Provider: Send + Sync {
         true
     }
 
+    /// How this provider handles `ToolResultItem::Image` entries.
+    /// The runtime uses this to rewrite messages before sending.
+    fn tool_result_image_routing(&self) -> ToolResultImageRouting {
+        ToolResultImageRouting::Inline
+    }
+
     /// Stream a chat completion.
     fn stream<'a>(
         &'a self,
@@ -219,6 +328,7 @@ pub trait Provider: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::types::{ContentBlock, Message, Role, ToolResultBody, ToolResultItem};
 
     #[test]
     fn thinking_capabilities_coerce_to_supported_level() {
@@ -260,5 +370,69 @@ mod tests {
         assert_eq!(caps.next(ThinkingLevel::Low), ThinkingLevel::High);
         assert_eq!(caps.next(ThinkingLevel::High), ThinkingLevel::Off);
         assert_eq!(caps.next(ThinkingLevel::Medium), ThinkingLevel::High);
+    }
+
+    #[test]
+    fn text_only_routing_leaves_messages_unchanged() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: ToolResultBody::Items(vec![
+                    ToolResultItem::Text { text: "meta".into() },
+                    ToolResultItem::Image {
+                        media_type: "image/png".into(),
+                        id: "img_1".into(),
+                    },
+                ]),
+                is_error: false,
+                evidence_id: None,
+            }],
+            origin: None,
+        }];
+
+        let routed = route_tool_result_images(&messages, ToolResultImageRouting::TextOnly);
+        assert!(matches!(routed, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(routed[0].content.len(), 1);
+    }
+
+    #[test]
+    fn user_attachment_routing_promotes_images_and_strips_tool_result_items() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: ToolResultBody::Items(vec![
+                    ToolResultItem::Text { text: "meta".into() },
+                    ToolResultItem::Image {
+                        media_type: "image/png".into(),
+                        id: "img_1".into(),
+                    },
+                ]),
+                is_error: false,
+                evidence_id: None,
+            }],
+            origin: None,
+        }];
+
+        let routed = route_tool_result_images(&messages, ToolResultImageRouting::UserAttachment);
+        let routed = routed.as_ref();
+        assert_eq!(routed.len(), 1);
+        assert_eq!(routed[0].content.len(), 2);
+
+        match &routed[0].content[0] {
+            ContentBlock::ToolResult { content, .. } => {
+                assert_eq!(content, &ToolResultBody::Text("meta".into()));
+            }
+            other => panic!("expected tool_result, got {other:?}"),
+        }
+
+        match &routed[0].content[1] {
+            ContentBlock::Image { media_type, id } => {
+                assert_eq!(media_type, "image/png");
+                assert_eq!(id, "img_1");
+            }
+            other => panic!("expected promoted image, got {other:?}"),
+        }
     }
 }

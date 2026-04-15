@@ -646,12 +646,46 @@ fn build_input(
                 if had_result {
                     continue;
                 }
-                // Plain user message — Codex Responses API wants a flat string
-                // body, images are delivered via a different path.
-                input.push(serde_json::json!({
-                    "role": "user",
-                    "content": msg.text(),
-                }));
+                let mut content = Vec::new();
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::Text { text } | ContentBlock::Paste { text }
+                            if !text.is_empty() =>
+                        {
+                            content.push(serde_json::json!({
+                                "type": "input_text",
+                                "text": text,
+                            }));
+                        }
+                        ContentBlock::Image { media_type, id } => {
+                            let data = resolve(id);
+                            if data.is_empty() {
+                                continue;
+                            }
+                            content.push(serde_json::json!({
+                                "type": "input_image",
+                                "image_url": format!("data:{media_type};base64,{data}"),
+                            }));
+                        }
+                        _ => {}
+                    }
+                }
+                if content.is_empty() {
+                    input.push(serde_json::json!({
+                        "role": "user",
+                        "content": msg.text(),
+                    }));
+                } else if content.len() == 1 && content[0]["type"] == "input_text" {
+                    input.push(serde_json::json!({
+                        "role": "user",
+                        "content": content[0]["text"].as_str().unwrap_or_default(),
+                    }));
+                } else {
+                    input.push(serde_json::json!({
+                        "role": "user",
+                        "content": content,
+                    }));
+                }
             }
             Role::Assistant => {
                 // Walk content blocks in order: ToolUse → function_call
@@ -1006,5 +1040,44 @@ mod tests {
         let output = input[0]["output"].as_array().unwrap();
         assert_eq!(output.len(), 1);
         assert_eq!(output[0]["type"], "input_text");
+    }
+
+    #[test]
+    fn user_message_with_image_serializes_as_input_content_array() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "look at this".into(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    id: "img_user".into(),
+                },
+            ],
+            origin: None,
+        }];
+
+        let input = build_input(&messages, &|id| {
+            assert_eq!(id, "img_user");
+            "USERBASE64".into()
+        });
+
+        let content = input[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[0]["text"], "look at this");
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(content[1]["image_url"], "data:image/png;base64,USERBASE64");
+    }
+
+    #[test]
+    fn text_only_user_message_stays_flat_string_for_wire_compat() {
+        let messages = vec![Message::user("hello".to_owned())];
+
+        let input = build_input(&messages, &|_| String::new());
+
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"], "hello");
     }
 }

@@ -83,6 +83,9 @@ impl Provider for KiroRuntime {
         false
     }
 
+    fn tool_result_image_routing(&self) -> crate::core::provider::ToolResultImageRouting {
+        crate::core::provider::ToolResultImageRouting::UserAttachment
+    }
     fn stream<'a>(
         &'a self,
         req: StreamRequest<'a>,
@@ -113,6 +116,7 @@ impl KiroRuntime {
             req.tools,
             &self.conversation_id,
             &self.continuation_id,
+            req.resolve_image,
         );
 
         let resp = client
@@ -240,6 +244,7 @@ fn build_request_body(
     tools: &[crate::core::types::ToolSchema],
     conversation_id: &str,
     continuation_id: &str,
+    resolve: &crate::core::provider::ImageResolver,
 ) -> serde_json::Value {
     if messages.is_empty() {
         return json!({});
@@ -251,8 +256,8 @@ fn build_request_body(
     );
 
     let tool_specs = build_tool_specs(tools);
-    let history = build_history(history_msgs, model_id);
-    let current = build_current_message(current_msg, model_id, &tool_specs);
+    let history = build_history(history_msgs, model_id, resolve);
+    let current = build_current_message(current_msg, model_id, &tool_specs, resolve);
 
     json!({
         "conversationState": {
@@ -286,44 +291,62 @@ fn msg_text(msg: &Message) -> String {
     Message::content_text(&msg.content)
 }
 
-fn build_history(messages: &[Message], model_id: &str) -> Vec<serde_json::Value> {
+fn msg_images(
+    msg: &Message,
+    resolve: &crate::core::provider::ImageResolver,
+) -> Vec<serde_json::Value> {
+    msg.content
+        .iter()
+        .filter_map(|block| {
+            let ContentBlock::Image { media_type, id } = block else {
+                return None;
+            };
+            let data = resolve(id);
+            if data.is_empty() {
+                return None;
+            }
+            let format = match media_type.as_str() {
+                "image/gif" => "gif",
+                "image/jpeg" | "image/jpg" => "jpeg",
+                "image/png" => "png",
+                "image/webp" => "webp",
+                _ => return None,
+            };
+            Some(json!({
+                "format": format,
+                "source": {
+                    "bytes": data,
+                }
+            }))
+        })
+        .collect()
+}
+
+fn build_history(
+    messages: &[Message],
+    model_id: &str,
+    resolve: &crate::core::provider::ImageResolver,
+) -> Vec<serde_json::Value> {
     let env_state = build_env_state();
     let mut result = Vec::new();
     for msg in messages {
         match msg.role {
             Role::User => {
                 let tool_results = extract_tool_results(msg);
-                if !tool_results.is_empty() {
-                    // Tool result turn — include in history.
-                    // Intentionally omit `tools` here: Q Developer CLI only
-                    // ships the tools list in `currentMessage`, and
-                    // repeating it on every turn (a) bloats the request
-                    // (~10KB × N) and (b) breaks server-side prompt cache
-                    // because the tool set varies across turns in some
-                    // sessions.
-                    result.push(json!({
-                        "userInputMessage": {
-                            "content": "",
-                            "origin": "KIRO_CLI",
-                            "modelId": model_id,
-                            "userInputMessageContext": {
-                                "envState": env_state,
-                                "toolResults": tool_results,
-                            }
-                        }
-                    }));
+                let content = if tool_results.is_empty() {
+                    msg_text(msg)
                 } else {
-                    result.push(json!({
-                        "userInputMessage": {
-                            "content": msg_text(msg),
-                            "origin": "KIRO_CLI",
-                            "modelId": model_id,
-                            "userInputMessageContext": {
-                                "envState": env_state,
-                            }
-                        }
-                    }));
-                }
+                    String::new()
+                };
+                result.push(build_user_input_message(
+                    &content,
+                    model_id,
+                    &env_state,
+                    None,
+                    (!tool_results.is_empty()).then_some(tool_results.as_slice()),
+                    msg,
+                    resolve,
+                ));
             }
             Role::Assistant => {
                 let content = msg_text(msg);
@@ -344,35 +367,58 @@ fn build_current_message(
     msg: &Message,
     model_id: &str,
     tool_specs: &[serde_json::Value],
+    resolve: &crate::core::provider::ImageResolver,
 ) -> serde_json::Value {
     let env_state = build_env_state();
     let tool_results = extract_tool_results(msg);
-    if !tool_results.is_empty() {
-        json!({
-            "userInputMessage": {
-                "content": "",
-                "origin": "KIRO_CLI",
-                "modelId": model_id,
-                "userInputMessageContext": {
-                    "envState": env_state,
-                    "tools": tool_specs,
-                    "toolResults": tool_results,
-                }
-            }
-        })
+    let content = if tool_results.is_empty() {
+        msg_text(msg)
     } else {
-        json!({
-            "userInputMessage": {
-                "content": msg_text(msg),
-                "origin": "KIRO_CLI",
-                "modelId": model_id,
-                "userInputMessageContext": {
-                    "envState": env_state,
-                    "tools": tool_specs,
-                }
-            }
-        })
+        String::new()
+    };
+    build_user_input_message(
+        &content,
+        model_id,
+        &env_state,
+        Some(tool_specs),
+        (!tool_results.is_empty()).then_some(tool_results.as_slice()),
+        msg,
+        resolve,
+    )
+}
+
+fn build_user_input_message(
+    content: &str,
+    model_id: &str,
+    env_state: &serde_json::Value,
+    tools: Option<&[serde_json::Value]>,
+    tool_results: Option<&[serde_json::Value]>,
+    msg: &Message,
+    resolve: &crate::core::provider::ImageResolver,
+) -> serde_json::Value {
+    let mut ctx = serde_json::json!({
+        "envState": env_state.clone(),
+    });
+    if let Some(tools) = tools {
+        ctx["tools"] = json!(tools);
     }
+    if let Some(tool_results) = tool_results {
+        ctx["toolResults"] = json!(tool_results);
+    }
+
+    let mut user_msg = json!({
+        "userInputMessage": {
+            "content": content,
+            "origin": "KIRO_CLI",
+            "modelId": model_id,
+            "userInputMessageContext": ctx,
+        }
+    });
+    let images = msg_images(msg, resolve);
+    if !images.is_empty() {
+        user_msg["userInputMessage"]["images"] = json!(images);
+    }
+    user_msg
 }
 
 /// `envState` payload Q Developer CLI ships on every `userInputMessage`.
@@ -697,6 +743,10 @@ mod tests {
     use super::*;
     use crate::event_bus;
 
+    fn no_images(_: &str) -> String {
+        String::new()
+    }
+
     /// Build one AWS Event Stream frame with a single `:event-type` header.
     /// Total length = 4 (total_len) + 4 (headers_len) + 4 (prelude crc) +
     /// headers + payload + 4 (message crc). CRCs aren't validated by the
@@ -975,7 +1025,7 @@ mod tests {
             parameters: json!({"type":"object"}),
             streamable_arg: None,
         }];
-        let body = build_request_body(&msgs, "auto", "arn:x", &tools, "cid", "kid");
+        let body = build_request_body(&msgs, "auto", "arn:x", &tools, "cid", "kid", &no_images);
         let history = body["conversationState"]["history"].as_array().unwrap();
         // 2 messages in history (user + assistant); tools must not appear.
         assert_eq!(history.len(), 2);
@@ -1023,7 +1073,7 @@ mod tests {
                 origin: None,
             },
         ];
-        let body = build_request_body(&msgs, "auto", "arn:x", &[], "cid", "kid");
+        let body = build_request_body(&msgs, "auto", "arn:x", &[], "cid", "kid", &no_images);
         // history[0] is the past user turn.
         let past_ctx =
             &body["conversationState"]["history"][0]["userInputMessage"]["userInputMessageContext"];
@@ -1033,4 +1083,73 @@ mod tests {
         let curr_ctx = &body["conversationState"]["currentMessage"]["userInputMessage"]["userInputMessageContext"];
         assert!(curr_ctx["envState"]["operatingSystem"].is_string());
     }
+
+    #[test]
+    fn current_user_message_serializes_images_in_official_shape() {
+        let msgs = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "describe this".into(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    id: "img_1".into(),
+                },
+            ],
+            origin: None,
+        }];
+
+        let body = build_request_body(&msgs, "auto", "arn:x", &[], "cid", "kid", &|id| {
+            assert_eq!(id, "img_1");
+            "BASE64DATA".into()
+        });
+
+        let user = &body["conversationState"]["currentMessage"]["userInputMessage"];
+        let images = user["images"].as_array().unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0]["format"], "png");
+        assert_eq!(images[0]["source"]["bytes"], "BASE64DATA");
+    }
+
+    #[test]
+    fn history_user_message_serializes_images_in_official_shape() {
+        let msgs = vec![
+            Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "past".into(),
+                    },
+                    ContentBlock::Image {
+                        media_type: "image/webp".into(),
+                        id: "img_hist".into(),
+                    },
+                ],
+                origin: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text { text: "ok".into() }],
+                origin: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: "now".into() }],
+                origin: None,
+            },
+        ];
+
+        let body = build_request_body(&msgs, "auto", "arn:x", &[], "cid", "kid", &|id| {
+            assert_eq!(id, "img_hist");
+            "HISTDATA".into()
+        });
+
+        let user = &body["conversationState"]["history"][0]["userInputMessage"];
+        let images = user["images"].as_array().unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0]["format"], "webp");
+        assert_eq!(images[0]["source"]["bytes"], "HISTDATA");
+    }
+
 }

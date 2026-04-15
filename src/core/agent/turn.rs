@@ -154,7 +154,10 @@ pub async fn run_chat_turn(
                     chunk: "token rejected, refreshing…".into(),
                 })
                 .await;
-            if matches!(provider_kind, crate::config::auth::AuthVendor::OpenAI | crate::config::auth::AuthVendor::Kiro) {
+            if matches!(
+                provider_kind,
+                crate::config::auth::AuthVendor::OpenAI | crate::config::auth::AuthVendor::Kiro
+            ) {
                 let key = auth_cred
                     .account_key
                     .as_ref()
@@ -306,7 +309,9 @@ async fn run_turn(
         }
 
         // First attempt: provider default max_tokens.
-        let mut result = stream_with_retry(&ctx, &session.messages, None).await?;
+        let routing = provider.tool_result_image_routing();
+        let routed = crate::core::provider::route_tool_result_images(&session.messages, routing);
+        let mut result = stream_with_retry(&ctx, &routed, None).await?;
 
         // Escalate once if the first call hit max_tokens before finishing,
         // but only if the provider actually honors an override. For providers
@@ -322,7 +327,7 @@ async fn run_turn(
                     max_attempts: 2,
                 })
                 .await;
-            result = stream_with_retry(&ctx, &session.messages, Some(ESCALATED_MAX_TOKENS)).await?;
+            result = stream_with_retry(&ctx, &routed, Some(ESCALATED_MAX_TOKENS)).await?;
         }
 
         let StreamResponse {
@@ -363,13 +368,13 @@ async fn run_turn(
 
         // Still MaxTokens after (potentially) escalating → turn is cut off.
         // Message differs depending on whether escalation actually ran.
+        if stop_reason == StopReason::MaxTokens && provider.supports_max_tokens_override() {
+            anyhow::bail!(
+                "output token limit hit even at {ESCALATED_MAX_TOKENS} tokens. \
+                 Start a new session or switch to a model with larger output capacity."
+            );
+        }
         if stop_reason == StopReason::MaxTokens {
-            if provider.supports_max_tokens_override() {
-                anyhow::bail!(
-                    "output token limit hit even at {ESCALATED_MAX_TOKENS} tokens. \
-                     Start a new session or switch to a model with larger output capacity."
-                );
-            }
             anyhow::bail!(
                 "{} hit its output token limit. Start a new session or switch to a model with larger output capacity.",
                 provider.name()

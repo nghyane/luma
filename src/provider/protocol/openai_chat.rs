@@ -69,6 +69,10 @@ impl Provider for OpenAIChatRuntime {
         // OpenAI Chat Completions has no reasoning/thinking parameter.
     }
 
+    fn tool_result_image_routing(&self) -> crate::core::provider::ToolResultImageRouting {
+        crate::core::provider::ToolResultImageRouting::TextOnly
+    }
+
     fn server_tool_schemas(&self, _capabilities: &[String]) -> Vec<serde_json::Value> {
         // Chat Completions API does not support web_search tool type.
         // Web search requires search-specific models (gpt-4o-search-preview).
@@ -370,15 +374,6 @@ fn to_api_messages(
                 out.push(serde_json::json!({"role": "system", "content": msg.text()}));
             }
             Role::User => {
-                // Tool results on user messages → one `{role:"tool"}` entry
-                // per block (OpenAI wire format — no nesting).
-                //
-                // OpenAI Chat Completions `role: "tool"` content is string-
-                // only; image items from multimodal tool output cannot ride
-                // here. Flatten via `as_text()` and append a note so the
-                // model can distinguish "no images" from "images omitted by
-                // gateway". Switch to Responses or Anthropic gateway to see
-                // the actual bytes.
                 let mut had_tool_result = false;
                 for block in &msg.content {
                     if let ContentBlock::ToolResult {
@@ -387,16 +382,7 @@ fn to_api_messages(
                         ..
                     } = block
                     {
-                        let text = if content.has_images() {
-                            format!(
-                                "{}\n\n[image attachment(s) omitted — OpenAI Chat \
-                                 Completions does not support images in tool results; \
-                                 switch to Anthropic or Responses gateway]",
-                                content.as_text()
-                            )
-                        } else {
-                            content.as_text()
-                        };
+                        let text = render_tool_result_text(content);
                         out.push(serde_json::json!({
                             "role": "tool",
                             "content": text,
@@ -422,15 +408,14 @@ fn to_api_messages(
                             }
                             ContentBlock::Image { media_type, id } => {
                                 let data = resolve(id);
-                                if data.is_empty() {
-                                    return None;
-                                }
-                                Some(serde_json::json!({
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": format!("data:{media_type};base64,{data}")
-                                    }
-                                }))
+                                (!data.is_empty()).then(|| {
+                                    serde_json::json!({
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": format!("data:{media_type};base64,{data}")
+                                        }
+                                    })
+                                })
                             }
                             _ => None,
                         })
@@ -471,6 +456,17 @@ fn to_api_messages(
         }
     }
     out
+}
+
+fn render_tool_result_text(content: &crate::core::types::ToolResultBody) -> String {
+    let text = content.as_text();
+    if content.has_images() {
+        format!(
+            "{text}\n\n[image attachment(s) omitted — OpenAI Chat Completions does not support images in tool results; switch to Anthropic or Responses gateway]"
+        )
+    } else {
+        text
+    }
 }
 
 fn to_api_tools(tools: &[ToolSchema]) -> Vec<serde_json::Value> {

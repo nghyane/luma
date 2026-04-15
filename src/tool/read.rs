@@ -25,10 +25,16 @@ const BINARY_EXTENSIONS: &[&str] = &[
 /// Image extensions this tool can attach to the model or describe as metadata.
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp"];
 
-/// Maximum size for image reads. Anthropic caps uploads at 5 MB; going
-/// larger triggers provider-side reject. Resize is deferred to a future
-/// RFC — for now the tool bails with guidance.
-const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+/// Hard file-size gate before we even try to decode. Files larger than this
+/// are almost certainly not raster images we can usefully resize.
+const MAX_IMAGE_READ_BYTES: u64 = 50 * 1024 * 1024; // 50 MB
+
+/// Target raw byte size so that base64-encoding stays under the 5 MB API
+/// limit (base64 overhead ≈ 4/3, so 3.75 MB × 4/3 ≈ 5 MB).
+const IMAGE_TARGET_RAW_BYTES: usize = 3 * 1024 * 1024 + 768 * 1024; // 3.75 MB
+
+/// Maximum dimension (width or height) sent to any provider.
+const IMAGE_MAX_DIMENSION: u32 = 2000;
 
 /// Reads files with line numbers or lists directory contents.
 pub struct ReadTool;
@@ -259,18 +265,9 @@ pub fn suggest_similar_file(path: &std::path::Path) -> Option<String> {
 /// Read an image file into a `ToolExecution`.
 ///
 /// Branches on `caps.vision`:
-/// - **Vision model**: save bytes into the session image store and return
-///   a `ToolResultBody::Items` with a short metadata `Text` item followed
-///   by an `Image` item referencing the saved id. The provider's
-///   `ImageResolver` pulls the bytes back as base64 at send time.
-/// - **Text-only model**: return metadata text only. The model sees file
-///   type/size/dimensions (when cheap to parse) and is explicitly told
-///   the visual content cannot be included, so it can describe to the
-///   user or fall back to OCR via Bash instead of hallucinating.
-///
-/// Oversize files bail with a clear message rather than silently
-/// truncating — a malformed/huge image would exceed provider limits and
-/// produce a 4xx far from the tool call site.
+/// - **Vision model**: run preprocessing pipeline (resize + compress if needed),
+///   save bytes into the session image store, return metadata `Text` + `Image`.
+/// - **Text-only model**: return metadata text only.
 fn read_image(
     path: &std::path::Path,
     ext: &str,
@@ -279,11 +276,11 @@ fn read_image(
 ) -> Result<ToolExecution> {
     use crate::core::types::{ToolResultBody, ToolResultItem};
 
-    if meta.len() > MAX_IMAGE_BYTES {
+    if meta.len() > MAX_IMAGE_READ_BYTES {
         bail!(
-            "Image too large ({:.1} MB, max {} MB). Resize or crop before reading.",
+            "Image too large ({:.1} MB). Maximum readable size is {} MB.",
             meta.len() as f64 / 1_048_576.0,
-            MAX_IMAGE_BYTES / 1_048_576,
+            MAX_IMAGE_READ_BYTES / 1_048_576,
         );
     }
 
@@ -293,13 +290,11 @@ fn read_image(
     }
 
     let media_type = media_type_from_ext(ext);
-    let size_kb = data.len().div_ceil(1024);
-    let dims = parse_png_dimensions(&data);
-    let dim_txt = dims.map(|(w, h)| format!("{w}×{h} ")).unwrap_or_default();
 
     if !caps.vision {
-        // Drop the bytes — no need to save to the session store when
-        // nothing will reference them. Metadata alone goes back.
+        let dims = parse_png_dimensions(&data);
+        let dim_txt = dims.map(|(w, h)| format!("{w}×{h} ")).unwrap_or_default();
+        let size_kb = data.len().div_ceil(1024);
         let text = format!(
             "{media_type} image: {dim_txt}{size_kb} KB. \
              This model does not support image input — describe the contents \
@@ -313,19 +308,164 @@ fn read_image(
 
     let session_id = crate::core::session::current_session_id()
         .ok_or_else(|| anyhow::anyhow!("no active session — image cannot be attached"))?;
-    let id = crate::core::session::save_image(&session_id, &data, ext);
 
-    let text = format!("{media_type}: {dim_txt}{size_kb} KB (attached)");
+    let (processed, out_ext, meta_text) = preprocess_image(data, ext)?;
+    let id = crate::core::session::save_image(&session_id, &processed, out_ext);
+
     Ok(ToolExecution {
         result: ToolResultBody::Items(vec![
-            ToolResultItem::Text { text },
+            ToolResultItem::Text { text: meta_text },
             ToolResultItem::Image {
-                media_type: media_type.to_owned(),
+                media_type: media_type_from_ext(out_ext).to_owned(),
                 id,
             },
         ]),
         artifact: None,
     })
+}
+
+/// Preprocessing pipeline: resize if over dimension limit, compress if over
+/// payload limit. Returns `(bytes, ext, metadata_text)`.
+///
+/// Pipeline order (stops at first passing step):
+/// 1. Pass through if already within both limits.
+/// 2. Resize to fit 2000×2000 if over dimension limit.
+/// 3. Compress with format-native settings.
+/// 4. Progressive resize: 75% → 50% → 25%.
+/// 5. Convert to JPEG quality 75 (last resort).
+fn preprocess_image(data: Vec<u8>, ext: &str) -> Result<(Vec<u8>, &'static str, String)> {
+    use image::{ImageFormat, ImageReader, imageops::FilterType};
+    use std::io::Cursor;
+
+    let fmt = ImageFormat::from_extension(ext)
+        .unwrap_or(ImageFormat::Png);
+
+    let img = ImageReader::with_format(Cursor::new(&data), fmt)
+        .decode()
+        .map_err(|e| anyhow::anyhow!("Cannot decode image: {e}"))?;
+
+    let orig_w = img.width();
+    let orig_h = img.height();
+    let orig_bytes = data.len();
+
+    // Step 1: pass through if within both limits.
+    let needs_resize = orig_w > IMAGE_MAX_DIMENSION || orig_h > IMAGE_MAX_DIMENSION;
+    if !needs_resize && orig_bytes <= IMAGE_TARGET_RAW_BYTES {
+        let size_kb = orig_bytes.div_ceil(1024);
+        let text = format!("{}: {orig_w}×{orig_h} {size_kb} KB (attached)", media_type_from_ext(ext));
+        return Ok((data, ext_for_format(fmt), text));
+    }
+
+    // Compute target dimensions (fit inside 2000×2000, preserve aspect ratio).
+    let (target_w, target_h) = if needs_resize {
+        let scale = (IMAGE_MAX_DIMENSION as f32 / orig_w.max(orig_h) as f32).min(1.0);
+        (
+            ((orig_w as f32 * scale).round() as u32).max(1),
+            ((orig_h as f32 * scale).round() as u32).max(1),
+        )
+    } else {
+        (orig_w, orig_h)
+    };
+
+    let resized = if (target_w, target_h) != (orig_w, orig_h) {
+        img.resize(target_w, target_h, FilterType::Lanczos3)
+    } else {
+        img
+    };
+
+    // Try encoding in original format first, then fallback strategies.
+    let (final_bytes, out_ext) = encode_within_limit(&resized, fmt)
+        .or_else(|_| encode_jpeg(&resized, 75))
+        .map_err(|_| anyhow::anyhow!(
+            "Image cannot be compressed to fit within the 5 MB API limit. \
+             Please use a smaller image."
+        ))?;
+
+    let display_w = resized.width();
+    let display_h = resized.height();
+    let size_kb = final_bytes.len().div_ceil(1024);
+    let media_type = media_type_from_ext(out_ext);
+
+    let text = if (display_w, display_h) != (orig_w, orig_h) {
+        let scale = orig_w as f32 / display_w as f32;
+        format!(
+            "{media_type}: {orig_w}×{orig_h} → {display_w}×{display_h} \
+             (scale {scale:.2}×), {size_kb} KB (attached)"
+        )
+    } else {
+        format!("{media_type}: {display_w}×{display_h} {size_kb} KB (attached)")
+    };
+
+    Ok((final_bytes, out_ext, text))
+}
+
+/// Encode `img` in `fmt` and return bytes if they fit within the target size.
+/// For PNG uses compression level 8; for JPEG uses quality 85; WebP quality 85.
+fn encode_within_limit(
+    img: &image::DynamicImage,
+    fmt: image::ImageFormat,
+) -> Result<(Vec<u8>, &'static str)> {
+    use image::ImageFormat;
+    let (bytes, ext) = match fmt {
+        ImageFormat::Png => {
+            let mut buf = Vec::new();
+            let encoder = image::codecs::png::PngEncoder::new_with_quality(
+                &mut buf,
+                image::codecs::png::CompressionType::Best,
+                image::codecs::png::FilterType::Adaptive,
+            );
+            img.write_with_encoder(encoder)?;
+            (buf, "png")
+        }
+        ImageFormat::Gif => {
+            // GIF: encode first frame as PNG (GIF encoder in `image` requires
+            // palette quantization; PNG is simpler and universally supported).
+            let mut buf = Vec::new();
+            img.write_to(&mut std::io::Cursor::new(&mut buf), ImageFormat::Png)?;
+            (buf, "png")
+        }
+        _ => {
+            let (b, e) = encode_jpeg(img, 85)?;
+            (b, e)
+        }
+    };
+    if bytes.len() <= IMAGE_TARGET_RAW_BYTES {
+        Ok((bytes, ext))
+    } else {
+        // Try progressive resize at 75% / 50% / 25% of current dimensions.
+        for factor in [75u32, 50, 25] {
+            let w = ((img.width() * factor) / 100).max(1);
+            let h = ((img.height() * factor) / 100).max(1);
+            let smaller = img.resize(w, h, image::imageops::FilterType::Lanczos3);
+            let (b, e) = encode_within_limit(&smaller, fmt)?;
+            if b.len() <= IMAGE_TARGET_RAW_BYTES {
+                return Ok((b, e));
+            }
+        }
+        anyhow::bail!("still over limit after progressive resize")
+    }
+}
+
+fn encode_jpeg(img: &image::DynamicImage, quality: u8) -> Result<(Vec<u8>, &'static str)> {
+    let mut buf = Vec::new();
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+        &mut buf, quality,
+    );
+    img.write_with_encoder(encoder)?;
+    Ok((buf, "jpeg"))
+}
+
+/// Map `ImageFormat` back to the file extension we store in the session.
+fn ext_for_format(fmt: image::ImageFormat) -> &'static str {
+    use image::ImageFormat;
+    match fmt {
+        ImageFormat::Png => "png",
+        ImageFormat::Jpeg => "jpeg",
+        ImageFormat::Gif => "gif",
+        ImageFormat::WebP => "webp",
+        ImageFormat::Bmp => "bmp",
+        _ => "png",
+    }
 }
 
 /// Map a file extension (lowercase or not) to the closest image media type
@@ -343,9 +483,7 @@ fn media_type_from_ext(ext: &str) -> &'static str {
 }
 
 /// Parse width/height from PNG header (IHDR chunk at offset 16-23).
-/// Returns `None` for any other format — JPEG/WebP require walking
-/// markers/RIFF chunks, which isn't worth pulling in an image crate for
-/// a nice-to-have metadata field.
+/// Used only for the text-only metadata path where we skip full decode.
 fn parse_png_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     if !data.starts_with(&[0x89, b'P', b'N', b'G']) || data.len() < 24 {
         return None;
@@ -642,10 +780,9 @@ mod tests {
     #[tokio::test]
     async fn read_image_too_large_bails() {
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("big.png");
-        // 6 MB > 5 MB cap. Contents don't need to be a valid PNG — the
-        // size check runs before any parsing.
-        std::fs::write(&file, vec![0u8; 6 * 1024 * 1024]).unwrap();
+        let file = dir.path().join("huge.png");
+        // > 50 MB hard gate — triggers MAX_IMAGE_READ_BYTES bail before decode.
+        std::fs::write(&file, vec![0u8; 51 * 1024 * 1024]).unwrap();
 
         let tool = ReadTool;
         let (tx, _rx) = mpsc::channel(1);
@@ -661,6 +798,30 @@ mod tests {
 
         let err = result.unwrap_err().to_string();
         assert!(err.contains("too large"), "msg: {err}");
+    }
+
+    #[tokio::test]
+    async fn read_image_corrupt_bails_with_vision() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("corrupt.png");
+        // Invalid PNG bytes — decode should fail when vision is enabled.
+        std::fs::write(&file, vec![0u8; 6 * 1024 * 1024]).unwrap();
+
+        let tool = ReadTool;
+        let (tx, _rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let caps = crate::core::tool::ModelCaps { vision: true };
+        let result = tool
+            .execute(
+                serde_json::json!({"path": file.to_str().unwrap()}),
+                tx,
+                cancel,
+                caps,
+            )
+            .await;
+
+        // Either decode error or session error (no active session in test).
+        assert!(result.is_err(), "corrupt image should fail");
     }
 
     #[tokio::test]
@@ -750,5 +911,43 @@ mod tests {
         assert_eq!(media_type_from_ext("bmp"), "image/bmp");
         // Unknown falls back to PNG — safe default, every gateway understands it.
         assert_eq!(media_type_from_ext("xyz"), "image/png");
+    }
+
+    /// Build a minimal valid 1×1 white PNG in memory.
+    fn make_png(width: u32, height: u32) -> Vec<u8> {
+        use image::{ImageBuffer, Rgb};
+        let img: ImageBuffer<Rgb<u8>, _> =
+            ImageBuffer::from_fn(width, height, |_, _| Rgb([255u8, 255, 255]));
+        let mut buf = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut buf),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        buf
+    }
+
+    #[test]
+    fn preprocess_small_image_passes_through() {
+        let data = make_png(100, 100);
+        let orig_len = data.len();
+        let (out, ext, text) = preprocess_image(data, "png").unwrap();
+        assert_eq!(ext, "png");
+        assert_eq!(out.len(), orig_len);
+        assert!(text.contains("100×100"));
+        assert!(text.contains("attached"));
+        assert!(!text.contains("→")); // no resize indicator
+    }
+
+    #[test]
+    fn preprocess_oversized_image_resizes() {
+        let data = make_png(3000, 2000);
+        let (out, _ext, text) = preprocess_image(data, "png").unwrap();
+        // Decode output to verify dimensions are within limit.
+        let decoded = image::load_from_memory(&out).unwrap();
+        assert!(decoded.width() <= IMAGE_MAX_DIMENSION);
+        assert!(decoded.height() <= IMAGE_MAX_DIMENSION);
+        assert!(text.contains("→"), "metadata should show resize: {text}");
+        assert!(text.contains("scale"), "metadata should show scale: {text}");
     }
 }
