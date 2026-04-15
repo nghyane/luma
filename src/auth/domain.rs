@@ -161,6 +161,27 @@ pub struct AccountMetadata {
     pub imported_from: Option<String>,
     #[serde(default, skip_serializing_if = "UsageSnapshot::is_empty")]
     pub usage: UsageSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_flow: Option<AuthFlow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc_client: Option<SsoOidcClient>,
+}
+
+/// How this account was authenticated — determines refresh routing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AuthFlow {
+    Social,
+    Idc { region: String, start_url: String },
+    BuilderId,
+}
+
+/// Cached SSO OIDC client registration (avoids re-registering on every refresh).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SsoOidcClient {
+    pub client_id: String,
+    pub client_secret: String,
+    pub expires_at: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -94,9 +94,13 @@ impl AuthRepository for FileAuthRepository {
 
 fn atomic_write(path: &Path, store: &AuthStore) -> Result<(), AuthStoreError> {
     let json = serde_json::to_string_pretty(store)?;
-    let tmp = path.with_extension("json.tmp");
+    let pid = std::process::id();
+    let tmp = path.with_extension(format!("json.tmp.{pid}"));
     fs::write(&tmp, &json)?;
-    fs::rename(&tmp, path).map_err(|_| AuthStoreError::AtomicWriteFailed)?;
+    fs::rename(&tmp, path).map_err(|_| {
+        let _ = fs::remove_file(&tmp);
+        AuthStoreError::AtomicWriteFailed
+    })?;
     Ok(())
 }
 
@@ -254,6 +258,8 @@ fn v2_account_to_record(a: V2Account) -> Option<AccountRecord> {
                 reset_at: a.usage.reset_at,
                 updated_at: a.usage.updated_at,
             },
+            auth_flow: None,
+            oidc_client: None,
         },
     })
 }

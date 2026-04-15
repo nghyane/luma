@@ -4,6 +4,7 @@ pub mod claude;
 pub mod codex;
 pub mod kiro;
 pub mod shared;
+pub mod sso_oidc;
 
 use crate::auth::domain::{AccountKey, AuthVendor};
 use crate::auth::error::OAuthError;
@@ -42,19 +43,17 @@ impl ProviderRef<'_> {
         match self {
             Self::Claude(p) => p.login().await,
             Self::Codex(p) => p.login().await,
-            Self::Kiro(p) => p.login().await,
+            Self::Kiro(_) => Err(OAuthError::ExchangeFailed(
+                "use AuthService::login() for Kiro".into(),
+            )),
         }
     }
 
-    pub async fn refresh(
-        &self,
-        refresh_token: &str,
-        scopes: Option<&[String]>,
-    ) -> Result<OAuthTokens, OAuthError> {
+    pub async fn refresh(&self, refresh_token: &str) -> Result<OAuthTokens, OAuthError> {
         match self {
             Self::Claude(p) => p.refresh(refresh_token).await,
             Self::Codex(p) => p.refresh(refresh_token).await,
-            Self::Kiro(p) => p.refresh(refresh_token, scopes).await,
+            Self::Kiro(p) => p.refresh_social(refresh_token).await,
         }
     }
 }

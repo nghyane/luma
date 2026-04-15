@@ -1,6 +1,6 @@
 //! `luma login` interactive flow.
 
-use crate::auth::repo::{AuthRepository, FileAuthRepository};
+use crate::auth::repo::FileAuthRepository;
 use crate::auth::service::AuthService;
 use crate::config::auth::AuthVendor;
 use anyhow::{Context, Result};
@@ -15,18 +15,39 @@ pub async fn run(arg: Option<&str>) -> Result<()> {
         Some(name) => Choice::parse(name)?,
         None => pick_choice()?,
     };
-
+    let svc = AuthService::new(FileAuthRepository::with_default_path());
     match choice {
-        Choice::Oauth(vendor) => dispatch_oauth(vendor).await,
-        Choice::ApiKey(vendor) => dispatch_api_key(vendor),
+        Choice::Oauth(vendor) => {
+            eprintln!("logging in to {}…", vendor.as_str());
+            let view = svc.login(vendor.into()).await?;
+            let who = view.email.as_deref().unwrap_or(view.display_name.as_str());
+            println!("signed in as {who} ({}) · provider: {}", view.display_name, view.vendor.as_str());
+        }
+        Choice::ApiKey(vendor) => {
+            eprint!("paste {} API key: ", vendor.as_str());
+            io::stderr().flush().ok();
+            let mut key = String::new();
+            io::stdin().read_line(&mut key).context("could not read API key")?;
+            let key = key.trim();
+            if key.is_empty() { anyhow::bail!("no key provided"); }
+            let view = svc.save_api_key(vendor.into(), key)?;
+            println!("saved · {}", view.display_name);
+        }
         Choice::KiroBuilderId => {
-            dispatch_device_flow("https://view.awsapps.com/start", "us-east-1").await
+            eprintln!("logging in via Builder ID…");
+            let view = svc.login_device("https://view.awsapps.com/start", "us-east-1").await?;
+            let who = view.email.as_deref().unwrap_or(view.display_name.as_str());
+            println!("signed in as {who} · provider: kiro (builder-id)");
         }
         Choice::KiroIdc => {
             let (start_url, region) = prompt_idc_params()?;
-            dispatch_device_flow(&start_url, &region).await
+            eprintln!("logging in via IAM Identity Center…");
+            let view = svc.login_device(&start_url, &region).await?;
+            let who = view.email.as_deref().unwrap_or(view.display_name.as_str());
+            println!("signed in as {who} · provider: kiro (idc)");
         }
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,8 +100,7 @@ const CHOICES: &[Choice] = &[
 
 fn pick_choice() -> Result<Choice> {
     let mut term = PlatformTerminal::new().context("could not open terminal for login menu")?;
-    term.enter_raw_mode()
-        .context("could not enter raw mode for login menu")?;
+    term.enter_raw_mode().context("could not enter raw mode for login menu")?;
     let reader = term.event_reader();
     let result = run_picker(&reader);
     let _ = term.enter_cooked_mode();
@@ -95,31 +115,18 @@ fn run_picker(reader: &termina::EventReader) -> Result<Choice> {
     write!(io::stderr(), "\x1b[2J\x1b[H")?;
     io::stderr().flush()?;
     render_menu(selected, false)?;
-
     loop {
-        let raw = reader
-            .read(|_| true)
-            .context("terminal read failed in login menu")?;
-        let termina::Event::Key(k) = raw else {
-            continue;
-        };
-        if k.kind != KeyEventKind::Press {
-            continue;
-        }
+        let raw = reader.read(|_| true).context("terminal read failed")?;
+        let termina::Event::Key(k) = raw else { continue };
+        if k.kind != KeyEventKind::Press { continue; }
         match k.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                selected = selected.saturating_sub(1);
-            }
+            KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => {
-                if selected + 1 < CHOICES.len() {
-                    selected += 1;
-                }
+                if selected + 1 < CHOICES.len() { selected += 1; }
             }
             KeyCode::Enter => return Ok(CHOICES[selected]),
             KeyCode::Escape | KeyCode::Char('q') => anyhow::bail!("cancelled"),
-            KeyCode::Char('c') if k.modifiers.contains(Modifiers::CONTROL) => {
-                anyhow::bail!("cancelled");
-            }
+            KeyCode::Char('c') if k.modifiers.contains(Modifiers::CONTROL) => anyhow::bail!("cancelled"),
             _ => continue,
         }
         render_menu(selected, true)?;
@@ -129,11 +136,7 @@ fn run_picker(reader: &termina::EventReader) -> Result<Choice> {
 fn render_menu(selected: usize, redraw: bool) -> Result<()> {
     let lines = 3 + CHOICES.len() + 2;
     let mut out = io::stderr();
-    if redraw {
-        write!(out, "\x1b[{lines}A\r\x1b[J")?;
-    } else {
-        write!(out, "\r")?;
-    }
+    if redraw { write!(out, "\x1b[{lines}A\r\x1b[J")?; } else { write!(out, "\r")?; }
     write!(out, "luma login — select provider\r\n\r\n")?;
     for (i, choice) in CHOICES.iter().enumerate() {
         let arrow = if i == selected { ">" } else { " " };
@@ -144,78 +147,17 @@ fn render_menu(selected: usize, redraw: bool) -> Result<()> {
     Ok(())
 }
 
-async fn dispatch_oauth(vendor: AuthVendor) -> Result<()> {
-    eprintln!("logging in to {}…", vendor.as_str());
-    let view = AuthService::new(FileAuthRepository::with_default_path())
-        .login(vendor.into())
-        .await?;
-    let who = view.email.as_deref().unwrap_or(view.display_name.as_str());
-    println!("signed in as {who} ({}) · provider: {}", view.display_name, view.vendor.as_str());
-    Ok(())
-}
-
-fn dispatch_api_key(vendor: AuthVendor) -> Result<()> {
-    eprint!("paste {} API key: ", vendor.as_str());
-    io::stderr().flush().ok();
-    let mut key = String::new();
-    io::stdin().read_line(&mut key).context("could not read API key from stdin")?;
-    let key = key.trim();
-    if key.is_empty() {
-        anyhow::bail!("no key provided");
-    }
-    let view = AuthService::new(FileAuthRepository::with_default_path())
-        .save_api_key(vendor.into(), key)?;
-    println!("saved · {}", view.display_name);
-    Ok(())
-}
-
 fn prompt_idc_params() -> Result<(String, String)> {
     eprint!("Start URL (e.g. https://d-xxxxxxxxxx.awsapps.com/start): ");
     io::stderr().flush().ok();
-    let mut start_url = String::new();
-    io::stdin().read_line(&mut start_url)?;
-    let start_url = start_url.trim().to_owned();
-    if start_url.is_empty() {
-        anyhow::bail!("no start URL provided");
-    }
+    let mut url = String::new();
+    io::stdin().read_line(&mut url)?;
+    let url = url.trim().to_owned();
+    if url.is_empty() { anyhow::bail!("no start URL provided"); }
     eprint!("Region [us-east-1]: ");
     io::stderr().flush().ok();
     let mut region = String::new();
     io::stdin().read_line(&mut region)?;
     let region = region.trim();
-    let region = if region.is_empty() { "us-east-1" } else { region }.to_owned();
-    Ok((start_url, region))
-}
-
-async fn dispatch_device_flow(start_url: &str, region: &str) -> Result<()> {
-    eprintln!("logging in via IAM Identity Center…");
-    let result = crate::auth::oauth::kiro::KiroProvider::login_device(start_url, region).await?;
-    let repo = FileAuthRepository::with_default_path();
-    let mut store = repo.load().unwrap_or_default();
-    store.version = crate::auth::repo::STORE_VERSION;
-    let record = crate::auth::domain::AccountRecord {
-        key: result.identity.key.clone(),
-        display_name: result.identity.display_name.clone(),
-        email: result.identity.email.clone(),
-        auth: crate::auth::domain::AuthState::OAuth(crate::auth::domain::OAuthCredential {
-            access_token: result.tokens.access_token,
-            refresh_token: result.tokens.refresh_token,
-            expires_at: result.tokens.expires_at,
-            scopes: result.tokens.scopes,
-        }),
-        health: crate::auth::domain::AccountHealth::Active,
-        metadata: crate::auth::domain::AccountMetadata {
-            profile_arn: result.tokens.profile_arn,
-            ..Default::default()
-        },
-    };
-    if let Some(existing) = store.accounts.iter_mut().find(|a| a.key == record.key) {
-        *existing = record.clone();
-    } else {
-        store.accounts.push(record.clone());
-    }
-    repo.save(&store)?;
-    let who = result.identity.email.as_deref().unwrap_or(&result.identity.display_name);
-    println!("signed in as {who} · provider: kiro (idc)");
-    Ok(())
+    Ok((url, if region.is_empty() { "us-east-1" } else { region }.to_owned()))
 }

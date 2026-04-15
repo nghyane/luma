@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::auth::domain::{
     AccountHealth, AccountKey, AccountMetadata, AccountRecord, AccountSubject, AccountView,
-    ApiKeyCredential, AuthFailure, AuthState, AuthVendor, OAuthCredential, ReloginReason,
+    ApiKeyCredential, AuthFailure, AuthFlow, AuthState, AuthVendor, OAuthCredential, ReloginReason,
 };
 use crate::auth::error::AuthError;
 use crate::auth::repo::{AuthRepository, AuthStore};
@@ -89,11 +89,50 @@ impl<R: AuthRepository> AuthService<R> {
     }
 
     pub async fn login(&self, vendor: AuthVendor) -> Result<AccountView, AuthError> {
+        if vendor == AuthVendor::Kiro {
+            return self.login_kiro_portal().await;
+        }
         let oauth = crate::auth::oauth::OAuthRegistry::new();
         let provider = oauth.get(vendor).ok_or(AuthError::NoEligibleAccount {
             vendor: vendor.as_str().to_owned(),
         })?;
         let login = provider.login().await.map_err(AuthError::OAuth)?;
+        self.save_login_result(login, AuthFlow::Social)
+    }
+
+    /// Kiro portal login — handles social, or delegates to device flow for IDC/BuilderId.
+    async fn login_kiro_portal(&self) -> Result<AccountView, AuthError> {
+        use crate::auth::oauth::kiro::{KiroProvider, PortalOutcome};
+        let outcome = KiroProvider.login().await.map_err(AuthError::OAuth)?;
+        match outcome {
+            PortalOutcome::Social(login) => self.save_login_result(login, AuthFlow::Social),
+            PortalOutcome::Idc { issuer_url, idc_region } => {
+                self.login_device(&issuer_url, &idc_region).await
+            }
+            PortalOutcome::BuilderId => {
+                self.login_device("https://view.awsapps.com/start", "us-east-1").await
+            }
+        }
+    }
+
+    /// Direct device-flow login for IAM Identity Center / Builder ID.
+    pub async fn login_device(
+        &self,
+        start_url: &str,
+        region: &str,
+    ) -> Result<AccountView, AuthError> {
+        let (login, client) =
+            crate::auth::oauth::sso_oidc::login(start_url, region, None)
+                .await
+                .map_err(AuthError::OAuth)?;
+        let flow = if start_url.contains("view.awsapps.com") || start_url.contains("amzn.awsapps.com") {
+            AuthFlow::BuilderId
+        } else {
+            AuthFlow::Idc {
+                region: region.to_owned(),
+                start_url: start_url.to_owned(),
+            }
+        };
         let record = AccountRecord {
             key: login.identity.key.clone(),
             display_name: login.identity.display_name,
@@ -107,20 +146,45 @@ impl<R: AuthRepository> AuthService<R> {
             health: AccountHealth::Active,
             metadata: AccountMetadata {
                 profile_arn: login.tokens.profile_arn,
+                auth_flow: Some(flow),
+                oidc_client: Some(client),
                 ..AccountMetadata::default()
             },
         };
-
         self.mutate(|store| upsert_account(store, record.clone()))?;
-
         let store = self.repo.load()?;
-        let saved = store
-            .accounts
-            .iter()
-            .find(|a| a.key == record.key)
+        store.accounts.iter().find(|a| a.key == record.key)
             .map(AccountView::from_record)
-            .ok_or(AuthError::ReadBackFailed)?;
-        Ok(saved)
+            .ok_or(AuthError::ReadBackFailed)
+    }
+
+    fn save_login_result(
+        &self,
+        login: crate::auth::oauth::LoginResult,
+        flow: AuthFlow,
+    ) -> Result<AccountView, AuthError> {
+        let record = AccountRecord {
+            key: login.identity.key.clone(),
+            display_name: login.identity.display_name,
+            email: login.identity.email,
+            auth: AuthState::OAuth(OAuthCredential {
+                access_token: login.tokens.access_token,
+                refresh_token: login.tokens.refresh_token,
+                expires_at: login.tokens.expires_at,
+                scopes: login.tokens.scopes,
+            }),
+            health: AccountHealth::Active,
+            metadata: AccountMetadata {
+                profile_arn: login.tokens.profile_arn,
+                auth_flow: Some(flow),
+                ..AccountMetadata::default()
+            },
+        };
+        self.mutate(|store| upsert_account(store, record.clone()))?;
+        let store = self.repo.load()?;
+        store.accounts.iter().find(|a| a.key == record.key)
+            .map(AccountView::from_record)
+            .ok_or(AuthError::ReadBackFailed)
     }
 
     pub fn save_api_key(&self, vendor: AuthVendor, token: &str) -> Result<AccountView, AuthError> {
@@ -208,14 +272,52 @@ impl<R: AuthRepository> AuthService<R> {
             .ok_or(AuthError::NoEligibleAccount {
                 vendor: record.key.vendor.as_str().to_owned(),
             })?;
-        let scopes = match &record.auth {
-            AuthState::OAuth(cred) => Some(cred.scopes.as_slice()),
-            _ => None,
+
+        // Route refresh by auth flow. Infer from scopes for pre-refactor accounts.
+        let effective_flow = record.metadata.auth_flow.clone().or_else(|| {
+            match &record.auth {
+                AuthState::OAuth(cred)
+                    if cred.scopes.iter().any(|s| s.starts_with("codewhisperer:") || s == "sso:account:access") =>
+                {
+                    Some(AuthFlow::Idc {
+                        region: "us-east-1".to_owned(),
+                        start_url: String::new(),
+                    })
+                }
+                _ => None,
+            }
+        });
+        let (tokens, updated_client) = match &effective_flow {
+            Some(AuthFlow::Idc { region, start_url }) => {
+                let (tok, client) = crate::auth::oauth::sso_oidc::refresh(
+                    refresh_token,
+                    region,
+                    record.metadata.oidc_client.as_ref(),
+                    start_url,
+                )
+                .await
+                .map_err(AuthError::OAuth)?;
+                (tok, Some(client))
+            }
+            Some(AuthFlow::BuilderId) => {
+                let (tok, client) = crate::auth::oauth::sso_oidc::refresh(
+                    refresh_token,
+                    "us-east-1",
+                    record.metadata.oidc_client.as_ref(),
+                    "https://view.awsapps.com/start",
+                )
+                .await
+                .map_err(AuthError::OAuth)?;
+                (tok, Some(client))
+            }
+            _ => {
+                let tok = provider
+                    .refresh(refresh_token)
+                    .await
+                    .map_err(AuthError::OAuth)?;
+                (tok, None)
+            }
         };
-        let tokens = provider
-            .refresh(refresh_token, scopes)
-            .await
-            .map_err(AuthError::OAuth)?;
 
         let refreshed = AccountRecord {
             key: record.key.clone(),
@@ -233,6 +335,8 @@ impl<R: AuthRepository> AuthService<R> {
                     .profile_arn
                     .clone()
                     .or_else(|| record.metadata.profile_arn.clone()),
+                oidc_client: updated_client.or_else(|| record.metadata.oidc_client.clone()),
+                auth_flow: effective_flow.or_else(|| record.metadata.auth_flow.clone()),
                 ..record.metadata.clone()
             },
         };
