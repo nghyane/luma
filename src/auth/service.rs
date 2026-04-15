@@ -381,7 +381,26 @@ impl<R: AuthRepository> AuthService<R> {
             && is_expired(cred.expires_at)
             && cred.refresh_token.is_some()
         {
-            return self.refresh_credential(&record.key).await;
+            match self.refresh_credential(&record.key).await {
+                Ok(cred) => return Ok(cred),
+                Err(AuthError::OAuth(ref e))
+                    if e.to_string().contains("invalid_grant")
+                        || e.to_string().contains("expired")
+                        || e.to_string().contains("Bad credentials") =>
+                {
+                    let _ = self.mark_auth_failed(
+                        &record.key,
+                        AuthFailure::RefreshRejected,
+                    );
+                    return Err(AuthError::NoEligibleAccount {
+                        vendor: format!(
+                            "{} (token expired, run `luma login` to re-authenticate)",
+                            vendor.as_str()
+                        ),
+                    });
+                }
+                Err(e) => return Err(e),
+            }
         }
 
         Ok(credential_from_record(record))
