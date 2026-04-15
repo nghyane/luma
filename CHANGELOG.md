@@ -10,15 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - RFC 0011: Image Attachment Routing
 - Image preprocessing for `Read` via the `image` crate, including decode, resize, and compression before attachment
+- AWS IAM Identity Center and Builder ID login support (SSO OIDC device flow)
+- SQLite-backed auth repository (`auth.db`) with `BEGIN IMMEDIATE` for cross-process safety
 
 ### Changed
 - Tool-result image routing is now selected centrally per provider (`inline`, `user attachment`, or adapter-managed text fallback)
 - Kiro now receives images from `Read` through the user attachment path instead of silently dropping image tool results
 - OpenAI Chat keeps provider-specific text fallback for multimodal tool results while Anthropic and OpenAI Responses continue to send real image bytes inline
 - Login/account persistence now flows through the new auth service and repository layer across CLI, config compatibility shims, and TUI integration
+- Auth storage migrated from JSON file to SQLite — matches Kiro CLI architecture for multi-process safety
+- Import command now merges accounts (upsert) instead of replacing all existing accounts
+- Expired refresh tokens are now handled gracefully with automatic re-authentication prompts
 
 ### Removed
 - Provider-specific ad hoc image-routing logic that previously lived inside individual adapters
+- Auth daemon (`authd/`) — replaced by SQLite locking, no daemon needed
+- Legacy JSON file auth store (`auth.json`) and V1/V2 migration code
 
 ## [0.4.0-beta.13] - 2026-04-14
 
