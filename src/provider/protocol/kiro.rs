@@ -162,9 +162,17 @@ impl KiroRuntime {
         // a one-shot dump at end-of-body.
         let mut decoder = FrameDecoder::new(req.tools);
         let mut byte_stream = resp.bytes_stream();
+        let chunk_timeout = std::time::Duration::from_secs(120);
         loop {
-            let Some(chunk) = next_chunk_or_cancel(&mut byte_stream, &req.cancel)
-                .await
+            let chunk_result = tokio::select! {
+                c = next_chunk_or_cancel(&mut byte_stream, &req.cancel) => c,
+                _ = tokio::time::sleep(chunk_timeout) => {
+                    return Err(crate::provider::sse::StreamInterrupted(
+                        "Kiro stream idle timeout — no data for 120s".into(),
+                    ).into());
+                }
+            };
+            let Some(chunk) = chunk_result
                 .map_err(|e| anyhow::anyhow!("Kiro read error: {e}"))?
             else {
                 break;

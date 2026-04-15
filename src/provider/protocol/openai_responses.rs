@@ -152,6 +152,7 @@ impl Provider for OpenAIResponsesRuntime {
                 max_tokens_override: _,
                 tx,
                 cancel,
+                tool_use_tx: _, // Codex Responses uses consume_responses_stream
             } = req;
             let body = self.build_request_body(messages, tools, server_tools, resolve_image);
 

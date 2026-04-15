@@ -157,6 +157,7 @@ impl Provider for AnthropicRuntime {
                 max_tokens_override,
                 tx,
                 cancel,
+                tool_use_tx,
             } = req;
             let effective_max_tokens = max_tokens_override.unwrap_or(self.max_tokens);
             let body = self.build_request_body(
@@ -256,7 +257,14 @@ impl Provider for AnthropicRuntime {
                         usage = u.clone();
                         let _ = tx.send(Event::Usage(u)).await;
                     }
-                    StreamEvent::BlockComplete(b) => blocks.push(b),
+                    StreamEvent::BlockComplete(b) => {
+                        if let Some(ref tu_tx) = tool_use_tx {
+                            if matches!(&b, ContentBlock::ToolUse { .. }) {
+                                let _ = tu_tx.send(b.clone()).await;
+                            }
+                        }
+                        blocks.push(b);
+                    }
                     StreamEvent::Done { stop } => {
                         stop_reason = stop;
                         saw_done = true;

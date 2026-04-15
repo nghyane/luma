@@ -10,7 +10,6 @@ use crate::provider::retry::ProviderRateLimited;
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-const MAX_ITERATIONS: usize = 50;
 
 /// Fallback cap when evidence ingestion fails (I/O error on the blob).
 ///
@@ -20,12 +19,17 @@ const MAX_ITERATIONS: usize = 50;
 /// the transcript. Dead path in practice — kept for defense in depth.
 const SAFETY_FALLBACK_CAP: usize = 32_000;
 
-const STREAM_RETRIES: u8 = 2;
-const STREAM_RETRY_DELAY_SECS: u64 = 2;
+const STREAM_RETRIES: u8 = 4;
+const STREAM_RETRY_DELAY_SECS: u64 = 3;
 
 /// Max outer retries for auth (401) + pool failover (429) combined. Bounds
 /// runaway loops when several accounts are sequentially unhealthy.
 const MAX_AUTH_RETRIES: u8 = 5;
+
+/// Max consecutive stream errors before the turn gives up. Mirrors Claude
+/// Code's approach of yielding errors as messages — but caps runaway loops.
+const MAX_STREAM_ERROR_RECOVERY: u8 = 2;
+const MAX_OUTPUT_RECOVERY: u8 = 3;
 
 /// Run a chat turn: resolve auth → build provider → run tool loop.
 ///
@@ -222,6 +226,7 @@ async fn stream_with_retry(
     ctx: &TurnCtx<'_>,
     messages: &[Message],
     max_tokens_override: Option<u32>,
+    tool_use_tx: Option<tokio::sync::mpsc::Sender<crate::core::types::ContentBlock>>,
 ) -> Result<StreamResponse> {
     use crate::core::provider::StreamRequest;
 
@@ -259,6 +264,7 @@ async fn stream_with_retry(
             max_tokens_override,
             tx: ctx.tx.clone(),
             cancel: ctx.cancel.clone(),
+            tool_use_tx: tool_use_tx.clone(),
         };
         match ctx.provider.stream(req).await {
             Ok(result) => return Ok(result),
@@ -303,15 +309,71 @@ async fn run_turn(
         cancel: &cancel,
     };
 
-    for _ in 0..MAX_ITERATIONS {
+    let mut output_recovery_count: u8 = 0;
+    let mut stream_error_count: u8 = 0;
+
+    loop {
         if cancel.is_cancelled() {
             anyhow::bail!("Aborted");
         }
 
+        // Create channel for streaming tool execution. Provider sends
+        // completed ToolUse blocks here mid-stream so we can start
+        // executing tools before the full response arrives.
+        let (tu_tx, mut tu_rx) =
+            tokio::sync::mpsc::channel::<crate::core::types::ContentBlock>(16);
+
         // First attempt: provider default max_tokens.
         let routing = provider.tool_result_image_routing();
         let routed = crate::core::provider::route_tool_result_images(&session.messages, routing);
-        let mut result = stream_with_retry(&ctx, &routed, None).await?;
+
+        // Run stream and early tool execution concurrently. The stream
+        // sends ToolUse blocks via tu_tx as they arrive; we collect them
+        // and start executing as soon as the stream finishes (tu_tx drops
+        // → tu_rx closes). Tools that arrived mid-stream are already
+        // queued and execute immediately, overlapping with any post-stream
+        // bookkeeping.
+        let stream_future = stream_with_retry(&ctx, &routed, None, Some(tu_tx));
+
+        // Collect tool_use blocks that arrive mid-stream.
+        let mut early_tool_uses: Vec<ToolUseRef> = Vec::new();
+        let collect_future = async {
+            while let Some(block) = tu_rx.recv().await {
+                if let ContentBlock::ToolUse { id, name, input } = block {
+                    early_tool_uses.push(ToolUseRef { id, name, input });
+                }
+            }
+        };
+
+        // Race: stream produces the response, channel collects tool blocks.
+        // Stream finishing drops tu_tx → collect_future ends.
+        let mut result = {
+            let (stream_result, _) = tokio::join!(stream_future, collect_future);
+            match stream_result {
+                Ok(r) => r,
+                Err(e) => {
+                    if cancel.is_cancelled() {
+                        anyhow::bail!("Aborted");
+                    }
+                    stream_error_count += 1;
+                    if stream_error_count > MAX_STREAM_ERROR_RECOVERY {
+                        return Err(e);
+                    }
+                    let msg = e.to_string();
+                    let _ = tx
+                        .send(Event::ToolOutput {
+                            name: String::new(),
+                            chunk: format!("stream error (recovery {stream_error_count}/{MAX_STREAM_ERROR_RECOVERY}): {msg}"),
+                        })
+                        .await;
+                    session.messages.push(Message::system(format!(
+                        "[API error — retrying: {msg}]"
+                    )));
+                    session.save();
+                    continue;
+                }
+            }
+        };
 
         // Escalate once if the first call hit max_tokens before finishing,
         // but only if the provider actually honors an override. For providers
@@ -327,8 +389,28 @@ async fn run_turn(
                     max_attempts: 2,
                 })
                 .await;
-            result = stream_with_retry(&ctx, &routed, Some(ESCALATED_MAX_TOKENS)).await?;
+            match stream_with_retry(&ctx, &routed, Some(ESCALATED_MAX_TOKENS), None).await {
+                Ok(r) => result = r,
+                Err(e) => {
+                    if cancel.is_cancelled() {
+                        anyhow::bail!("Aborted");
+                    }
+                    stream_error_count += 1;
+                    if stream_error_count > MAX_STREAM_ERROR_RECOVERY {
+                        return Err(e);
+                    }
+                    let msg = e.to_string();
+                    session.messages.push(Message::system(format!(
+                        "[API error on escalation — retrying: {msg}]"
+                    )));
+                    session.save();
+                    continue;
+                }
+            }
         }
+
+        // Successful stream resets the error counter.
+        stream_error_count = 0;
 
         let StreamResponse {
             message: response,
@@ -366,31 +448,55 @@ async fn run_turn(
             anyhow::bail!("Aborted");
         }
 
-        // Still MaxTokens after (potentially) escalating → turn is cut off.
-        // Message differs depending on whether escalation actually ran.
-        if stop_reason == StopReason::MaxTokens && provider.supports_max_tokens_override() {
-            anyhow::bail!(
-                "output token limit hit even at {ESCALATED_MAX_TOKENS} tokens. \
-                 Start a new session or switch to a model with larger output capacity."
-            );
-        }
+        // Still MaxTokens after (potentially) escalating → inject a
+        // recovery nudge so the model resumes where it left off, mirroring
+        // Claude Code's max_output_tokens recovery loop.
         if stop_reason == StopReason::MaxTokens {
-            anyhow::bail!(
-                "{} hit its output token limit. Start a new session or switch to a model with larger output capacity.",
-                provider.name()
-            );
+            output_recovery_count += 1;
+            if output_recovery_count > MAX_OUTPUT_RECOVERY {
+                anyhow::bail!(
+                    "output token limit hit {} times. Start a new session or switch to a model with larger output capacity.",
+                    output_recovery_count
+                );
+            }
+            let _ = tx
+                .send(Event::ToolOutput {
+                    name: String::new(),
+                    chunk: format!(
+                        "output limit hit, resuming… (recovery {}/{})",
+                        output_recovery_count, MAX_OUTPUT_RECOVERY
+                    ),
+                })
+                .await;
+            session.messages.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "Output token limit hit. Resume directly — no apology, no recap. \
+                           Pick up mid-thought if that is where the cut happened. \
+                           Break remaining work into smaller pieces."
+                        .to_owned(),
+                }],
+                origin: None,
+            });
+            session.save();
+            continue;
         }
 
-        // Collect tool_use blocks in document order — required so that
-        // tool_result blocks on the next user message line up 1:1.
-        let tool_uses: Vec<ToolUseRef> = response
-            .tool_uses()
-            .map(|(id, name, input)| ToolUseRef {
-                id: id.to_owned(),
-                name: name.to_owned(),
-                input: input.clone(),
-            })
-            .collect();
+        // Use early-collected tool_use blocks if available (arrived
+        // mid-stream via channel), otherwise fall back to extracting
+        // from the completed response.
+        let tool_uses: Vec<ToolUseRef> = if !early_tool_uses.is_empty() {
+            early_tool_uses
+        } else {
+            response
+                .tool_uses()
+                .map(|(id, name, input)| ToolUseRef {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                    input: input.clone(),
+                })
+                .collect()
+        };
         if tool_uses.is_empty() {
             return Ok(());
         }
@@ -402,9 +508,6 @@ async fn run_turn(
         .await;
         let aborted = cancel.is_cancelled();
 
-        // Current turn index — points at the assistant message that just
-        // pushed these tool_use blocks. Used by evidence records so the
-        // planner can reason about recency (most recent assistant turn).
         let turn_index = session.messages.len().saturating_sub(1);
         let evidence_dir = crate::core::session::session_evidence_dir(&session.id);
 
@@ -441,7 +544,6 @@ async fn run_turn(
             anyhow::bail!("Aborted");
         }
     }
-    Ok(())
 }
 
 /// If `text` exceeds the evidence threshold, persist it as evidence and

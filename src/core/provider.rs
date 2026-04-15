@@ -197,6 +197,12 @@ pub struct StreamRequest<'a> {
     pub max_tokens_override: Option<u32>,
     pub tx: EventSender,
     pub cancel: CancellationToken,
+    /// Optional channel for streaming tool execution. When set, providers
+    /// send completed `ToolUse` content blocks here as soon as they arrive
+    /// mid-stream, allowing the caller to start tool execution before the
+    /// full response is assembled. Mirrors Claude Code's
+    /// `StreamingToolExecutor.addTool()` pattern.
+    pub tool_use_tx: Option<tokio::sync::mpsc::Sender<crate::core::types::ContentBlock>>,
 }
 
 /// Rewrite `messages` so that `ToolResultItem::Image` entries are routed

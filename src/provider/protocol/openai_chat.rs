@@ -94,6 +94,7 @@ impl Provider for OpenAIChatRuntime {
                 max_tokens_override,
                 tx,
                 cancel,
+                tool_use_tx: _, // OpenAI Chat uses consume_chat_stream
             } = req;
             let effective_max_tokens = max_tokens_override.unwrap_or(self.max_tokens);
             let body = self.build_request_body(
