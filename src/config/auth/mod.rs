@@ -50,7 +50,7 @@ pub struct UsageSnapshot {
 
 pub async fn resolve(provider: AuthVendor) -> Result<Credential> {
     crate::auth::service::AuthService::new(
-        crate::auth::repo::FileAuthRepository::with_default_path(),
+        crate::auth::repo::SqliteAuthRepository::with_default_path(),
     )
     .resolve_credential(provider.into())
     .await
@@ -59,7 +59,7 @@ pub async fn resolve(provider: AuthVendor) -> Result<Credential> {
 
 pub async fn force_refresh(provider: AuthVendor) -> Result<Credential> {
     let service = crate::auth::service::AuthService::new(
-        crate::auth::repo::FileAuthRepository::with_default_path(),
+        crate::auth::repo::SqliteAuthRepository::with_default_path(),
     );
     let cred = service
         .resolve_credential(provider.into())
@@ -77,7 +77,7 @@ pub async fn force_refresh(provider: AuthVendor) -> Result<Credential> {
 
 pub fn record_usage(label: &str, usage: UsageSnapshot) {
     let _ = crate::auth::service::AuthService::new(
-        crate::auth::repo::FileAuthRepository::with_default_path(),
+        crate::auth::repo::SqliteAuthRepository::with_default_path(),
     )
     .record_usage_by_display_name(label, usage);
 }

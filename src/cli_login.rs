@@ -1,6 +1,6 @@
 //! `luma login` interactive flow.
 
-use crate::auth::repo::FileAuthRepository;
+use crate::auth::repo::SqliteAuthRepository;
 use crate::auth::service::AuthService;
 use crate::config::auth::AuthVendor;
 use anyhow::{Context, Result};
@@ -15,7 +15,7 @@ pub async fn run(arg: Option<&str>) -> Result<()> {
         Some(name) => Choice::parse(name)?,
         None => pick_choice()?,
     };
-    let svc = AuthService::new(FileAuthRepository::with_default_path());
+    let svc = AuthService::new(SqliteAuthRepository::with_default_path());
     match choice {
         Choice::Oauth(vendor) => {
             eprintln!("logging in to {}…", vendor.as_str());

@@ -2,7 +2,7 @@ use super::Action;
 /// App commands — slash commands, mode/model selection, session resume.
 use super::state::PickerMode;
 use crate::auth::domain::AccountHealth;
-use crate::auth::repo::FileAuthRepository;
+use crate::auth::repo::SqliteAuthRepository;
 use crate::auth::service::AuthService;
 use crate::config::models::{self, AgentMode};
 use crate::event::AgentCommand;
@@ -124,8 +124,8 @@ impl super::App {
         }
     }
 
-    fn auth_service() -> AuthService<FileAuthRepository> {
-        AuthService::new(FileAuthRepository::with_default_path())
+    fn auth_service() -> AuthService<SqliteAuthRepository> {
+        AuthService::new(SqliteAuthRepository::with_default_path())
     }
 
     /// Open the /accounts dialog — centered modal with toggle + remove.

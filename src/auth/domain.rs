@@ -30,6 +30,7 @@ impl AuthVendor {
         }
     }
 
+    #[allow(dead_code)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "anthropic" => Some(Self::Anthropic),

@@ -8,14 +8,14 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AuthStoreError {
-    #[error("I/O error reading auth store: {0}")]
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("auth store is malformed: {0}")]
-    Malformed(#[from] serde_json::Error),
+    #[error("serialization error: {0}")]
+    Json(#[from] serde_json::Error),
 
-    #[error("atomic write failed: temp file could not be renamed")]
-    AtomicWriteFailed,
+    #[error("sqlite error: {0}")]
+    Sqlite(String),
 }
 
 // =============================================================================

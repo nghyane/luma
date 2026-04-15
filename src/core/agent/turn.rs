@@ -46,7 +46,7 @@ pub async fn run_chat_turn(
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     use crate::auth::domain::AuthFailure;
-    use crate::auth::repo::FileAuthRepository;
+    use crate::auth::repo::SqliteAuthRepository;
     use crate::auth::service::AuthService;
     use crate::config::auth;
     use crate::provider::binding::GatewayId;
@@ -85,7 +85,7 @@ pub async fn run_chat_turn(
                 .account_key
                 .as_ref()
                 .expect("resolved credential must carry account_key");
-            let _ = AuthService::new(FileAuthRepository::with_default_path())
+            let _ = AuthService::new(SqliteAuthRepository::with_default_path())
                 .mark_rate_limited(key, retry_after);
             let _ = tx
                 .send(Event::ToolOutput {
@@ -117,7 +117,7 @@ pub async fn run_chat_turn(
                     .account_key
                     .as_ref()
                     .expect("resolved credential must carry account_key");
-                let _ = AuthService::new(FileAuthRepository::with_default_path())
+                let _ = AuthService::new(SqliteAuthRepository::with_default_path())
                     .mark_auth_failed(key, AuthFailure::Revoked);
                 let _ = tx
                     .send(Event::ToolOutput {
@@ -162,7 +162,7 @@ pub async fn run_chat_turn(
                     .account_key
                     .as_ref()
                     .expect("resolved credential must carry account_key");
-                auth_cred = AuthService::new(FileAuthRepository::with_default_path())
+                auth_cred = AuthService::new(SqliteAuthRepository::with_default_path())
                     .refresh_credential(key)
                     .await?;
             } else {

@@ -2,7 +2,7 @@ use super::Action;
 /// Event dispatch — routes events to document (model) or view.
 use super::state::{PickerMode, RunState};
 use crate::auth::domain::AccountKey;
-use crate::auth::repo::FileAuthRepository;
+use crate::auth::repo::SqliteAuthRepository;
 use crate::auth::service::AuthService;
 use crate::config::models;
 use crate::event::Event;
@@ -292,14 +292,14 @@ impl super::App {
             match self.ui.dialog.handle_key(&key) {
                 DialogAction::Toggle(id) => {
                     if let Ok(key) = serde_json::from_str::<AccountKey>(&id) {
-                        let _ = AuthService::new(FileAuthRepository::with_default_path())
+                        let _ = AuthService::new(SqliteAuthRepository::with_default_path())
                             .toggle_disabled(&key);
                     }
                     self.open_accounts_dialog();
                 }
                 DialogAction::Remove(id) => {
                     if let Ok(key) = serde_json::from_str::<AccountKey>(&id) {
-                        let _ = AuthService::new(FileAuthRepository::with_default_path())
+                        let _ = AuthService::new(SqliteAuthRepository::with_default_path())
                             .remove_account(&key);
                     }
                     self.refresh_pool_health();

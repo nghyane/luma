@@ -108,9 +108,9 @@ async fn main() {
         }
         Some("accounts") => {
             use auth::domain::AccountHealth;
-            use auth::repo::FileAuthRepository;
+            use auth::repo::SqliteAuthRepository;
             use auth::service::AuthService;
-            let svc = AuthService::new(FileAuthRepository::with_default_path());
+            let svc = AuthService::new(SqliteAuthRepository::with_default_path());
             let accounts = svc.list_accounts().unwrap_or_default();
             if accounts.is_empty() {
                 println!("no accounts · run 'luma login' to add one");
@@ -364,11 +364,13 @@ async fn main() {
         },
         Some("version" | "--version" | "-v") => println!("luma {}", env!("CARGO_PKG_VERSION")),
         Some("export") => {
-            let src = auth::repo::FileAuthRepository::default_path();
-            match std::fs::read(&src) {
-                Ok(bytes) => {
+            use auth::repo::{AuthRepository, SqliteAuthRepository};
+            let repo = SqliteAuthRepository::with_default_path();
+            match repo.load() {
+                Ok(store) => {
+                    let json = serde_json::to_string_pretty(&store).unwrap();
                     use base64::Engine;
-                    println!("{}", base64::engine::general_purpose::STANDARD.encode(&bytes));
+                    println!("{}", base64::engine::general_purpose::STANDARD.encode(json.as_bytes()));
                 }
                 Err(e) => { eprintln!("export failed: {e}"); std::process::exit(1); }
             }
@@ -382,13 +384,12 @@ async fn main() {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(encoded.trim())
                 .unwrap_or_else(|e| { eprintln!("invalid base64: {e}"); std::process::exit(1); });
-            let _: serde_json::Value = serde_json::from_slice(&bytes)
+            let store: auth::repo::AuthStore = serde_json::from_slice(&bytes)
                 .unwrap_or_else(|e| { eprintln!("invalid auth data: {e}"); std::process::exit(1); });
-            let dest = auth::repo::FileAuthRepository::default_path();
-            if let Some(p) = dest.parent() { let _ = std::fs::create_dir_all(p); }
-            std::fs::write(&dest, &bytes)
+            use auth::repo::SqliteAuthRepository;
+            SqliteAuthRepository::with_default_path().merge(&store.accounts)
                 .unwrap_or_else(|e| { eprintln!("import failed: {e}"); std::process::exit(1); });
-            println!("imported ok");
+            println!("imported {} accounts", store.accounts.len());
         }
         Some("help" | "--help" | "-h") => {
             println!(
