@@ -4,8 +4,8 @@ use crate::auth::domain::{AccountKey, AuthVendor};
 use crate::auth::error::OAuthError;
 use crate::auth::oauth::{AccountIdentity, LoginResult, OAuthTokens};
 use crate::auth::oauth::shared::{
-    LOGIN_TIMEOUT_SECS, accept_callback, bind_loopback, decode_jwt_payload, exchange_json_token,
-    gen_challenge, gen_state, gen_verifier, open_browser, url_encode,
+    LOGIN_TIMEOUT_SECS, accept_callback_any, bind_loopback, decode_jwt_payload,
+    exchange_json_token, gen_challenge, gen_state, gen_verifier, open_browser, url_encode,
 };
 
 pub struct KiroProvider;
@@ -14,6 +14,7 @@ const AUTHORIZE_URL: &str = "https://app.kiro.dev/signin";
 const TOKEN_URL: &str = "https://prod.us-east-1.auth.desktop.kiro.dev/oauth/token";
 const CALLBACK_PORT: u16 = 3128;
 const CALLBACK_PATH: &str = "/oauth/callback";
+const CALLBACK_PATHS: &[&str] = &["/signin/callback", "/oauth/callback"];
 
 impl KiroProvider {
     pub async fn login(&self) -> Result<LoginResult, OAuthError> {
@@ -33,7 +34,7 @@ impl KiroProvider {
         let _ = open_browser(&authorize_url);
         let callback = tokio::time::timeout(
             std::time::Duration::from_secs(LOGIN_TIMEOUT_SECS),
-            accept_callback(listener, CALLBACK_PATH),
+            accept_callback_any(listener, CALLBACK_PATHS),
         )
         .await
         .map_err(|_| OAuthError::Timeout)

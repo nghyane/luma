@@ -54,6 +54,7 @@ mục narrative (motivation, rationale) dùng tiếng Việt/Anh tự nhiên.
 | 0007 | Instruction Injection & Evidence Hierarchy | Superseded | Source-of-truth hierarchy and local-first policy implemented directly in `smart.md` and `tools_native.md`. Superseded by prompt patches. |
 | 0008 | Session-Audit Self-Improvement Loop | Draft (scoped down) | Audit pipeline implemented. Intent matching and complex routing removed. Audit is detector/triage only. |
 | 0009 | Auth, Routing, and Provider Runtime Rearchitecture | Draft | Replaces singleton auth mutation and hidden bootstrap with explicit auth/routing services and typed error handling. |
+| 0010 | Device Flow and Interactive Auth Lanes | Draft | Adds shared device-flow architecture for Builder ID and future providers while keeping browser PKCE as a separate lane. |
 
 ## Template
 

@@ -132,9 +132,16 @@ pub async fn accept_callback(
     listener: tokio::net::TcpListener,
     expected_path: &str,
 ) -> Result<CallbackPayload> {
+    accept_callback_any(listener, &[expected_path]).await
+}
+
+pub async fn accept_callback_any(
+    listener: tokio::net::TcpListener,
+    expected_paths: &[&str],
+) -> Result<CallbackPayload> {
     loop {
         let (mut stream, _) = listener.accept().await.context("callback accept failed")?;
-        match read_callback_request(&mut stream, expected_path).await {
+        match read_callback_request(&mut stream, expected_paths).await {
             Ok(Some(payload)) => {
                 let _ = stream.write_all(SUCCESS_RESPONSE.as_bytes()).await;
                 let _ = stream.shutdown().await;
@@ -152,7 +159,7 @@ pub async fn accept_callback(
 
 async fn read_callback_request(
     stream: &mut tokio::net::TcpStream,
-    expected_path: &str,
+    expected_paths: &[&str],
 ) -> Result<Option<CallbackPayload>> {
     let mut buf = vec![0u8; 8192];
     let n = stream.read(&mut buf).await?;
@@ -169,7 +176,7 @@ async fn read_callback_request(
     let Some((path, query)) = target.split_once('?') else {
         return Ok(None);
     };
-    if path != expected_path {
+    if !expected_paths.contains(&path) {
         return Ok(None);
     }
 
