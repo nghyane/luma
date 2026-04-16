@@ -82,6 +82,20 @@ pub fn record_usage(label: &str, usage: UsageSnapshot) {
     .record_usage_by_display_name(label, usage);
 }
 
+/// Sync, non-blocking check: is there at least one Kiro account in the
+/// auth store? Used by search routing to decide whether the Kiro MCP
+/// search backend is available without triggering a network call.
+pub fn has_kiro_credential() -> bool {
+    use crate::auth::repo::AuthRepository;
+    let Ok(store) = crate::auth::repo::SqliteAuthRepository::with_default_path().load() else {
+        return false;
+    };
+    store
+        .accounts
+        .iter()
+        .any(|a| a.key.vendor == crate::auth::domain::AuthVendor::Kiro)
+}
+
 fn home_dir() -> std::path::PathBuf {
     crate::config::home_dir()
 }

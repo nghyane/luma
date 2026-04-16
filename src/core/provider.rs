@@ -298,6 +298,24 @@ fn route_user_attachment<'a>(messages: &'a [Message]) -> std::borrow::Cow<'a, [M
     }
 }
 
+/// Provider's preference for web search routing.
+///
+/// Determines whether `build_registry` exposes server-side search
+/// (provider built-in) or client-side `WebSearchTool` to the model.
+/// At most one search surface is registered — never both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchPreference {
+    /// Provider has high-quality built-in search (e.g. Anthropic
+    /// `web_search_20250305`). Always use server-side; ignore client.
+    PreferServer,
+    /// Provider has server search but client is preferred (e.g. Codex).
+    /// Use client if available; fall back to server otherwise.
+    PreferClient,
+    /// Provider has no server search (e.g. OpenAI Chat, Kiro gateway).
+    /// Use client if available; no search otherwise.
+    ClientOnly,
+}
+
 /// An LLM provider that streams responses as Events. Object-safe.
 pub trait Provider: Send + Sync {
     /// Provider display name (e.g. "claude", "openai").

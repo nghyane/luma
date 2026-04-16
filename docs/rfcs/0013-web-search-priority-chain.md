@@ -4,7 +4,7 @@
 | ---------------- | ------------------------------------------------------------ |
 | RFC              | 0013                                                         |
 | Title            | Web Search Priority Chain — Provider-Aware Search Routing    |
-| Status           | Draft                                                        |
+| Status           | Accepted                                                     |
 | Author(s)        | Nghia / Luma                                                 |
 | Created          | 2026-07-14                                                   |
 | Updated          | 2026-07-14                                                   |
@@ -402,4 +402,12 @@ search.
 
 ## Implementation status
 
-Chưa implement. RFC đang ở trạng thái Draft.
+Implemented in commit following this RFC. Changes:
+
+- `src/core/provider.rs`: added `SearchPreference` enum
+- `src/tool/mod.rs`: added `search_preference_for()`, updated
+  `build_registry()` with mutual-exclusion routing
+- `src/config/auth/mod.rs`: added `has_kiro_credential()` sync check
+- `src/tui/app/agent.rs`: decoupled `search_backend()` from source
+- `src/tui/app/commands.rs`: updated `build_registry` call
+- `src/acp/bridge.rs`: updated `resolve_search()` and `build_registry` call

@@ -15,6 +15,7 @@ pub mod web_fetch;
 pub mod web_search;
 pub mod write;
 
+use crate::core::provider::SearchPreference;
 use crate::core::registry::Registry;
 
 /// Tool flavor — chosen by workflow mode first, then constrained by provider support.
@@ -49,9 +50,28 @@ impl ToolStyle {
     }
 }
 
+/// Resolve search preference from provider source string.
+///
+/// Pure function — no I/O. Called before the provider runtime exists
+/// because `build_registry` runs before `build_provider`.
+pub fn search_preference_for(source: &str) -> SearchPreference {
+    match source {
+        "anthropic" => SearchPreference::PreferServer,
+        "codex" => SearchPreference::PreferClient,
+        _ => SearchPreference::ClientOnly,
+    }
+}
+
 /// Build the tool registry for a given provider tool style. Web and GitHub
 /// tools are shared across styles; only the file/edit surface differs.
-pub fn build_registry(style: ToolStyle, search: Option<web_search::SearchBackend>) -> Registry {
+///
+/// `search_pref` controls whether server-side or client-side search is
+/// exposed. At most one search surface is registered — never both.
+pub fn build_registry(
+    style: ToolStyle,
+    search: Option<web_search::SearchBackend>,
+    search_pref: SearchPreference,
+) -> Registry {
     let mut reg = Registry::new();
     match style {
         ToolStyle::Native => {
@@ -74,10 +94,26 @@ pub fn build_registry(style: ToolStyle, search: Option<web_search::SearchBackend
     reg.register(Box::new(gh_file::GhFileTool));
     reg.register(Box::new(gh_ls::GhLsTool));
     reg.register(Box::new(gh_search::GhSearchTool));
-    reg.add_server_capability("web_search");
-    if let Some(backend) = search {
-        reg.register(Box::new(web_search::WebSearchTool::new(backend)));
+
+    // Search routing: exactly one of server capability or client tool.
+    match search_pref {
+        SearchPreference::PreferServer => {
+            reg.add_server_capability("web_search");
+        }
+        SearchPreference::PreferClient => {
+            if let Some(backend) = search {
+                reg.register(Box::new(web_search::WebSearchTool::new(backend)));
+            } else {
+                reg.add_server_capability("web_search");
+            }
+        }
+        SearchPreference::ClientOnly => {
+            if let Some(backend) = search {
+                reg.register(Box::new(web_search::WebSearchTool::new(backend)));
+            }
+        }
     }
+
     reg.register(Box::new(web_fetch::WebFetchTool));
     reg
 }

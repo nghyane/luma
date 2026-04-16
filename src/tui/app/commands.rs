@@ -261,8 +261,9 @@ impl super::App {
                 "{base_prompt}\n{}{skill_catalog}{instructions_block}",
                 self.config.env_context
             );
+            let search_pref = crate::tool::search_preference_for(&desired.source);
             let registry =
-                crate::tool::build_registry(style, Self::search_backend(&desired.source));
+                crate::tool::build_registry(style, Self::search_backend(), search_pref);
             let _ = tx.try_send(AgentCommand::SetContext {
                 system_prompt,
                 registry,

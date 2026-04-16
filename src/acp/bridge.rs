@@ -231,8 +231,9 @@ fn spawn_agent(event_tx: event_bus::Sender) -> (String, mpsc::Sender<AgentComman
         capabilities,
     };
 
-    let search = resolve_search(&source);
-    let registry = crate::tool::build_registry(style, search);
+    let search = resolve_search();
+    let search_pref = crate::tool::search_preference_for(&source);
+    let registry = crate::tool::build_registry(style, search, search_pref);
 
     let session = crate::core::session::Session::new();
     let sid = session.id.clone();
@@ -240,9 +241,9 @@ fn spawn_agent(event_tx: event_bus::Sender) -> (String, mpsc::Sender<AgentComman
     (sid, tx)
 }
 
-fn resolve_search(source: &str) -> Option<crate::tool::web_search::SearchBackend> {
+fn resolve_search() -> Option<crate::tool::web_search::SearchBackend> {
     use crate::tool::web_search::SearchBackend;
-    if source == "kiro" {
+    if crate::config::auth::has_kiro_credential() {
         return Some(SearchBackend::Kiro);
     }
     if let Ok(key) = std::env::var("EXA_API_KEY") {

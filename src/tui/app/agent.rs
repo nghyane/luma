@@ -170,7 +170,8 @@ impl super::App {
             capabilities: model.capabilities.clone(),
         };
 
-        let registry = crate::tool::build_registry(style, Self::search_backend(&model.source));
+        let search_pref = crate::tool::search_preference_for(&model.source);
+        let registry = crate::tool::build_registry(style, Self::search_backend(), search_pref);
 
         self.agent.tx = Some(crate::core::agent::spawn(config, registry, tx));
         self.agent.last_sent = Some(super::state::SentConfig {
@@ -181,16 +182,12 @@ impl super::App {
         });
     }
 
-    /// Pick a web-search backend for the current gateway.
-    ///
-    /// Kiro has a built-in, credits-free MCP web_search (probed via
-    /// `AmazonCodeWhispererStreamingService.InvokeMCP`) — prefer it over
-    /// any env-configured backend when the active model is served by
-    /// the Kiro gateway. For every other gateway fall back to the
-    /// env-configured backend (Exa / Tavily / SearXNG).
-    pub(super) fn search_backend(source: &str) -> Option<crate::tool::web_search::SearchBackend> {
+    /// Pick a web-search backend based on available credentials/env,
+    /// independent of which provider is active. Priority:
+    /// Kiro MCP (free) → Exa → Tavily → SearXNG → None.
+    pub(super) fn search_backend() -> Option<crate::tool::web_search::SearchBackend> {
         use crate::tool::web_search::SearchBackend;
-        if source == "kiro" {
+        if crate::config::auth::has_kiro_credential() {
             return Some(SearchBackend::Kiro);
         }
         if let Ok(key) = std::env::var("EXA_API_KEY") {
