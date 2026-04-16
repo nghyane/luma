@@ -376,16 +376,38 @@ async fn main() {
             }
         }
         Some("import") => {
-            let Some(encoded) = args.get(2) else {
-                eprintln!("usage: luma import <base64-string>");
-                std::process::exit(1);
-            };
             use base64::Engine;
+            let encoded = if let Some(arg) = args.get(2) {
+                arg.clone()
+            } else {
+                eprintln!("paste base64 auth string (then press Enter):");
+                let mut buf = String::new();
+                std::io::stdin().read_line(&mut buf)
+                    .unwrap_or_else(|e| { eprintln!("read error: {e}"); std::process::exit(1); });
+                buf
+            };
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(encoded.trim())
                 .unwrap_or_else(|e| { eprintln!("invalid base64: {e}"); std::process::exit(1); });
             let store: auth::repo::AuthStore = serde_json::from_slice(&bytes)
                 .unwrap_or_else(|e| { eprintln!("invalid auth data: {e}"); std::process::exit(1); });
+            if store.accounts.is_empty() {
+                eprintln!("no accounts found in payload");
+                std::process::exit(1);
+            }
+            eprintln!("found {} account(s):", store.accounts.len());
+            for acc in &store.accounts {
+                eprintln!("  · {} ({})", acc.display_name, acc.key.vendor.as_str());
+            }
+            eprint!("import? [Y/n] ");
+            use std::io::Write;
+            std::io::stderr().flush().ok();
+            let mut confirm = String::new();
+            std::io::stdin().read_line(&mut confirm).ok();
+            if matches!(confirm.trim(), "n" | "N" | "no") {
+                eprintln!("cancelled");
+                std::process::exit(0);
+            }
             use auth::repo::SqliteAuthRepository;
             SqliteAuthRepository::with_default_path().merge(&store.accounts)
                 .unwrap_or_else(|e| { eprintln!("import failed: {e}"); std::process::exit(1); });
@@ -393,7 +415,7 @@ async fn main() {
         }
         Some("help" | "--help" | "-h") => {
             println!(
-                "luma - lightweight coding agent\n\nusage:\n  luma                     start TUI\n  luma sync                sync models\n  luma auth                show resolved auth per provider\n  luma login [provider]    add an account; omit for picker\n  luma accounts            list accounts in the pool\n  luma export              print auth as base64 (share via chat/slack)\n  luma import <string>     import auth from base64 string\n  luma update              update to latest\n  luma version             show version"
+                "luma - lightweight coding agent\n\nusage:\n  luma                     start TUI\n  luma sync                sync models\n  luma auth                show resolved auth per provider\n  luma login [provider]    add an account; omit for picker\n  luma accounts            list accounts in the pool\n  luma export              print auth as base64 (share via chat/slack)\n  luma import [string]     import auth (interactive paste if no arg)\n  luma update              update to latest\n  luma version             show version"
             );
         }
         Some(unknown) => {
