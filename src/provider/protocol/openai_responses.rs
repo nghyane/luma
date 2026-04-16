@@ -152,7 +152,7 @@ impl Provider for OpenAIResponsesRuntime {
                 max_tokens_override: _,
                 tx,
                 cancel,
-                tool_use_tx: _, // Codex Responses uses consume_responses_stream
+                tool_use_tx,
             } = req;
             let body = self.build_request_body(messages, tools, server_tools, resolve_image);
 
@@ -184,7 +184,7 @@ impl Provider for OpenAIResponsesRuntime {
                 &cancel,
             )
             .await?;
-            consume_responses_stream(sse, tools, &tx, &cancel).await
+            consume_responses_stream(sse, tools, &tx, &cancel, tool_use_tx).await
         })
     }
 }
@@ -195,6 +195,7 @@ async fn consume_responses_stream(
     tools: &[ToolSchema],
     tx: &EventSender,
     cancel: &tokio_util::sync::CancellationToken,
+    tool_use_tx: Option<tokio::sync::mpsc::Sender<ContentBlock>>,
 ) -> Result<StreamResponse> {
     let mut events = decode_responses_sse(sse, tools.to_vec());
     let mut blocks: Vec<ContentBlock> = Vec::new();
@@ -238,7 +239,14 @@ async fn consume_responses_stream(
                 usage = u.clone();
                 let _ = tx.send(Event::Usage(u)).await;
             }
-            StreamEvent::BlockComplete(b) => blocks.push(b),
+            StreamEvent::BlockComplete(b) => {
+                if let Some(ref tu_tx) = tool_use_tx {
+                    if matches!(&b, ContentBlock::ToolUse { .. }) {
+                        let _ = tu_tx.send(b.clone()).await;
+                    }
+                }
+                blocks.push(b);
+            }
             StreamEvent::Done { stop } => {
                 stop_reason = stop;
                 saw_done = true;
@@ -813,7 +821,7 @@ mod tests {
         let stream = stream_from_events(events, true);
         let (tx, mut rx) = event_bus::channel();
         let cancel = tokio_util::sync::CancellationToken::new();
-        let result = consume_responses_stream(stream, &[], &tx, &cancel)
+        let result = consume_responses_stream(stream, &[], &tx, &cancel, None)
             .await
             .unwrap();
 
@@ -880,7 +888,7 @@ mod tests {
         let stream = stream_from_events(events, true);
         let (tx, mut rx) = event_bus::channel();
         let cancel = tokio_util::sync::CancellationToken::new();
-        let result = consume_responses_stream(stream, &[tool], &tx, &cancel)
+        let result = consume_responses_stream(stream, &[tool], &tx, &cancel, None)
             .await
             .unwrap();
 
@@ -916,7 +924,7 @@ mod tests {
         let stream = stream_from_events(events, false);
         let (tx, _rx) = event_bus::channel();
         let cancel = tokio_util::sync::CancellationToken::new();
-        let err = consume_responses_stream(stream, &[], &tx, &cancel)
+        let err = consume_responses_stream(stream, &[], &tx, &cancel, None)
             .await
             .unwrap_err()
             .to_string();

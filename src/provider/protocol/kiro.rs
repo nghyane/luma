@@ -179,7 +179,7 @@ impl KiroRuntime {
             };
             decoder.feed(&chunk);
             while let Some(frame) = decoder.pop_frame() {
-                decoder.handle_frame(&frame, &req.tx).await;
+                decoder.handle_frame(&frame, &req.tx, &req.tool_use_tx).await;
             }
         }
 
@@ -592,7 +592,12 @@ impl<'a> FrameDecoder<'a> {
         }
     }
 
-    async fn handle_frame(&mut self, frame: &Frame, tx: &EventSender) {
+    async fn handle_frame(
+        &mut self,
+        frame: &Frame,
+        tx: &EventSender,
+        tool_use_tx: &Option<tokio::sync::mpsc::Sender<ContentBlock>>,
+    ) {
         let Ok(v) = serde_json::from_slice::<serde_json::Value>(&frame.payload) else {
             return;
         };
@@ -661,6 +666,24 @@ impl<'a> FrameDecoder<'a> {
 
                 if is_stop {
                     self.stop_reason = StopReason::ToolUse;
+                    // Emit completed tool_use block mid-stream for early execution.
+                    if let Some(tu_tx) = tool_use_tx {
+                        if let Some(entry) = self.tool_uses.get(&tool_use_id) {
+                            let input: serde_json::Value = if entry.arguments.is_empty() {
+                                serde_json::json!({})
+                            } else {
+                                serde_json::from_str(&entry.arguments)
+                                    .unwrap_or_else(|_| serde_json::json!({}))
+                            };
+                            let _ = tu_tx
+                                .send(ContentBlock::ToolUse {
+                                    id: tool_use_id,
+                                    name: entry.name.clone(),
+                                    input,
+                                })
+                                .await;
+                        }
+                    }
                 }
             }
             // meteringEvent, and anything else: ignore. Kiro reports
@@ -803,11 +826,11 @@ mod tests {
         let mid = wire.len() / 2;
         decoder.feed(&wire[..mid]);
         while let Some(f) = decoder.pop_frame() {
-            decoder.handle_frame(&f, &tx).await;
+            decoder.handle_frame(&f, &tx, &None).await;
         }
         decoder.feed(&wire[mid..]);
         while let Some(f) = decoder.pop_frame() {
-            decoder.handle_frame(&f, &tx).await;
+            decoder.handle_frame(&f, &tx, &None).await;
         }
 
         drop(tx);
@@ -859,7 +882,7 @@ mod tests {
         let mut decoder = FrameDecoder::new(&[]);
         decoder.feed(&wire);
         while let Some(f) = decoder.pop_frame() {
-            decoder.handle_frame(&f, &tx).await;
+            decoder.handle_frame(&f, &tx, &None).await;
         }
 
         drop(tx);
@@ -900,7 +923,7 @@ mod tests {
         decoder.feed(&bad);
         decoder.feed(&good);
         while let Some(f) = decoder.pop_frame() {
-            decoder.handle_frame(&f, &tx).await;
+            decoder.handle_frame(&f, &tx, &None).await;
         }
 
         let resp = decoder.finish();
@@ -923,7 +946,7 @@ mod tests {
         let mut decoder = FrameDecoder::new(&[]);
         decoder.feed(&wire);
         while let Some(f) = decoder.pop_frame() {
-            decoder.handle_frame(&f, &tx).await;
+            decoder.handle_frame(&f, &tx, &None).await;
         }
 
         drop(tx);
@@ -947,7 +970,7 @@ mod tests {
         let mut decoder = FrameDecoder::new(&[]);
         decoder.feed(&wire);
         while let Some(f) = decoder.pop_frame() {
-            decoder.handle_frame(&f, &tx).await;
+            decoder.handle_frame(&f, &tx, &None).await;
         }
         drop(tx);
         let mut ctx = None;

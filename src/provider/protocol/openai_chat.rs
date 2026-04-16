@@ -94,7 +94,7 @@ impl Provider for OpenAIChatRuntime {
                 max_tokens_override,
                 tx,
                 cancel,
-                tool_use_tx: _, // OpenAI Chat uses consume_chat_stream
+                tool_use_tx,
             } = req;
             let effective_max_tokens = max_tokens_override.unwrap_or(self.max_tokens);
             let body = self.build_request_body(
@@ -119,7 +119,7 @@ impl Provider for OpenAIChatRuntime {
             )
             .await?;
 
-            consume_chat_stream(sse, &tx, &self.model, &cancel).await
+            consume_chat_stream(sse, &tx, &self.model, &cancel, tool_use_tx).await
         })
     }
 }
@@ -131,6 +131,7 @@ async fn consume_chat_stream(
     tx: &crate::event_bus::Sender,
     model: &str,
     cancel: &tokio_util::sync::CancellationToken,
+    tool_use_tx: Option<tokio::sync::mpsc::Sender<ContentBlock>>,
 ) -> Result<StreamResponse> {
     let mut events = decode_chat_sse(sse);
     let mut blocks: Vec<ContentBlock> = Vec::new();
@@ -157,7 +158,14 @@ async fn consume_chat_stream(
                 usage = u.clone();
                 let _ = tx.send(Event::Usage(u)).await;
             }
-            StreamEvent::BlockComplete(b) => blocks.push(b),
+            StreamEvent::BlockComplete(b) => {
+                if let Some(ref tu_tx) = tool_use_tx {
+                    if matches!(&b, ContentBlock::ToolUse { .. }) {
+                        let _ = tu_tx.send(b.clone()).await;
+                    }
+                }
+                blocks.push(b);
+            }
             StreamEvent::Done { stop } => {
                 stop_reason = stop;
                 saw_done = true;
