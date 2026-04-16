@@ -317,11 +317,9 @@ fn install_binary_windows(extracted: &Path, install_path: &Path) -> Result<()> {
     if backup.exists() {
         let _ = fs::remove_file(&backup);
     }
-    if install_path.exists() {
-        if fs::rename(install_path, &backup).is_err() {
-            spawn_windows_replace_helper(extracted, install_path, &backup)?;
-            return Ok(());
-        }
+    if install_path.exists() && fs::rename(install_path, &backup).is_err() {
+        spawn_windows_replace_helper(extracted, install_path, &backup)?;
+        return Ok(());
     }
     fs::copy(extracted, install_path).with_context(|| {
         format!(
