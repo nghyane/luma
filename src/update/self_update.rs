@@ -350,7 +350,7 @@ fn spawn_windows_replace_helper(
         src = ps_quote(extracted),
         dest = ps_quote(install_path),
         backup = ps_quote(backup),
-        backup_name = ps_quote(
+        backup_name = ps_quote_str(
             backup
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -379,7 +379,12 @@ fn spawn_windows_replace_helper(
 
 #[cfg(windows)]
 fn ps_quote(path: &Path) -> String {
-    path.display().to_string().replace('\'', "''")
+    ps_quote_str(&path.display().to_string())
+}
+
+#[cfg(windows)]
+fn ps_quote_str(value: &str) -> String {
+    value.replace('\'', "''")
 }
 
 #[cfg(test)]
