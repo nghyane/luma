@@ -64,7 +64,11 @@ jobs:
       - name: Checksum
         shell: bash
         run: |
-          shasum -a 256 luma-${{ matrix.target }}.* > SHA256SUMS-${{ matrix.target }}
+          if command -v shasum &>/dev/null; then
+            shasum -a 256 luma-${{ matrix.target }}.* > SHA256SUMS-${{ matrix.target }}
+          else
+            sha256sum luma-${{ matrix.target }}.* > SHA256SUMS-${{ matrix.target }}
+          fi
 
       - uses: actions/upload-artifact@v5
         with:
