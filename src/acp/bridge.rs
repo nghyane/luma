@@ -1,0 +1,390 @@
+use super::transport;
+use super::types::*;
+use crate::core;
+use crate::core::types::{ContentBlock, Role};
+use crate::event::{AgentCommand, Event};
+use crate::event_bus;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+/// Run Luma in ACP server mode (stdin/stdout JSON-RPC).
+pub async fn run() -> anyhow::Result<()> {
+    let (req_tx, mut req_rx) = mpsc::channel::<Request>(32);
+    tokio::task::spawn_blocking(move || transport::read_stdin(req_tx));
+
+    let (event_tx, mut event_rx) = event_bus::channel();
+
+    let mut agent_tx: Option<mpsc::Sender<AgentCommand>> = None;
+    let mut session_id = String::new();
+    let mut cancel: Option<CancellationToken> = None;
+    let mut pending_prompt_id: Option<serde_json::Value> = None;
+    // Counter for generating unique tool call IDs within a turn.
+    let mut tool_call_seq: u64 = 0;
+    let mut current_tool_call_id = String::new();
+
+    loop {
+        tokio::select! {
+            req = req_rx.recv() => {
+                let Some(req) = req else { break };
+                let id = req.id.clone().unwrap_or(serde_json::Value::Null);
+
+                match req.method.as_str() {
+                    "initialize" => {
+                        transport::respond(id, serde_json::json!({
+                            "protocolVersion": 1,
+                            "agentInfo": {
+                                "name": "Luma",
+                                "version": env!("CARGO_PKG_VERSION"),
+                            },
+                            "agentCapabilities": {
+                                "loadSession": true,
+                            },
+                        }));
+                    }
+
+                    "session/new" => {
+                        let params: SessionNewParams = serde_json::from_value(req.params)
+                            .unwrap_or(SessionNewParams { cwd: ".".into() });
+
+                        let _ = std::env::set_current_dir(&params.cwd);
+
+                        let (sid, atx) = spawn_agent(event_tx.clone());
+                        session_id = sid.clone();
+                        agent_tx = Some(atx);
+
+                        transport::respond(id, serde_json::json!({ "sessionId": sid }));
+                    }
+
+                    "session/prompt" => {
+                        if let Ok(params) = serde_json::from_value::<SessionPromptParams>(req.params) {
+                            let text = extract_text(&params.prompt);
+                            let ct = CancellationToken::new();
+                            cancel = Some(ct.clone());
+                            pending_prompt_id = Some(id);
+                            tool_call_seq = 0;
+
+                            if let Some(tx) = &agent_tx {
+                                let _ = tx.send(AgentCommand::Chat {
+                                    content: vec![crate::core::types::ContentBlock::Text { text }],
+                                    images: vec![],
+                                    files: vec![],
+                                    cancel: ct,
+                                }).await;
+                            }
+                        } else {
+                            transport::respond_error(id, -32602, "Invalid params".into());
+                        }
+                    }
+
+                    "session/load" => {
+                        if let Ok(params) = serde_json::from_value::<SessionLoadParams>(req.params) {
+                            match load_session(&params.session_id, &session_id, &event_tx, &mut agent_tx) {
+                                Ok(sid) => {
+                                    session_id = sid;
+                                    transport::respond(id, serde_json::Value::Null);
+                                }
+                                Err(msg) => {
+                                    transport::respond_error(id, -32000, msg);
+                                }
+                            }
+                        } else {
+                            transport::respond_error(id, -32602, "Invalid params".into());
+                        }
+                    }
+
+                    "session/cancel" => {
+                        if let Some(ct) = cancel.take() {
+                            ct.cancel();
+                        }
+                        // cancel is a notification (no id), but respond if id present
+                        if !id.is_null() {
+                            transport::respond(id, serde_json::Value::Null);
+                        }
+                    }
+
+                    _ => {
+                        if !id.is_null() {
+                            transport::respond_error(id, -32601, "Method not found".into());
+                        }
+                    }
+                }
+            }
+
+            event = event_rx.recv() => {
+                let Some(event) = event else { break };
+                let sid = &session_id;
+
+                match event {
+                    Event::Token(text) => {
+                        transport::notify("session/update", serde_json::json!({
+                            "sessionId": sid,
+                            "update": {
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": { "type": "text", "text": text }
+                            }
+                        }));
+                    }
+
+                    Event::Thinking(text) => {
+                        transport::notify("session/update", serde_json::json!({
+                            "sessionId": sid,
+                            "update": {
+                                "sessionUpdate": "agent_reasoning_chunk",
+                                "content": { "type": "text", "text": text }
+                            }
+                        }));
+                    }
+
+                    Event::ToolStart { name, summary } => {
+                        tool_call_seq += 1;
+                        current_tool_call_id = format!("tc_{tool_call_seq}");
+                        transport::notify("session/update", serde_json::json!({
+                            "sessionId": sid,
+                            "update": {
+                                "sessionUpdate": "tool_call_start",
+                                "toolCallId": current_tool_call_id,
+                                "title": format!("{name}: {summary}"),
+                            }
+                        }));
+                    }
+
+                    Event::ToolOutput { chunk, .. } if !current_tool_call_id.is_empty() => {
+                        transport::notify("session/update", serde_json::json!({
+                            "sessionId": sid,
+                            "update": {
+                                "sessionUpdate": "tool_call_update",
+                                "toolCallId": current_tool_call_id,
+                                "status": "in_progress",
+                                "content": [{ "type": "text", "text": chunk }]
+                            }
+                        }));
+                    }
+
+                    Event::ToolEnd { summary, .. } if !current_tool_call_id.is_empty() => {
+                        transport::notify("session/update", serde_json::json!({
+                            "sessionId": sid,
+                            "update": {
+                                "sessionUpdate": "tool_call_update",
+                                "toolCallId": current_tool_call_id,
+                                "status": "completed",
+                                "content": [{ "type": "text", "text": summary }]
+                            }
+                        }));
+                        current_tool_call_id.clear();
+                    }
+
+                    Event::AgentDone => {
+                        if let Some(id) = pending_prompt_id.take() {
+                            transport::respond(id, serde_json::json!({
+                                "stopReason": "end_turn"
+                            }));
+                        }
+                    }
+
+                    Event::AgentError(msg) => {
+                        if let Some(id) = pending_prompt_id.take() {
+                            transport::respond_error(id, -32000, msg);
+                        }
+                    }
+
+                    // Ignore TUI-only events
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Spawn the Luma agent loop, returning session ID and command sender.
+fn spawn_agent(event_tx: event_bus::Sender) -> (String, mpsc::Sender<AgentCommand>) {
+    let mode = crate::config::prefs::load_mode();
+    let model = crate::config::models::resolve_default(mode);
+
+    let (model_id, source, capabilities) = match &model {
+        Some(m) => (m.id.clone(), m.source.clone(), m.capabilities.clone()),
+        None => ("sonnet".into(), "anthropic".into(), vec![]),
+    };
+
+    let skills = crate::config::skills::discover();
+    let skill_catalog = crate::config::skills::build_catalog(&skills);
+    let project_instructions = crate::config::instructions::discover();
+    let instructions_block = crate::config::instructions::build_instructions(&project_instructions);
+    let style = crate::tool::ToolStyle::for_mode(mode, &source);
+    let base_prompt = crate::config::prompt::build(mode, style);
+    let env_context = crate::build_env_context();
+    let system_prompt = format!("{base_prompt}\n{env_context}{skill_catalog}{instructions_block}");
+
+    let config = core::agent::AgentConfig {
+        model_id,
+        source: source.clone(),
+        system_prompt,
+        thinking: crate::core::types::ThinkingLevel::Off,
+        capabilities,
+    };
+
+    let search = resolve_search(&source);
+    let registry = crate::tool::build_registry(style, search);
+
+    let session = crate::core::session::Session::new();
+    let sid = session.id.clone();
+    let tx = core::agent::spawn(config, registry, event_tx);
+    (sid, tx)
+}
+
+fn resolve_search(source: &str) -> Option<crate::tool::web_search::SearchBackend> {
+    use crate::tool::web_search::SearchBackend;
+    if source == "kiro" {
+        return Some(SearchBackend::Kiro);
+    }
+    if let Ok(key) = std::env::var("EXA_API_KEY") {
+        return Some(SearchBackend::Exa { api_key: key });
+    }
+    if let Ok(key) = std::env::var("TAVILY_API_KEY") {
+        return Some(SearchBackend::Tavily { api_key: key });
+    }
+    None
+}
+
+fn extract_text(blocks: &[PromptContent]) -> String {
+    blocks
+        .iter()
+        .filter_map(|b| match b {
+            PromptContent::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Load a persisted session, replay its history as ACP notifications,
+/// and feed it into the agent loop so subsequent prompts continue the
+/// conversation.
+fn load_session(
+    load_id: &str,
+    _current_sid: &str,
+    event_tx: &event_bus::Sender,
+    agent_tx: &mut Option<mpsc::Sender<AgentCommand>>,
+) -> Result<String, String> {
+    let session = crate::core::session::Session::load(load_id)
+        .ok_or_else(|| format!("Session '{load_id}' not found"))?;
+
+    let sid = session.id.clone();
+
+    // Replay history to the client before handing off to the agent.
+    replay_history(&sid, &session);
+
+    // If no agent loop yet, spawn one.
+    if agent_tx.is_none() {
+        let (new_sid, atx) = spawn_agent(event_tx.clone());
+        *agent_tx = Some(atx);
+        // Ignore new_sid — we'll load the persisted session into it.
+        let _ = new_sid;
+    }
+
+    // Feed the loaded session into the agent loop.
+    if let Some(tx) = agent_tx {
+        let _ = tx.try_send(AgentCommand::LoadSession {
+            session,
+            is_new: false,
+        });
+    }
+
+    Ok(sid)
+}
+
+/// Stream the persisted conversation history back to the ACP client as
+/// `session/update` notifications, matching the ACP session/load spec.
+fn replay_history(sid: &str, session: &crate::core::session::Session) {
+    let mut _tool_seq: u64 = 0;
+
+    for msg in &session.messages {
+        match msg.role {
+            Role::System => {} // skip system prompt
+            Role::User => {
+                // Emit user messages and tool results.
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::Text { text } if !text.is_empty() => {
+                            transport::notify(
+                                "session/update",
+                                serde_json::json!({
+                                    "sessionId": sid,
+                                    "update": {
+                                        "sessionUpdate": "user_message_chunk",
+                                        "content": { "type": "text", "text": text }
+                                    }
+                                }),
+                            );
+                        }
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } => {
+                            transport::notify(
+                                "session/update",
+                                serde_json::json!({
+                                    "sessionId": sid,
+                                    "update": {
+                                        "sessionUpdate": "tool_call_update",
+                                        "toolCallId": tool_use_id,
+                                        "status": "completed",
+                                        "content": [{ "type": "text", "text": content.as_text() }]
+                                    }
+                                }),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Role::Assistant => {
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::Text { text } if !text.is_empty() => {
+                            transport::notify(
+                                "session/update",
+                                serde_json::json!({
+                                    "sessionId": sid,
+                                    "update": {
+                                        "sessionUpdate": "agent_message_chunk",
+                                        "content": { "type": "text", "text": text }
+                                    }
+                                }),
+                            );
+                        }
+                        ContentBlock::Thinking { thinking, .. } if !thinking.is_empty() => {
+                            transport::notify(
+                                "session/update",
+                                serde_json::json!({
+                                    "sessionId": sid,
+                                    "update": {
+                                        "sessionUpdate": "agent_reasoning_chunk",
+                                        "content": { "type": "text", "text": thinking }
+                                    }
+                                }),
+                            );
+                        }
+                        ContentBlock::ToolUse { id, name, .. } => {
+                            _tool_seq += 1;
+                            transport::notify(
+                                "session/update",
+                                serde_json::json!({
+                                    "sessionId": sid,
+                                    "update": {
+                                        "sessionUpdate": "tool_call_start",
+                                        "toolCallId": id,
+                                        "title": name,
+                                    }
+                                }),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+}

@@ -30,10 +30,10 @@ mod platform {
 
 #[cfg(windows)]
 mod platform {
-    /// Build a shell command using cmd.exe.
+    /// Build a shell command using PowerShell on Windows.
     pub fn command(command: &str) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new("cmd");
-        cmd.arg("/C").arg(command);
+        let mut cmd = tokio::process::Command::new("powershell");
+        cmd.arg("-NoProfile").arg("-Command").arg(command);
         cmd
     }
 }
@@ -67,7 +67,7 @@ mod tests {
     #[tokio::test]
     #[cfg(windows)]
     async fn exit_code() {
-        let output = spawn("exit /b 42", None)
+        let output = spawn("exit 42", None)
             .unwrap()
             .wait_with_output()
             .await

@@ -21,6 +21,7 @@ macro_rules! dbg_log {
     };
 }
 
+mod acp;
 mod auth;
 mod cli_login;
 mod config;
@@ -62,6 +63,16 @@ async fn main() {
     }));
 
     let args: Vec<String> = std::env::args().collect();
+
+    // ACP server mode: `luma --acp`
+    if args.iter().any(|a| a == "--acp") {
+        if let Err(e) = acp::bridge::run().await {
+            eprintln!("ACP error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let cmd = args.get(1).map(std::string::String::as_str);
 
     match cmd {
@@ -534,7 +545,7 @@ async fn self_update() -> anyhow::Result<()> {
     crate::update::self_update::run().await
 }
 
-fn build_env_context() -> String {
+pub fn build_env_context() -> String {
     let cwd = std::env::current_dir().unwrap_or_default();
     let shell = std::env::var("SHELL")
         .or_else(|_| std::env::var("COMSPEC"))
