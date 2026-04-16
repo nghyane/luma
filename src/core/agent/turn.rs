@@ -415,10 +415,12 @@ async fn run_turn(
         // Successful stream resets the error counter.
         stream_error_count = 0;
 
+        let context_usage_emitted = result.context_usage_emitted;
         let StreamResponse {
             message: response,
             usage,
             stop_reason,
+            ..
         } = result;
 
         // Snapshot current context window — replaces previous turn, not cumulative.
@@ -431,18 +433,14 @@ async fn run_turn(
         // Mid-turn save: persist after each assistant message.
         writer.enqueue(session);
 
-        // Client-side context-usage fallback for providers that don't
-        // report tokens per turn (Kiro returns credits, not tokens, and
-        // only emits contextUsageEvent on prompts large enough to be
-        // interesting server-side). Estimate from the current message
-        // history using the common ~4 chars/token heuristic. The handler
-        // in the TUI takes the latest value for a Token-merge window, so
-        // a late client-side estimate is superseded if the server event
-        // later pushes a better one.
-        if usage.input_tokens == 0 && usage.output_tokens == 0 {
-            let est_chars: usize = session.messages.iter().map(|m| m.text().len()).sum();
+        // Context-usage fallback for providers that don't report tokens
+        // or emit ContextUsage themselves. Matches Kiro CLI's algorithm:
+        // chars = messages (text + tool_use input + tool_result) + tool specs
+        // tokens = (chars / 4 + 5) / 10 * 10
+        if usage.input_tokens == 0 && usage.output_tokens == 0 && !context_usage_emitted {
+            let est_chars = crate::provider::estimate_context_chars(&session.messages, ctx.schemas);
             let ctx_window = crate::config::models::context_window(ctx.model_id);
-            let est_tokens = (est_chars / 4) as u64;
+            let est_tokens = ((est_chars / 4 + 5) / 10 * 10) as u64;
             let pct = ((est_tokens as f64 / ctx_window as f64) * 100.0).clamp(0.0, 100.0) as f32;
             ctx.tx.send_or_log(crate::event::Event::ContextUsage(pct)).await;
         }

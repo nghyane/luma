@@ -273,6 +273,7 @@ async fn consume_responses_stream(
         },
         usage,
         stop_reason,
+        context_usage_emitted: false,
     })
 }
 

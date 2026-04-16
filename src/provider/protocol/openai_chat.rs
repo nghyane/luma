@@ -199,6 +199,7 @@ async fn consume_chat_stream(
         },
         usage,
         stop_reason,
+        context_usage_emitted: false,
     })
 }
 

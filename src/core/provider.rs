@@ -132,6 +132,9 @@ pub struct StreamResponse {
     pub message: Message,
     pub usage: Usage,
     pub stop_reason: StopReason,
+    /// Provider already emitted `Event::ContextUsage` during the stream.
+    /// When true, the turn-layer fallback estimator is skipped.
+    pub context_usage_emitted: bool,
 }
 
 /// Normalized event emitted by a `Protocol` decoder.

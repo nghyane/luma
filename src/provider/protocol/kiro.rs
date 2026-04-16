@@ -183,7 +183,21 @@ impl KiroRuntime {
             }
         }
 
-        Ok(decoder.finish())
+        let mut response = decoder.finish();
+
+        // Kiro server emits contextUsageEvent only on large-enough prompts.
+        // When absent, estimate client-side using the same algorithm as
+        // Kiro CLI: chars/4, rounded to nearest 10.
+        if !response.context_usage_emitted {
+            let est_chars = crate::provider::estimate_context_chars(req.messages, req.tools);
+            let ctx_window = crate::config::models::context_window(&self.model_id);
+            let est_tokens = ((est_chars / 4 + 5) / 10 * 10) as u64;
+            let pct = ((est_tokens as f64 / ctx_window as f64) * 100.0).clamp(0.0, 100.0) as f32;
+            req.tx.send_or_log(Event::ContextUsage(pct)).await;
+            response.context_usage_emitted = true;
+        }
+
+        Ok(response)
     }
 }
 
@@ -542,6 +556,8 @@ struct FrameDecoder<'a> {
     tool_uses: BTreeMap<String, PendingTool>,
     tool_order: Vec<String>,
     stop_reason: StopReason,
+    /// Server emitted contextUsageEvent — skip client-side fallback.
+    server_context_usage: bool,
 }
 
 impl<'a> FrameDecoder<'a> {
@@ -553,6 +569,7 @@ impl<'a> FrameDecoder<'a> {
             tool_uses: BTreeMap::new(),
             tool_order: Vec::new(),
             stop_reason: StopReason::EndTurn,
+            server_context_usage: false,
         }
     }
 
@@ -695,6 +712,7 @@ impl<'a> FrameDecoder<'a> {
                     // Server value occasionally drifts slightly above 100
                     // on saturation; clamp for the UI.
                     let clamped = pct.clamp(0.0, 100.0) as f32;
+                    self.server_context_usage = true;
                     crate::dbg_log!("kiro contextUsageEvent pct={clamped}");
                     tx.send_or_log(Event::ContextUsage(clamped)).await;
                 } else {
@@ -733,6 +751,7 @@ impl<'a> FrameDecoder<'a> {
             },
             usage: Usage::default(),
             stop_reason: self.stop_reason,
+            context_usage_emitted: self.server_context_usage,
         }
     }
 }

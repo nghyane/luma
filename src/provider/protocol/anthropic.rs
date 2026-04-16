@@ -296,6 +296,7 @@ impl Provider for AnthropicRuntime {
                 },
                 usage,
                 stop_reason,
+                context_usage_emitted: false,
             })
         })
     }
