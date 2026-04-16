@@ -30,6 +30,7 @@ mod event_bus;
 mod provider;
 mod tool;
 mod tui;
+mod update;
 mod util;
 
 use std::process::Command;
@@ -133,7 +134,7 @@ async fn main() {
             }
         }
         Some("update") => {
-            if let Err(e) = self_update() {
+            if let Err(e) = self_update().await {
                 eprintln!("update failed: {e}");
                 std::process::exit(1);
             }
@@ -370,9 +371,15 @@ async fn main() {
                 Ok(store) => {
                     let json = serde_json::to_string_pretty(&store).unwrap();
                     use base64::Engine;
-                    println!("{}", base64::engine::general_purpose::STANDARD.encode(json.as_bytes()));
+                    println!(
+                        "{}",
+                        base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
+                    );
                 }
-                Err(e) => { eprintln!("export failed: {e}"); std::process::exit(1); }
+                Err(e) => {
+                    eprintln!("export failed: {e}");
+                    std::process::exit(1);
+                }
             }
         }
         Some("import") => {
@@ -382,15 +389,22 @@ async fn main() {
             } else {
                 eprintln!("paste base64 auth string (then press Enter):");
                 let mut buf = String::new();
-                std::io::stdin().read_line(&mut buf)
-                    .unwrap_or_else(|e| { eprintln!("read error: {e}"); std::process::exit(1); });
+                std::io::stdin().read_line(&mut buf).unwrap_or_else(|e| {
+                    eprintln!("read error: {e}");
+                    std::process::exit(1);
+                });
                 buf
             };
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(encoded.trim())
-                .unwrap_or_else(|e| { eprintln!("invalid base64: {e}"); std::process::exit(1); });
-            let store: auth::repo::AuthStore = serde_json::from_slice(&bytes)
-                .unwrap_or_else(|e| { eprintln!("invalid auth data: {e}"); std::process::exit(1); });
+                .unwrap_or_else(|e| {
+                    eprintln!("invalid base64: {e}");
+                    std::process::exit(1);
+                });
+            let store: auth::repo::AuthStore = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                eprintln!("invalid auth data: {e}");
+                std::process::exit(1);
+            });
             if store.accounts.is_empty() {
                 eprintln!("no accounts found in payload");
                 std::process::exit(1);
@@ -409,8 +423,12 @@ async fn main() {
                 std::process::exit(0);
             }
             use auth::repo::SqliteAuthRepository;
-            SqliteAuthRepository::with_default_path().merge(&store.accounts)
-                .unwrap_or_else(|e| { eprintln!("import failed: {e}"); std::process::exit(1); });
+            SqliteAuthRepository::with_default_path()
+                .merge(&store.accounts)
+                .unwrap_or_else(|e| {
+                    eprintln!("import failed: {e}");
+                    std::process::exit(1);
+                });
             println!("imported {} accounts", store.accounts.len());
         }
         Some("help" | "--help" | "-h") => {
@@ -510,40 +528,10 @@ async fn probe_kiro_chat(auth: &config::auth::Credential) -> anyhow::Result<()> 
     anyhow::bail!("HTTP {}: {}", status.as_u16(), detail);
 }
 
-/// Self-update: download and run install script.
-#[cfg(unix)]
-fn self_update() -> anyhow::Result<()> {
-    let current = env!("CARGO_PKG_VERSION");
-    println!("current: v{current}");
-    println!("updating...");
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg("curl -fsSL https://raw.githubusercontent.com/nghyane/luma/master/install.sh | sh")
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("install script failed");
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn self_update() -> anyhow::Result<()> {
-    let current = env!("CARGO_PKG_VERSION");
-    println!("current: v{current}");
-    println!("updating...");
-    let status = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; irm https://raw.githubusercontent.com/nghyane/luma/master/install.ps1 | iex",
-        ])
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("install script failed");
-    }
-    Ok(())
+/// Update luma to the latest GitHub release using native download,
+/// checksum verification, extraction, and atomic install.
+async fn self_update() -> anyhow::Result<()> {
+    crate::update::self_update::run().await
 }
 
 fn build_env_context() -> String {

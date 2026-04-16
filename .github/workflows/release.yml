@@ -67,10 +67,17 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path target/${{ matrix.target }}/release/luma.exe -DestinationPath luma-${{ matrix.target }}.zip
 
+      - name: Checksum
+        shell: bash
+        run: |
+          shasum -a 256 luma-${{ matrix.target }}.* > SHA256SUMS-${{ matrix.target }}
+
       - uses: actions/upload-artifact@v5
         with:
           name: luma-${{ matrix.target }}
-          path: luma-${{ matrix.target }}.*
+          path: |
+            luma-${{ matrix.target }}.*
+            SHA256SUMS-${{ matrix.target }}
 
   release:
     needs: build
@@ -81,6 +88,10 @@ jobs:
         with:
           path: artifacts
 
+      - name: Merge checksums
+        run: |
+          cat artifacts/luma-*/SHA256SUMS-* > SHA256SUMS
+
       - name: Create or update release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -90,4 +101,5 @@ jobs:
             --title "Luma ${{ github.ref_name }}" \
             --generate-notes \
             --prerelease \
-            artifacts/luma-*/luma-*
+            artifacts/luma-*/luma-* \
+            SHA256SUMS
