@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Error-as-message recovery: transient stream errors are injected into the conversation as system messages and the tool loop retries (up to 2 consecutive failures) instead of killing the turn
 - Max-output-tokens recovery loop: when the model hits the output token limit the turn injects a "resume directly" nudge and retries up to 3 times, mirroring Claude Code's `MAX_OUTPUT_TOKENS_RECOVERY_LIMIT`
 - Kiro protocol chunk idle timeout (120 s) — emits retryable `StreamInterrupted` instead of hanging until OS TCP timeout (~7 min on macOS)
+- `context_usage_emitted` field on `StreamResponse` — providers declare whether they already emitted `Event::ContextUsage`, so the turn-layer fallback only fires for providers that report neither tokens nor context usage
+- `provider::estimate_context_chars` shared utility — counts all content blocks (text, tool_use input, tool_result, thinking) plus tool spec JSON, matching Kiro CLI's `TokenCounter` algorithm
 
 ### Changed
 - Tool-result image routing is now selected centrally per provider (`inline`, `user attachment`, or adapter-managed text fallback)
@@ -27,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Expired refresh tokens are now handled gracefully with automatic re-authentication prompts
 - Agent tool loop changed from `for _ in 0..50` to unbounded `loop {}` — exits only when the model stops calling tools, the user cancels, or recovery limits are exhausted
 - Stream retry budget increased from 2 attempts / 2 s delay to 4 attempts / 3 s delay for better resilience against transient network failures
+- Context usage estimation now matches Kiro CLI exactly: token formula `(chars/4 + 5) / 10 * 10` with full content block counting (text, tool_use input, tool_result, thinking, tool specs) instead of text-only `chars/4`
+- Kiro provider now owns context usage reporting — emits server `contextUsageEvent` percentage when available, falls back to client-side Kiro CLI algorithm otherwise; turn-layer fallback no longer overwrites server-authoritative values
 
 ### Removed
 - Provider-specific ad hoc image-routing logic that previously lived inside individual adapters
