@@ -35,8 +35,8 @@ pub fn spawn(
     tokio::spawn(async move {
         let result = std::panic::AssertUnwindSafe(agent_loop(config, registry, cmd_rx, event_tx));
         if futures::FutureExt::catch_unwind(result).await.is_err() {
-            let _ = tx
-                .send(Event::AgentError("agent task panicked".into()))
+            tx
+                .send_or_log(Event::AgentError("agent task panicked".into()))
                 .await;
         }
     });
@@ -50,6 +50,7 @@ async fn agent_loop(
     event_tx: crate::event_bus::Sender,
 ) {
     let mut session = Session::new();
+    let writer = crate::core::session::SessionWriter::spawn();
 
     if !config.system_prompt.is_empty() {
         session
@@ -57,7 +58,12 @@ async fn agent_loop(
             .push(Message::system(config.system_prompt.clone()));
     }
 
-    while let Some(cmd) = cmd_rx.recv().await {
+    loop {
+        // Wait for next command.
+        let Some(cmd) = cmd_rx.recv().await else {
+            break; // channel closed — shutting down
+        };
+
         match cmd {
             AgentCommand::Chat {
                 content,
@@ -65,8 +71,7 @@ async fn agent_loop(
                 files,
                 cancel,
             } => {
-                // Filter out phantom Image blocks (id="" from prompt) — real
-                // images are saved below and appended with proper ids.
+                // Build user message.
                 let mut blocks: Vec<ContentBlock> = content
                     .into_iter()
                     .filter(|b| !matches!(b, ContentBlock::Image { id, .. } if id.is_empty()))
@@ -98,22 +103,47 @@ async fn agent_loop(
                 });
 
                 let turn_start = std::time::Instant::now();
-                let result =
-                    turn::run_chat_turn(&mut session, &config, &registry, &event_tx, cancel).await;
+                let mut deferred_cmds: Vec<AgentCommand> = Vec::new();
 
-                // Fix orphaned tool_use blocks left by aborted/errored turns.
+                // Run turn in a block so the pinned future (which borrows
+                // session/config/registry) drops before post-turn code.
+                let result = {
+                    let turn_fut = turn::run_chat_turn(
+                        &mut session, &config, &registry, &event_tx, cancel.clone(), &writer,
+                    );
+                    tokio::pin!(turn_fut);
+
+                    loop {
+                        tokio::select! {
+                            biased;
+                            r = &mut turn_fut => break r,
+                            Some(mid_cmd) = cmd_rx.recv() => {
+                                match mid_cmd {
+                                    AgentCommand::SetModel { .. }
+                                    | AgentCommand::SetContext { .. }
+                                    | AgentCommand::SetThinking(_) => {
+                                        deferred_cmds.push(mid_cmd);
+                                    }
+                                    AgentCommand::LoadSession { .. }
+                                    | AgentCommand::Chat { .. } => {
+                                        cancel.cancel();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+
                 fix_orphaned_tool_uses(&mut session.messages);
-
                 session
                     .turn_durations
                     .push(turn_start.elapsed().as_secs_f64());
-                // Save after every turn — crash recovery preserves progress.
-                session.save();
+                writer.enqueue(&session);
                 crate::config::prefs::save_last_session(&session.id);
 
                 match result {
                     Ok(_) => {
-                        let _ = event_tx.send(Event::AgentDone).await;
+                        event_tx.send_or_log(Event::AgentDone).await;
                     }
                     Err(e) => {
                         let msg = e.to_string();
@@ -121,18 +151,22 @@ async fn agent_loop(
                             session.messages.push(Message::system(
                                 "[user interrupted the previous turn]".to_owned(),
                             ));
-                            fix_orphaned_tool_uses(&mut session.messages);
                         }
-                        session.save();
-                        let _ = event_tx.send(Event::AgentError(msg)).await;
+                        writer.enqueue(&session);
+                        event_tx.send_or_log(Event::AgentError(msg)).await;
                     }
+                }
+
+                // Apply deferred commands that arrived mid-turn.
+                for dc in deferred_cmds {
+                    apply_config_cmd(dc, &mut config, &mut registry, &mut session);
                 }
             }
             AgentCommand::LoadSession {
                 session: loaded,
                 is_new,
             } => {
-                session.save();
+                writer.enqueue(&session);
                 session = loaded;
                 if !config.system_prompt.is_empty()
                     && !session
@@ -144,45 +178,59 @@ async fn agent_loop(
                         .messages
                         .insert(0, Message::system(config.system_prompt.clone()));
                 }
-                // Repair any orphaned tool_use blocks from a crash or forced exit.
                 fix_orphaned_tool_uses(&mut session.messages);
-                let _ = event_tx
-                    .send(Event::SessionLoaded {
+                event_tx
+                    .send_or_log(Event::SessionLoaded {
                         session: Box::new(session.clone()),
                         is_new,
                     })
                     .await;
             }
-            AgentCommand::SetModel { model_id, source } => {
-                config.model_id = model_id;
-                config.source = source;
-            }
-            AgentCommand::SetContext {
-                system_prompt,
-                registry: new_registry,
-            } => {
-                config.system_prompt = system_prompt.clone();
-                registry = new_registry;
-                // Replace the leading system message in the transcript so
-                // the next turn picks up the new prompt. Keep everything
-                // else untouched — this is the whole point of hot-swap.
-                if let Some(first) = session.messages.first_mut()
-                    && first.role == Role::System
-                {
-                    first.content = vec![ContentBlock::Text {
-                        text: system_prompt,
-                    }];
-                } else if !system_prompt.is_empty() {
-                    session.messages.insert(0, Message::system(system_prompt));
-                }
-            }
-            AgentCommand::SetThinking(level) => {
-                config.thinking = level;
+            AgentCommand::SetModel { .. }
+            | AgentCommand::SetContext { .. }
+            | AgentCommand::SetThinking(_) => {
+                apply_config_cmd(cmd, &mut config, &mut registry, &mut session);
             }
         }
     }
-    // cmd channel closed — app is shutting down. Persist before exit.
+    // Channel closed — app is shutting down. Persist before exit.
     session.save();
+}
+
+/// Apply a config-only command to the agent state. Extracted so the same
+/// logic serves both the idle path and deferred mid-turn commands.
+fn apply_config_cmd(
+    cmd: AgentCommand,
+    config: &mut AgentConfig,
+    registry: &mut Registry,
+    session: &mut Session,
+) {
+    match cmd {
+        AgentCommand::SetModel { model_id, source } => {
+            config.model_id = model_id;
+            config.source = source;
+        }
+        AgentCommand::SetContext {
+            system_prompt,
+            registry: new_registry,
+        } => {
+            config.system_prompt = system_prompt.clone();
+            *registry = new_registry;
+            if let Some(first) = session.messages.first_mut()
+                && first.role == Role::System
+            {
+                first.content = vec![ContentBlock::Text {
+                    text: system_prompt,
+                }];
+            } else if !system_prompt.is_empty() {
+                session.messages.insert(0, Message::system(system_prompt));
+            }
+        }
+        AgentCommand::SetThinking(level) => {
+            config.thinking = level;
+        }
+        _ => {}
+    }
 }
 
 /// Ensure every `tool_use` in assistant messages has a matching `tool_result`.

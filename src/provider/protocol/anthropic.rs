@@ -231,23 +231,23 @@ impl Provider for AnthropicRuntime {
                 };
                 match evt? {
                     StreamEvent::TextDelta(t) => {
-                        let _ = tx.send(Event::Token(t)).await;
+                        tx.send_or_log(Event::Token(t)).await;
                     }
                     StreamEvent::ThinkingDelta(t) => {
-                        let _ = tx.send(Event::Thinking(t)).await;
+                        tx.send_or_log(Event::Thinking(t)).await;
                     }
                     StreamEvent::ToolSelected { name } => {
-                        let _ = tx.send(Event::ToolSelected { name }).await;
+                        tx.send_or_log(Event::ToolSelected { name }).await;
                     }
                     StreamEvent::ToolInput { name, chunk } => {
-                        let _ = tx.send(Event::ToolInput { name, chunk }).await;
+                        tx.send_or_log(Event::ToolInput { name, chunk }).await;
                     }
                     StreamEvent::WebSearchStart { query } => {
-                        let _ = tx.send(Event::WebSearchStart { query }).await;
+                        tx.send_or_log(Event::WebSearchStart { query }).await;
                     }
                     StreamEvent::WebSearchDone { results } => {
-                        let _ = tx
-                            .send(Event::WebSearchDone {
+                        tx
+                            .send_or_log(Event::WebSearchDone {
                                 query: String::new(),
                                 results,
                             })
@@ -255,7 +255,7 @@ impl Provider for AnthropicRuntime {
                     }
                     StreamEvent::UsageUpdate(u) => {
                         usage = u.clone();
-                        let _ = tx.send(Event::Usage(u)).await;
+                        tx.send_or_log(Event::Usage(u)).await;
                     }
                     StreamEvent::BlockComplete(b) => {
                         if let Some(ref tu_tx) = tool_use_tx {

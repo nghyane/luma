@@ -148,6 +148,17 @@ impl Sender {
         }
     }
 
+    /// Send with diagnostic logging. Never panics, never silently drops.
+    /// All agent/provider call sites should use this instead of bare `send`.
+    pub async fn send_or_log(&self, event: Event) {
+        if let Err(SendError(e)) = self.send(event).await {
+            crate::dbg_log!(
+                "event bus closed, dropped {:?}",
+                std::mem::discriminant(&e)
+            );
+        }
+    }
+
     /// Core push logic. Acquires the lock for the minimum window, releases
     /// before any `.await` the caller does.
     fn try_push(&self, event: Event) -> PushOutcome {

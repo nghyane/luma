@@ -149,14 +149,14 @@ async fn consume_chat_stream(
         };
         match evt? {
             StreamEvent::TextDelta(t) => {
-                let _ = tx.send(Event::Token(t)).await;
+                tx.send_or_log(Event::Token(t)).await;
             }
             StreamEvent::ThinkingDelta(t) => {
-                let _ = tx.send(Event::Thinking(t)).await;
+                tx.send_or_log(Event::Thinking(t)).await;
             }
             StreamEvent::UsageUpdate(u) => {
                 usage = u.clone();
-                let _ = tx.send(Event::Usage(u)).await;
+                tx.send_or_log(Event::Usage(u)).await;
             }
             StreamEvent::BlockComplete(b) => {
                 if let Some(ref tu_tx) = tool_use_tx {

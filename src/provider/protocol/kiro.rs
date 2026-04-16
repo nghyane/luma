@@ -605,7 +605,7 @@ impl<'a> FrameDecoder<'a> {
             Some("assistantResponseEvent") => {
                 if let Some(chunk) = v.get("content").and_then(|c| c.as_str()) {
                     self.text.push_str(chunk);
-                    let _ = tx.send(Event::Token(chunk.to_owned())).await;
+                    tx.send_or_log(Event::Token(chunk.to_owned())).await;
                 }
             }
             Some("toolUseEvent") => {
@@ -642,7 +642,7 @@ impl<'a> FrameDecoder<'a> {
                     );
                     self.tool_order.push(tool_use_id.clone());
                     if !name.is_empty() {
-                        let _ = tx.send(Event::ToolSelected { name: name.clone() }).await;
+                        tx.send_or_log(Event::ToolSelected { name: name.clone() }).await;
                     }
                 }
 
@@ -654,8 +654,8 @@ impl<'a> FrameDecoder<'a> {
                     if let Some(ex) = entry.arg_extractor.as_mut() {
                         let extracted = ex.feed(input_chunk);
                         if !extracted.is_empty() {
-                            let _ = tx
-                                .send(Event::ToolInput {
+                            tx
+                                .send_or_log(Event::ToolInput {
                                     name: tool_name,
                                     chunk: extracted,
                                 })
@@ -696,7 +696,7 @@ impl<'a> FrameDecoder<'a> {
                     // on saturation; clamp for the UI.
                     let clamped = pct.clamp(0.0, 100.0) as f32;
                     crate::dbg_log!("kiro contextUsageEvent pct={clamped}");
-                    let _ = tx.send(Event::ContextUsage(clamped)).await;
+                    tx.send_or_log(Event::ContextUsage(clamped)).await;
                 } else {
                     crate::dbg_log!("kiro contextUsageEvent missing pct: {v}");
                 }

@@ -48,6 +48,7 @@ pub async fn run_chat_turn(
     registry: &Registry,
     tx: &EventSender,
     cancel: tokio_util::sync::CancellationToken,
+    writer: &crate::core::session::SessionWriter,
 ) -> Result<()> {
     use crate::auth::domain::AuthFailure;
     use crate::auth::repo::SqliteAuthRepository;
@@ -73,6 +74,7 @@ pub async fn run_chat_turn(
             tx,
             cancel.clone(),
             caps,
+            writer,
         )
         .await;
         let err = match outcome {
@@ -91,8 +93,8 @@ pub async fn run_chat_turn(
                 .expect("resolved credential must carry account_key");
             let _ = AuthService::new(SqliteAuthRepository::with_default_path())
                 .mark_rate_limited(key, retry_after);
-            let _ = tx
-                .send(Event::ToolOutput {
+            tx
+                .send_or_log(Event::ToolOutput {
                     name: String::new(),
                     chunk: format!(
                         "{} account {} rate limited, switching…",
@@ -123,8 +125,8 @@ pub async fn run_chat_turn(
                     .expect("resolved credential must carry account_key");
                 let _ = AuthService::new(SqliteAuthRepository::with_default_path())
                     .mark_auth_failed(key, AuthFailure::Revoked);
-                let _ = tx
-                    .send(Event::ToolOutput {
+                tx
+                    .send_or_log(Event::ToolOutput {
                         name: String::new(),
                         chunk: format!(
                             "{} account {} rejected access (403), switching…",
@@ -152,8 +154,8 @@ pub async fn run_chat_turn(
                     unauth.detail
                 );
             }
-            let _ = tx
-                .send(Event::ToolOutput {
+            tx
+                .send_or_log(Event::ToolOutput {
                     name: String::new(),
                     chunk: "token rejected, refreshing…".into(),
                 })
@@ -241,9 +243,9 @@ async fn stream_with_retry(
             if let Some(ref e) = last_err {
                 crate::dbg_log!("stream retry attempt {attempt}: {e}");
             }
-            let _ = ctx
+            ctx
                 .tx
-                .send(Event::ProviderRetry {
+                .send_or_log(Event::ProviderRetry {
                     provider: ctx.provider.name().to_owned(),
                     delay_secs: STREAM_RETRY_DELAY_SECS,
                     attempt,
@@ -295,6 +297,7 @@ async fn run_turn(
     tx: &EventSender,
     cancel: tokio_util::sync::CancellationToken,
     caps: crate::core::tool::ModelCaps,
+    writer: &crate::core::session::SessionWriter,
 ) -> Result<()> {
     let schemas = registry.schemas();
     let server_schemas = provider.server_tool_schemas(registry.server_capabilities());
@@ -360,8 +363,8 @@ async fn run_turn(
                         return Err(e);
                     }
                     let msg = e.to_string();
-                    let _ = tx
-                        .send(Event::ToolOutput {
+                    tx
+                        .send_or_log(Event::ToolOutput {
                             name: String::new(),
                             chunk: format!("stream error (recovery {stream_error_count}/{MAX_STREAM_ERROR_RECOVERY}): {msg}"),
                         })
@@ -369,7 +372,7 @@ async fn run_turn(
                     session.messages.push(Message::system(format!(
                         "[API error — retrying: {msg}]"
                     )));
-                    session.save();
+                    writer.enqueue(session);
                     continue;
                 }
             }
@@ -381,8 +384,8 @@ async fn run_turn(
         // same cap would waste a request; surface the failure directly.
         if result.stop_reason == StopReason::MaxTokens && provider.supports_max_tokens_override() {
             crate::dbg_log!("max_tokens hit — escalating to {ESCALATED_MAX_TOKENS} and retrying");
-            let _ = tx
-                .send(Event::ProviderRetry {
+            tx
+                .send_or_log(Event::ProviderRetry {
                     provider: provider.name().to_owned(),
                     delay_secs: 0,
                     attempt: 1,
@@ -403,7 +406,7 @@ async fn run_turn(
                     session.messages.push(Message::system(format!(
                         "[API error on escalation — retrying: {msg}]"
                     )));
-                    session.save();
+                    writer.enqueue(session);
                     continue;
                 }
             }
@@ -426,7 +429,7 @@ async fn run_turn(
 
         session.messages.push(response.clone());
         // Mid-turn save: persist after each assistant message.
-        session.save();
+        writer.enqueue(session);
 
         // Client-side context-usage fallback for providers that don't
         // report tokens per turn (Kiro returns credits, not tokens, and
@@ -441,7 +444,7 @@ async fn run_turn(
             let ctx_window = crate::config::models::context_window(ctx.model_id);
             let est_tokens = (est_chars / 4) as u64;
             let pct = ((est_tokens as f64 / ctx_window as f64) * 100.0).clamp(0.0, 100.0) as f32;
-            let _ = ctx.tx.send(crate::event::Event::ContextUsage(pct)).await;
+            ctx.tx.send_or_log(crate::event::Event::ContextUsage(pct)).await;
         }
 
         if cancel.is_cancelled() {
@@ -459,8 +462,8 @@ async fn run_turn(
                     output_recovery_count
                 );
             }
-            let _ = tx
-                .send(Event::ToolOutput {
+            tx
+                .send_or_log(Event::ToolOutput {
                     name: String::new(),
                     chunk: format!(
                         "output limit hit, resuming… (recovery {}/{})",
@@ -478,7 +481,7 @@ async fn run_turn(
                 }],
                 origin: None,
             });
-            session.save();
+            writer.enqueue(session);
             continue;
         }
 
@@ -501,11 +504,8 @@ async fn run_turn(
             return Ok(());
         }
 
-        let tool_results = crate::core::session::scope_current_session(
-            &session.id,
-            execute_tools(&tool_uses, registry, tx, cancel.clone(), caps),
-        )
-        .await;
+        let tool_results =
+            execute_tools(&tool_uses, registry, tx, cancel.clone(), caps, &session.id).await;
         let aborted = cancel.is_cancelled();
 
         let turn_index = session.messages.len().saturating_sub(1);
@@ -538,7 +538,7 @@ async fn run_turn(
             origin: None,
         });
         // Mid-turn save: persist after tool results.
-        session.save();
+        writer.enqueue(session);
 
         if aborted {
             anyhow::bail!("Aborted");
@@ -703,12 +703,12 @@ async fn execute_one(
     let result: ToolResultBody = match registry.get(&tu.name) {
         Some(tool) => {
             if let Some(name) = &skill {
-                let _ = tx.send(Event::SkillStart(name.clone())).await;
+                tx.send_or_log(Event::SkillStart(name.clone())).await;
             }
 
             let summary = format_tool_summary(&tu.name, &tu.input);
-            let _ = tx
-                .send(Event::ToolStart {
+            tx
+                .send_or_log(Event::ToolStart {
                     name: tu.name.clone(),
                     summary,
                 })
@@ -736,36 +736,36 @@ async fn execute_one(
             match res {
                 Ok(exec) => {
                     if let Some(artifact) = exec.artifact {
-                        let _ = tx
-                            .send(Event::ToolArtifact {
+                        tx
+                            .send_or_log(Event::ToolArtifact {
                                 name: tu.name.clone(),
                                 artifact: Box::new(artifact),
                             })
                             .await;
                     }
                     let end_summary = format_tool_result(&tu.name, &exec.result.as_text());
-                    let _ = tx
-                        .send(Event::ToolEnd {
+                    tx
+                        .send_or_log(Event::ToolEnd {
                             name: tu.name.clone(),
                             summary: end_summary,
                         })
                         .await;
                     if let Some(name) = &skill {
-                        let _ = tx.send(Event::SkillEnd(format!("loaded {name}"))).await;
+                        tx.send_or_log(Event::SkillEnd(format!("loaded {name}"))).await;
                     }
                     exec.result
                 }
                 Err(e) => {
                     let msg = format!("Error: {e}");
-                    let _ = tx
-                        .send(Event::ToolEnd {
+                    tx
+                        .send_or_log(Event::ToolEnd {
                             name: tu.name.clone(),
                             summary: msg.clone(),
                         })
                         .await;
                     if let Some(name) = &skill {
-                        let _ = tx
-                            .send(Event::SkillEnd(format!("failed to load {name}")))
+                        tx
+                            .send_or_log(Event::SkillEnd(format!("failed to load {name}")))
                             .await;
                     }
                     msg.into()
@@ -778,21 +778,26 @@ async fn execute_one(
 }
 
 /// Execute tool calls — concurrent when multiple, preserving order.
+/// Session scope is established internally so callers don't need to wrap.
 pub async fn execute_tools(
     tool_uses: &[ToolUseRef],
     registry: &Registry,
     tx: &EventSender,
     cancel: tokio_util::sync::CancellationToken,
     caps: crate::core::tool::ModelCaps,
+    session_id: &str,
 ) -> Vec<(String, ToolResultBody)> {
-    if tool_uses.len() == 1 {
-        return vec![execute_one(&tool_uses[0], registry, tx, cancel, caps).await];
-    }
-    let futures: Vec<_> = tool_uses
-        .iter()
-        .map(|tu| execute_one(tu, registry, tx, cancel.clone(), caps))
-        .collect();
-    futures::future::join_all(futures).await
+    crate::core::session::scope_current_session(session_id, async {
+        if tool_uses.len() == 1 {
+            return vec![execute_one(&tool_uses[0], registry, tx, cancel, caps).await];
+        }
+        let futures: Vec<_> = tool_uses
+            .iter()
+            .map(|tu| execute_one(tu, registry, tx, cancel.clone(), caps))
+            .collect();
+        futures::future::join_all(futures).await
+    })
+    .await
 }
 
 use super::summary::{format_tool_result, format_tool_summary};
@@ -867,7 +872,7 @@ mod tests {
         ];
 
         let start = std::time::Instant::now();
-        let results = execute_tools(&calls, &registry, &tx, cancel, Default::default()).await;
+        let results = execute_tools(&calls, &registry, &tx, cancel, Default::default(), "test").await;
         let elapsed = start.elapsed();
 
         assert_eq!(results.len(), 2);

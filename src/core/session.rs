@@ -83,7 +83,15 @@ impl Session {
     }
 
     /// Save to disk. Skips empty sessions (no user messages).
+    /// Prefer [`SessionWriter::enqueue`] from async contexts to avoid
+    /// blocking the tokio runtime.
     pub fn save(&mut self) {
+        self.write_to_disk();
+    }
+
+    /// Synchronous disk write — called by [`SessionWriter`] on a blocking
+    /// thread or directly in shutdown paths.
+    pub fn write_to_disk(&mut self) {
         let has_user_msg = self
             .messages
             .iter()
@@ -100,12 +108,44 @@ impl Session {
             let _ = fs::write(path, json);
         }
     }
-
     /// Load a session by ID.
     pub fn load(id: &str) -> Option<Self> {
         let path = sessions_dir().join(format!("{id}.json"));
         let content = fs::read_to_string(path).ok()?;
         serde_json::from_str(&content).ok()
+    }
+}
+
+/// Write-behind session persistence. Coalesces rapid saves into a single
+/// disk write on a blocking thread so the async agent loop never stalls.
+pub struct SessionWriter {
+    tx: tokio::sync::mpsc::Sender<Session>,
+}
+
+impl SessionWriter {
+    /// Spawn the background writer task. Returns a handle for enqueuing saves.
+    pub fn spawn() -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Session>(4);
+        tokio::spawn(async move {
+            while let Some(session) = rx.recv().await {
+                // Drain queued saves — only persist the latest.
+                let mut latest = session;
+                while let Ok(newer) = rx.try_recv() {
+                    latest = newer;
+                }
+                let _ = tokio::task::spawn_blocking(move || {
+                    latest.write_to_disk();
+                })
+                .await;
+            }
+        });
+        Self { tx }
+    }
+
+    /// Enqueue a session save. Non-blocking: if the channel is full a
+    /// newer save is already queued and this one is safely skipped.
+    pub fn enqueue(&self, session: &Session) {
+        let _ = self.tx.try_send(session.clone());
     }
 }
 
