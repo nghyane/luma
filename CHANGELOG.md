@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Image preprocessing for `Read` via the `image` crate, including decode, resize, and compression before attachment
 - AWS IAM Identity Center and Builder ID login support (SSO OIDC device flow)
 - SQLite-backed auth repository (`auth.db`) with `BEGIN IMMEDIATE` for cross-process safety
+- Streaming tool execution: `StreamRequest` gains `tool_use_tx` channel; Anthropic provider dispatches `ToolUse` blocks mid-stream so the turn loop can collect them before the response is fully assembled
+- Error-as-message recovery: transient stream errors are injected into the conversation as system messages and the tool loop retries (up to 2 consecutive failures) instead of killing the turn
+- Max-output-tokens recovery loop: when the model hits the output token limit the turn injects a "resume directly" nudge and retries up to 3 times, mirroring Claude Code's `MAX_OUTPUT_TOKENS_RECOVERY_LIMIT`
+- Kiro protocol chunk idle timeout (120 s) — emits retryable `StreamInterrupted` instead of hanging until OS TCP timeout (~7 min on macOS)
 
 ### Changed
 - Tool-result image routing is now selected centrally per provider (`inline`, `user attachment`, or adapter-managed text fallback)
@@ -21,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Auth storage migrated from JSON file to SQLite — matches Kiro CLI architecture for multi-process safety
 - Import command now merges accounts (upsert) instead of replacing all existing accounts
 - Expired refresh tokens are now handled gracefully with automatic re-authentication prompts
+- Agent tool loop changed from `for _ in 0..50` to unbounded `loop {}` — exits only when the model stops calling tools, the user cancels, or recovery limits are exhausted
+- Stream retry budget increased from 2 attempts / 2 s delay to 4 attempts / 3 s delay for better resilience against transient network failures
 
 ### Removed
 - Provider-specific ad hoc image-routing logic that previously lived inside individual adapters
