@@ -252,7 +252,9 @@ fn route_user_attachment<'a>(messages: &'a [Message]) -> std::borrow::Cow<'a, [M
                 evidence_id,
             } = block
                 && let ToolResultBody::Items(items) = body
-                && items.iter().any(|item| matches!(item, ToolResultItem::Image { .. }))
+                && items
+                    .iter()
+                    .any(|item| matches!(item, ToolResultItem::Image { .. }))
             {
                 msg_changed = true;
                 let text = body.as_text();
@@ -388,7 +390,9 @@ mod tests {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "call_1".into(),
                 content: ToolResultBody::Items(vec![
-                    ToolResultItem::Text { text: "meta".into() },
+                    ToolResultItem::Text {
+                        text: "meta".into(),
+                    },
                     ToolResultItem::Image {
                         media_type: "image/png".into(),
                         id: "img_1".into(),
@@ -412,7 +416,9 @@ mod tests {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "call_1".into(),
                 content: ToolResultBody::Items(vec![
-                    ToolResultItem::Text { text: "meta".into() },
+                    ToolResultItem::Text {
+                        text: "meta".into(),
+                    },
                     ToolResultItem::Image {
                         media_type: "image/png".into(),
                         id: "img_1".into(),

@@ -21,21 +21,31 @@ pub async fn run(arg: Option<&str>) -> Result<()> {
             eprintln!("logging in to {}…", vendor.as_str());
             let view = svc.login(vendor.into()).await?;
             let who = view.email.as_deref().unwrap_or(view.display_name.as_str());
-            println!("signed in as {who} ({}) · provider: {}", view.display_name, view.vendor.as_str());
+            println!(
+                "signed in as {who} ({}) · provider: {}",
+                view.display_name,
+                view.vendor.as_str()
+            );
         }
         Choice::ApiKey(vendor) => {
             eprint!("paste {} API key: ", vendor.as_str());
             io::stderr().flush().ok();
             let mut key = String::new();
-            io::stdin().read_line(&mut key).context("could not read API key")?;
+            io::stdin()
+                .read_line(&mut key)
+                .context("could not read API key")?;
             let key = key.trim();
-            if key.is_empty() { anyhow::bail!("no key provided"); }
+            if key.is_empty() {
+                anyhow::bail!("no key provided");
+            }
             let view = svc.save_api_key(vendor.into(), key)?;
             println!("saved · {}", view.display_name);
         }
         Choice::KiroBuilderId => {
             eprintln!("logging in via Builder ID…");
-            let view = svc.login_device("https://view.awsapps.com/start", "us-east-1").await?;
+            let view = svc
+                .login_device("https://view.awsapps.com/start", "us-east-1")
+                .await?;
             let who = view.email.as_deref().unwrap_or(view.display_name.as_str());
             println!("signed in as {who} · provider: kiro (builder-id)");
         }
@@ -100,7 +110,8 @@ const CHOICES: &[Choice] = &[
 
 fn pick_choice() -> Result<Choice> {
     let mut term = PlatformTerminal::new().context("could not open terminal for login menu")?;
-    term.enter_raw_mode().context("could not enter raw mode for login menu")?;
+    term.enter_raw_mode()
+        .context("could not enter raw mode for login menu")?;
     let reader = term.event_reader();
     let result = run_picker(&reader);
     let _ = term.enter_cooked_mode();
@@ -117,16 +128,24 @@ fn run_picker(reader: &termina::EventReader) -> Result<Choice> {
     render_menu(selected, false)?;
     loop {
         let raw = reader.read(|_| true).context("terminal read failed")?;
-        let termina::Event::Key(k) = raw else { continue };
-        if k.kind != KeyEventKind::Press { continue; }
+        let termina::Event::Key(k) = raw else {
+            continue;
+        };
+        if k.kind != KeyEventKind::Press {
+            continue;
+        }
         match k.code {
             KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => {
-                if selected + 1 < CHOICES.len() { selected += 1; }
+                if selected + 1 < CHOICES.len() {
+                    selected += 1;
+                }
             }
             KeyCode::Enter => return Ok(CHOICES[selected]),
             KeyCode::Escape | KeyCode::Char('q') => anyhow::bail!("cancelled"),
-            KeyCode::Char('c') if k.modifiers.contains(Modifiers::CONTROL) => anyhow::bail!("cancelled"),
+            KeyCode::Char('c') if k.modifiers.contains(Modifiers::CONTROL) => {
+                anyhow::bail!("cancelled")
+            }
             _ => continue,
         }
         render_menu(selected, true)?;
@@ -136,7 +155,11 @@ fn run_picker(reader: &termina::EventReader) -> Result<Choice> {
 fn render_menu(selected: usize, redraw: bool) -> Result<()> {
     let lines = 3 + CHOICES.len() + 2;
     let mut out = io::stderr();
-    if redraw { write!(out, "\x1b[{lines}A\r\x1b[J")?; } else { write!(out, "\r")?; }
+    if redraw {
+        write!(out, "\x1b[{lines}A\r\x1b[J")?;
+    } else {
+        write!(out, "\r")?;
+    }
     write!(out, "luma login — select provider\r\n\r\n")?;
     for (i, choice) in CHOICES.iter().enumerate() {
         let arrow = if i == selected { ">" } else { " " };
@@ -153,11 +176,21 @@ fn prompt_idc_params() -> Result<(String, String)> {
     let mut url = String::new();
     io::stdin().read_line(&mut url)?;
     let url = url.trim().to_owned();
-    if url.is_empty() { anyhow::bail!("no start URL provided"); }
+    if url.is_empty() {
+        anyhow::bail!("no start URL provided");
+    }
     eprint!("Region [us-east-1]: ");
     io::stderr().flush().ok();
     let mut region = String::new();
     io::stdin().read_line(&mut region)?;
     let region = region.trim();
-    Ok((url, if region.is_empty() { "us-east-1" } else { region }.to_owned()))
+    Ok((
+        url,
+        if region.is_empty() {
+            "us-east-1"
+        } else {
+            region
+        }
+        .to_owned(),
+    ))
 }

@@ -19,7 +19,9 @@ pub fn estimate_context_chars(
 
     fn json_char_count(v: &serde_json::Value) -> usize {
         match v {
-            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => 1,
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+                1
+            }
             serde_json::Value::String(s) => s.len(),
             serde_json::Value::Array(a) => a.iter().map(json_char_count).sum(),
             serde_json::Value::Object(m) => m.values().map(json_char_count).sum(),

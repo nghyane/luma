@@ -106,11 +106,13 @@ impl<R: AuthRepository> AuthService<R> {
         let outcome = KiroProvider.login().await.map_err(AuthError::OAuth)?;
         match outcome {
             PortalOutcome::Social(login) => self.save_login_result(login, AuthFlow::Social),
-            PortalOutcome::Idc { issuer_url, idc_region } => {
-                self.login_device(&issuer_url, &idc_region).await
-            }
+            PortalOutcome::Idc {
+                issuer_url,
+                idc_region,
+            } => self.login_device(&issuer_url, &idc_region).await,
             PortalOutcome::BuilderId => {
-                self.login_device("https://view.awsapps.com/start", "us-east-1").await
+                self.login_device("https://view.awsapps.com/start", "us-east-1")
+                    .await
             }
         }
     }
@@ -121,18 +123,18 @@ impl<R: AuthRepository> AuthService<R> {
         start_url: &str,
         region: &str,
     ) -> Result<AccountView, AuthError> {
-        let (login, client) =
-            crate::auth::oauth::sso_oidc::login(start_url, region, None)
-                .await
-                .map_err(AuthError::OAuth)?;
-        let flow = if start_url.contains("view.awsapps.com") || start_url.contains("amzn.awsapps.com") {
-            AuthFlow::BuilderId
-        } else {
-            AuthFlow::Idc {
-                region: region.to_owned(),
-                start_url: start_url.to_owned(),
-            }
-        };
+        let (login, client) = crate::auth::oauth::sso_oidc::login(start_url, region, None)
+            .await
+            .map_err(AuthError::OAuth)?;
+        let flow =
+            if start_url.contains("view.awsapps.com") || start_url.contains("amzn.awsapps.com") {
+                AuthFlow::BuilderId
+            } else {
+                AuthFlow::Idc {
+                    region: region.to_owned(),
+                    start_url: start_url.to_owned(),
+                }
+            };
         let record = AccountRecord {
             key: login.identity.key.clone(),
             display_name: login.identity.display_name,
@@ -153,7 +155,10 @@ impl<R: AuthRepository> AuthService<R> {
         };
         self.mutate(|store| upsert_account(store, record.clone()))?;
         let store = self.repo.load()?;
-        store.accounts.iter().find(|a| a.key == record.key)
+        store
+            .accounts
+            .iter()
+            .find(|a| a.key == record.key)
             .map(AccountView::from_record)
             .ok_or(AuthError::ReadBackFailed)
     }
@@ -182,7 +187,10 @@ impl<R: AuthRepository> AuthService<R> {
         };
         self.mutate(|store| upsert_account(store, record.clone()))?;
         let store = self.repo.load()?;
-        store.accounts.iter().find(|a| a.key == record.key)
+        store
+            .accounts
+            .iter()
+            .find(|a| a.key == record.key)
             .map(AccountView::from_record)
             .ok_or(AuthError::ReadBackFailed)
     }
@@ -274,10 +282,16 @@ impl<R: AuthRepository> AuthService<R> {
             })?;
 
         // Route refresh by auth flow. Infer from scopes for pre-refactor accounts.
-        let effective_flow = record.metadata.auth_flow.clone().or_else(|| {
-            match &record.auth {
+        let effective_flow = record
+            .metadata
+            .auth_flow
+            .clone()
+            .or_else(|| match &record.auth {
                 AuthState::OAuth(cred)
-                    if cred.scopes.iter().any(|s| s.starts_with("codewhisperer:") || s == "sso:account:access") =>
+                    if cred
+                        .scopes
+                        .iter()
+                        .any(|s| s.starts_with("codewhisperer:") || s == "sso:account:access") =>
                 {
                     Some(AuthFlow::Idc {
                         region: "us-east-1".to_owned(),
@@ -285,8 +299,7 @@ impl<R: AuthRepository> AuthService<R> {
                     })
                 }
                 _ => None,
-            }
-        });
+            });
         let (tokens, updated_client) = match &effective_flow {
             Some(AuthFlow::Idc { region, start_url }) => {
                 let (tok, client) = crate::auth::oauth::sso_oidc::refresh(
@@ -388,10 +401,7 @@ impl<R: AuthRepository> AuthService<R> {
                         || e.to_string().contains("expired")
                         || e.to_string().contains("Bad credentials") =>
                 {
-                    let _ = self.mark_auth_failed(
-                        &record.key,
-                        AuthFailure::RefreshRejected,
-                    );
+                    let _ = self.mark_auth_failed(&record.key, AuthFailure::RefreshRejected);
                     return Err(AuthError::NoEligibleAccount {
                         vendor: format!(
                             "{} (token expired, run `luma login` to re-authenticate)",

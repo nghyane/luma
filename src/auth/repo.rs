@@ -199,7 +199,9 @@ mod tests {
                 key: key.clone(),
                 display_name: "me".into(),
                 email: None,
-                auth: AuthState::ApiKey(ApiKeyCredential { token: token.into() }),
+                auth: AuthState::ApiKey(ApiKeyCredential {
+                    token: token.into(),
+                }),
                 health: AccountHealth::Active,
                 metadata: AccountMetadata::default(),
             }],
@@ -208,7 +210,9 @@ mod tests {
         repo.save(&mk("new")).unwrap();
         let loaded = repo.load().unwrap();
         assert_eq!(loaded.accounts.len(), 1);
-        let AuthState::ApiKey(cred) = &loaded.accounts[0].auth else { panic!() };
+        let AuthState::ApiKey(cred) = &loaded.accounts[0].auth else {
+            panic!()
+        };
         assert_eq!(cred.token, "new");
     }
 }

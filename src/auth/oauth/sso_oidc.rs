@@ -87,7 +87,14 @@ pub async fn login(
         "grantType": "urn:ietf:params:oauth:grant-type:device_code",
         "deviceCode": device_code,
     });
-    let token_json = poll_token(&http, &format!("{oidc_base}/token"), &token_body, interval, deadline).await?;
+    let token_json = poll_token(
+        &http,
+        &format!("{oidc_base}/token"),
+        &token_body,
+        interval,
+        deadline,
+    )
+    .await?;
 
     let access_token = json_str(&token_json, "accessToken", "token")?;
     let expires_in = token_json["expiresIn"].as_u64().unwrap_or(3600);
@@ -175,10 +182,16 @@ async fn poll_token(
         if now_unix() >= deadline {
             return Err(OAuthError::Timeout);
         }
-        let resp = http.post(url).json(body).send().await
+        let resp = http
+            .post(url)
+            .json(body)
+            .send()
+            .await
             .map_err(|e| OAuthError::ExchangeFailed(format!("token poll: {e}")))?;
         if resp.status().is_success() {
-            return resp.json().await
+            return resp
+                .json()
+                .await
                 .map_err(|e| OAuthError::ExchangeFailed(format!("token parse: {e}")));
         }
         let err_body: serde_json::Value = resp.json().await.unwrap_or_default();
@@ -198,14 +211,21 @@ async fn fetch_first_profile(http: &reqwest::Client, access_token: &str) -> Opti
         .post("https://codewhisperer.us-east-1.amazonaws.com/")
         .header("Authorization", format!("Bearer {access_token}"))
         .header("Content-Type", "application/x-amz-json-1.0")
-        .header("X-Amz-Target", "AmazonCodeWhispererService.ListAvailableProfiles")
+        .header(
+            "X-Amz-Target",
+            "AmazonCodeWhispererService.ListAvailableProfiles",
+        )
         .body("{}")
         .send()
         .await
         .ok()?;
     let json: serde_json::Value = resp.json().await.ok()?;
-    json.get("profiles")?.as_array()?.first()?.get("arn")
-        .and_then(|v| v.as_str()).map(str::to_owned)
+    json.get("profiles")?
+        .as_array()?
+        .first()?
+        .get("arn")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
 }
 
 async fn resolve_identity(tokens: &OAuthTokens) -> Result<AccountIdentity, OAuthError> {
@@ -225,9 +245,16 @@ async fn resolve_identity(tokens: &OAuthTokens) -> Result<AccountIdentity, OAuth
     };
     let display_name = email
         .as_deref()
-        .and_then(|e| e.split_once('@').map(|(l, d)| format!("{}@{}", l, d.split('.').next().unwrap_or(d))))
+        .and_then(|e| {
+            e.split_once('@')
+                .map(|(l, d)| format!("{}@{}", l, d.split('.').next().unwrap_or(d)))
+        })
         .unwrap_or_else(|| "kiro:idc".to_owned());
-    Ok(AccountIdentity { key, display_name, email })
+    Ok(AccountIdentity {
+        key,
+        display_name,
+        email,
+    })
 }
 
 async fn fetch_email(access_token: &str, profile_arn: &str) -> Option<String> {
@@ -255,20 +282,27 @@ async fn post_json(
     body: &serde_json::Value,
     step: &str,
 ) -> Result<serde_json::Value, OAuthError> {
-    let resp = http.post(url).json(body).send().await
+    let resp = http
+        .post(url)
+        .json(body)
+        .send()
+        .await
         .map_err(|e| OAuthError::ExchangeFailed(format!("{step}: {e}")))?;
     if !resp.status().is_success() {
         let text = resp.text().await.unwrap_or_default();
         return Err(OAuthError::ExchangeFailed(format!(
-            "{step} failed: {}", &text[..text.len().min(300)]
+            "{step} failed: {}",
+            &text[..text.len().min(300)]
         )));
     }
-    resp.json().await
+    resp.json()
+        .await
         .map_err(|e| OAuthError::ExchangeFailed(format!("{step} parse: {e}")))
 }
 
 fn json_str<'a>(v: &'a serde_json::Value, key: &str, step: &str) -> Result<&'a str, OAuthError> {
-    v[key].as_str()
+    v[key]
+        .as_str()
         .ok_or_else(|| OAuthError::ExchangeFailed(format!("{step} missing {key}")))
 }
 

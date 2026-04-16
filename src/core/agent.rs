@@ -35,8 +35,7 @@ pub fn spawn(
     tokio::spawn(async move {
         let result = std::panic::AssertUnwindSafe(agent_loop(config, registry, cmd_rx, event_tx));
         if futures::FutureExt::catch_unwind(result).await.is_err() {
-            tx
-                .send_or_log(Event::AgentError("agent task panicked".into()))
+            tx.send_or_log(Event::AgentError("agent task panicked".into()))
                 .await;
         }
     });
@@ -109,7 +108,12 @@ async fn agent_loop(
                 // session/config/registry) drops before post-turn code.
                 let result = {
                     let turn_fut = turn::run_chat_turn(
-                        &mut session, &config, &registry, &event_tx, cancel.clone(), &writer,
+                        &mut session,
+                        &config,
+                        &registry,
+                        &event_tx,
+                        cancel.clone(),
+                        &writer,
                     );
                     tokio::pin!(turn_fut);
 

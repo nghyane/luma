@@ -337,8 +337,7 @@ fn preprocess_image(data: Vec<u8>, ext: &str) -> Result<(Vec<u8>, &'static str, 
     use image::{ImageFormat, ImageReader, imageops::FilterType};
     use std::io::Cursor;
 
-    let fmt = ImageFormat::from_extension(ext)
-        .unwrap_or(ImageFormat::Png);
+    let fmt = ImageFormat::from_extension(ext).unwrap_or(ImageFormat::Png);
 
     let img = ImageReader::with_format(Cursor::new(&data), fmt)
         .decode()
@@ -352,7 +351,10 @@ fn preprocess_image(data: Vec<u8>, ext: &str) -> Result<(Vec<u8>, &'static str, 
     let needs_resize = orig_w > IMAGE_MAX_DIMENSION || orig_h > IMAGE_MAX_DIMENSION;
     if !needs_resize && orig_bytes <= IMAGE_TARGET_RAW_BYTES {
         let size_kb = orig_bytes.div_ceil(1024);
-        let text = format!("{}: {orig_w}×{orig_h} {size_kb} KB (attached)", media_type_from_ext(ext));
+        let text = format!(
+            "{}: {orig_w}×{orig_h} {size_kb} KB (attached)",
+            media_type_from_ext(ext)
+        );
         return Ok((data, ext_for_format(fmt), text));
     }
 
@@ -376,10 +378,12 @@ fn preprocess_image(data: Vec<u8>, ext: &str) -> Result<(Vec<u8>, &'static str, 
     // Try encoding in original format first, then fallback strategies.
     let (final_bytes, out_ext) = encode_within_limit(&resized, fmt)
         .or_else(|_| encode_jpeg(&resized, 75))
-        .map_err(|_| anyhow::anyhow!(
-            "Image cannot be compressed to fit within the 5 MB API limit. \
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Image cannot be compressed to fit within the 5 MB API limit. \
              Please use a smaller image."
-        ))?;
+            )
+        })?;
 
     let display_w = resized.width();
     let display_h = resized.height();
@@ -448,9 +452,7 @@ fn encode_within_limit(
 
 fn encode_jpeg(img: &image::DynamicImage, quality: u8) -> Result<(Vec<u8>, &'static str)> {
     let mut buf = Vec::new();
-    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
-        &mut buf, quality,
-    );
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
     img.write_with_encoder(encoder)?;
     Ok((buf, "jpeg"))
 }
@@ -919,11 +921,8 @@ mod tests {
         let img: ImageBuffer<Rgb<u8>, _> =
             ImageBuffer::from_fn(width, height, |_, _| Rgb([255u8, 255, 255]));
         let mut buf = Vec::new();
-        img.write_to(
-            &mut std::io::Cursor::new(&mut buf),
-            image::ImageFormat::Png,
-        )
-        .unwrap();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
         buf
     }
 

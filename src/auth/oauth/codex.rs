@@ -48,7 +48,9 @@ impl CodexProvider {
             ));
         }
 
-        let code = callback.code.ok_or(OAuthError::ExchangeFailed("missing code".to_owned()))?;
+        let code = callback
+            .code
+            .ok_or(OAuthError::ExchangeFailed("missing code".to_owned()))?;
         let body = format!(
             "grant_type=authorization_code&code={}&redirect_uri={}&client_id={}&code_verifier={}",
             url_encode(&code),

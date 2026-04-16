@@ -152,10 +152,7 @@ impl Sender {
     /// All agent/provider call sites should use this instead of bare `send`.
     pub async fn send_or_log(&self, event: Event) {
         if let Err(SendError(e)) = self.send(event).await {
-            crate::dbg_log!(
-                "event bus closed, dropped {:?}",
-                std::mem::discriminant(&e)
-            );
+            crate::dbg_log!("event bus closed, dropped {:?}", std::mem::discriminant(&e));
         }
     }
 
