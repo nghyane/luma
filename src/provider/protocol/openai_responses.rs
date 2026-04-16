@@ -228,22 +228,21 @@ async fn consume_responses_stream(
                 tx.send_or_log(Event::WebSearchStart { query }).await;
             }
             StreamEvent::WebSearchDone { results } => {
-                tx
-                    .send_or_log(Event::WebSearchDone {
-                        query: String::new(),
-                        results,
-                    })
-                    .await;
+                tx.send_or_log(Event::WebSearchDone {
+                    query: String::new(),
+                    results,
+                })
+                .await;
             }
             StreamEvent::UsageUpdate(u) => {
                 usage = u.clone();
                 tx.send_or_log(Event::Usage(u)).await;
             }
             StreamEvent::BlockComplete(b) => {
-                if let Some(ref tu_tx) = tool_use_tx {
-                    if matches!(&b, ContentBlock::ToolUse { .. }) {
-                        let _ = tu_tx.send(b.clone()).await;
-                    }
+                if let Some(ref tu_tx) = tool_use_tx
+                    && matches!(&b, ContentBlock::ToolUse { .. })
+                {
+                    let _ = tu_tx.send(b.clone()).await;
                 }
                 blocks.push(b);
             }

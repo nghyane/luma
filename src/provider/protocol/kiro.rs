@@ -172,14 +172,15 @@ impl KiroRuntime {
                     ).into());
                 }
             };
-            let Some(chunk) = chunk_result
-                .map_err(|e| anyhow::anyhow!("Kiro read error: {e}"))?
+            let Some(chunk) = chunk_result.map_err(|e| anyhow::anyhow!("Kiro read error: {e}"))?
             else {
                 break;
             };
             decoder.feed(&chunk);
             while let Some(frame) = decoder.pop_frame() {
-                decoder.handle_frame(&frame, &req.tx, &req.tool_use_tx).await;
+                decoder
+                    .handle_frame(&frame, &req.tx, &req.tool_use_tx)
+                    .await;
             }
         }
 
@@ -659,7 +660,8 @@ impl<'a> FrameDecoder<'a> {
                     );
                     self.tool_order.push(tool_use_id.clone());
                     if !name.is_empty() {
-                        tx.send_or_log(Event::ToolSelected { name: name.clone() }).await;
+                        tx.send_or_log(Event::ToolSelected { name: name.clone() })
+                            .await;
                     }
                 }
 
@@ -671,12 +673,11 @@ impl<'a> FrameDecoder<'a> {
                     if let Some(ex) = entry.arg_extractor.as_mut() {
                         let extracted = ex.feed(input_chunk);
                         if !extracted.is_empty() {
-                            tx
-                                .send_or_log(Event::ToolInput {
-                                    name: tool_name,
-                                    chunk: extracted,
-                                })
-                                .await;
+                            tx.send_or_log(Event::ToolInput {
+                                name: tool_name,
+                                chunk: extracted,
+                            })
+                            .await;
                         }
                     }
                 }
@@ -684,22 +685,22 @@ impl<'a> FrameDecoder<'a> {
                 if is_stop {
                     self.stop_reason = StopReason::ToolUse;
                     // Emit completed tool_use block mid-stream for early execution.
-                    if let Some(tu_tx) = tool_use_tx {
-                        if let Some(entry) = self.tool_uses.get(&tool_use_id) {
-                            let input: serde_json::Value = if entry.arguments.is_empty() {
-                                serde_json::json!({})
-                            } else {
-                                serde_json::from_str(&entry.arguments)
-                                    .unwrap_or_else(|_| serde_json::json!({}))
-                            };
-                            let _ = tu_tx
-                                .send(ContentBlock::ToolUse {
-                                    id: tool_use_id,
-                                    name: entry.name.clone(),
-                                    input,
-                                })
-                                .await;
-                        }
+                    if let Some(tu_tx) = tool_use_tx
+                        && let Some(entry) = self.tool_uses.get(&tool_use_id)
+                    {
+                        let input: serde_json::Value = if entry.arguments.is_empty() {
+                            serde_json::json!({})
+                        } else {
+                            serde_json::from_str(&entry.arguments)
+                                .unwrap_or_else(|_| serde_json::json!({}))
+                        };
+                        let _ = tu_tx
+                            .send(ContentBlock::ToolUse {
+                                id: tool_use_id,
+                                name: entry.name.clone(),
+                                input,
+                            })
+                            .await;
                     }
                 }
             }
@@ -1201,5 +1202,4 @@ mod tests {
         assert_eq!(images[0]["format"], "webp");
         assert_eq!(images[0]["source"]["bytes"], "HISTDATA");
     }
-
 }

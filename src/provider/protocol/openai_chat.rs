@@ -159,10 +159,10 @@ async fn consume_chat_stream(
                 tx.send_or_log(Event::Usage(u)).await;
             }
             StreamEvent::BlockComplete(b) => {
-                if let Some(ref tu_tx) = tool_use_tx {
-                    if matches!(&b, ContentBlock::ToolUse { .. }) {
-                        let _ = tu_tx.send(b.clone()).await;
-                    }
+                if let Some(ref tu_tx) = tool_use_tx
+                    && matches!(&b, ContentBlock::ToolUse { .. })
+                {
+                    let _ = tu_tx.send(b.clone()).await;
                 }
                 blocks.push(b);
             }

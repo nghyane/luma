@@ -10,7 +10,6 @@ use crate::provider::retry::ProviderRateLimited;
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-
 /// Fallback cap when evidence ingestion fails (I/O error on the blob).
 ///
 /// Normal oversized results spill to the evidence store (see
@@ -66,16 +65,16 @@ pub async fn run_chat_turn(
     let mut auth_cred = auth::resolve(provider_kind).await?;
     for attempt in 0..MAX_AUTH_RETRIES {
         let provider = build_provider(config, &auth_cred, &session.id);
-        let outcome = run_turn(
+        let outcome = run_turn(RunTurnCtx {
             session,
-            &*provider,
-            &config.model_id,
+            provider: &*provider,
+            model_id: &config.model_id,
             registry,
             tx,
-            cancel.clone(),
+            cancel: cancel.clone(),
             caps,
             writer,
-        )
+        })
         .await;
         let err = match outcome {
             Ok(()) => return Ok(()),
@@ -93,16 +92,15 @@ pub async fn run_chat_turn(
                 .expect("resolved credential must carry account_key");
             let _ = AuthService::new(SqliteAuthRepository::with_default_path())
                 .mark_rate_limited(key, retry_after);
-            tx
-                .send_or_log(Event::ToolOutput {
-                    name: String::new(),
-                    chunk: format!(
-                        "{} account {} rate limited, switching…",
-                        provider_kind.as_str(),
-                        label
-                    ),
-                })
-                .await;
+            tx.send_or_log(Event::ToolOutput {
+                name: String::new(),
+                chunk: format!(
+                    "{} account {} rate limited, switching…",
+                    provider_kind.as_str(),
+                    label
+                ),
+            })
+            .await;
             if attempt + 1 == MAX_AUTH_RETRIES {
                 return Err(err);
             }
@@ -125,16 +123,15 @@ pub async fn run_chat_turn(
                     .expect("resolved credential must carry account_key");
                 let _ = AuthService::new(SqliteAuthRepository::with_default_path())
                     .mark_auth_failed(key, AuthFailure::Revoked);
-                tx
-                    .send_or_log(Event::ToolOutput {
-                        name: String::new(),
-                        chunk: format!(
-                            "{} account {} rejected access (403), switching…",
-                            provider_kind.as_str(),
-                            dead_label
-                        ),
-                    })
-                    .await;
+                tx.send_or_log(Event::ToolOutput {
+                    name: String::new(),
+                    chunk: format!(
+                        "{} account {} rejected access (403), switching…",
+                        provider_kind.as_str(),
+                        dead_label
+                    ),
+                })
+                .await;
                 if attempt + 1 == MAX_AUTH_RETRIES {
                     return Err(err);
                 }
@@ -154,12 +151,11 @@ pub async fn run_chat_turn(
                     unauth.detail
                 );
             }
-            tx
-                .send_or_log(Event::ToolOutput {
-                    name: String::new(),
-                    chunk: "token rejected, refreshing…".into(),
-                })
-                .await;
+            tx.send_or_log(Event::ToolOutput {
+                name: String::new(),
+                chunk: "token rejected, refreshing…".into(),
+            })
+            .await;
             if matches!(
                 provider_kind,
                 crate::config::auth::AuthVendor::OpenAI | crate::config::auth::AuthVendor::Kiro
@@ -219,6 +215,19 @@ struct TurnCtx<'a> {
     cancel: &'a tokio_util::sync::CancellationToken,
 }
 
+/// Owned inputs for one turn. Bundles mutable session state and fixed
+/// collaborators so the turn entrypoint stays cohesive and clippy-clean.
+struct RunTurnCtx<'a> {
+    session: &'a mut Session,
+    provider: &'a dyn Provider,
+    model_id: &'a str,
+    registry: &'a Registry,
+    tx: &'a EventSender,
+    cancel: tokio_util::sync::CancellationToken,
+    caps: crate::core::tool::ModelCaps,
+    writer: &'a crate::core::session::SessionWriter,
+}
+
 /// Stream with automatic retry on transient network failures.
 ///
 /// On a retryable failure, notifies the UI via `ProviderRetry` event and
@@ -243,8 +252,7 @@ async fn stream_with_retry(
             if let Some(ref e) = last_err {
                 crate::dbg_log!("stream retry attempt {attempt}: {e}");
             }
-            ctx
-                .tx
+            ctx.tx
                 .send_or_log(Event::ProviderRetry {
                     provider: ctx.provider.name().to_owned(),
                     delay_secs: STREAM_RETRY_DELAY_SECS,
@@ -289,16 +297,17 @@ async fn stream_with_retry(
 /// `stop_reason = MaxTokens` using the provider default, the same request is
 /// retried once with [`ESCALATED_MAX_TOKENS`]. Mirrors claude-code's
 /// `max_output_tokens_escalate` path.
-async fn run_turn(
-    session: &mut Session,
-    provider: &dyn Provider,
-    model_id: &str,
-    registry: &Registry,
-    tx: &EventSender,
-    cancel: tokio_util::sync::CancellationToken,
-    caps: crate::core::tool::ModelCaps,
-    writer: &crate::core::session::SessionWriter,
-) -> Result<()> {
+async fn run_turn(ctx: RunTurnCtx<'_>) -> Result<()> {
+    let RunTurnCtx {
+        session,
+        provider,
+        model_id,
+        registry,
+        tx,
+        cancel,
+        caps,
+        writer,
+    } = ctx;
     let schemas = registry.schemas();
     let server_schemas = provider.server_tool_schemas(registry.server_capabilities());
     let resolve_image = crate::core::session::image_resolver(&session.id);
@@ -323,8 +332,7 @@ async fn run_turn(
         // Create channel for streaming tool execution. Provider sends
         // completed ToolUse blocks here mid-stream so we can start
         // executing tools before the full response arrives.
-        let (tu_tx, mut tu_rx) =
-            tokio::sync::mpsc::channel::<crate::core::types::ContentBlock>(16);
+        let (tu_tx, mut tu_rx) = tokio::sync::mpsc::channel::<crate::core::types::ContentBlock>(16);
 
         // First attempt: provider default max_tokens.
         let routing = provider.tool_result_image_routing();
@@ -369,9 +377,9 @@ async fn run_turn(
                             chunk: format!("stream error (recovery {stream_error_count}/{MAX_STREAM_ERROR_RECOVERY}): {msg}"),
                         })
                         .await;
-                    session.messages.push(Message::system(format!(
-                        "[API error — retrying: {msg}]"
-                    )));
+                    session
+                        .messages
+                        .push(Message::system(format!("[API error — retrying: {msg}]")));
                     writer.enqueue(session);
                     continue;
                 }
@@ -384,14 +392,13 @@ async fn run_turn(
         // same cap would waste a request; surface the failure directly.
         if result.stop_reason == StopReason::MaxTokens && provider.supports_max_tokens_override() {
             crate::dbg_log!("max_tokens hit — escalating to {ESCALATED_MAX_TOKENS} and retrying");
-            tx
-                .send_or_log(Event::ProviderRetry {
-                    provider: provider.name().to_owned(),
-                    delay_secs: 0,
-                    attempt: 1,
-                    max_attempts: 2,
-                })
-                .await;
+            tx.send_or_log(Event::ProviderRetry {
+                provider: provider.name().to_owned(),
+                delay_secs: 0,
+                attempt: 1,
+                max_attempts: 2,
+            })
+            .await;
             match stream_with_retry(&ctx, &routed, Some(ESCALATED_MAX_TOKENS), None).await {
                 Ok(r) => result = r,
                 Err(e) => {
@@ -442,7 +449,9 @@ async fn run_turn(
             let ctx_window = crate::config::models::context_window(ctx.model_id);
             let est_tokens = ((est_chars / 4 + 5) / 10 * 10) as u64;
             let pct = ((est_tokens as f64 / ctx_window as f64) * 100.0).clamp(0.0, 100.0) as f32;
-            ctx.tx.send_or_log(crate::event::Event::ContextUsage(pct)).await;
+            ctx.tx
+                .send_or_log(crate::event::Event::ContextUsage(pct))
+                .await;
         }
 
         if cancel.is_cancelled() {
@@ -460,15 +469,14 @@ async fn run_turn(
                     output_recovery_count
                 );
             }
-            tx
-                .send_or_log(Event::ToolOutput {
-                    name: String::new(),
-                    chunk: format!(
-                        "output limit hit, resuming… (recovery {}/{})",
-                        output_recovery_count, MAX_OUTPUT_RECOVERY
-                    ),
-                })
-                .await;
+            tx.send_or_log(Event::ToolOutput {
+                name: String::new(),
+                chunk: format!(
+                    "output limit hit, resuming… (recovery {}/{})",
+                    output_recovery_count, MAX_OUTPUT_RECOVERY
+                ),
+            })
+            .await;
             session.messages.push(Message {
                 role: Role::User,
                 content: vec![ContentBlock::Text {
@@ -705,12 +713,11 @@ async fn execute_one(
             }
 
             let summary = format_tool_summary(&tu.name, &tu.input);
-            tx
-                .send_or_log(Event::ToolStart {
-                    name: tu.name.clone(),
-                    summary,
-                })
-                .await;
+            tx.send_or_log(Event::ToolStart {
+                name: tu.name.clone(),
+                summary,
+            })
+            .await;
 
             let (output_tx, mut output_rx) = mpsc::channel::<String>(256);
             let tx_fwd = tx.clone();
@@ -734,36 +741,33 @@ async fn execute_one(
             match res {
                 Ok(exec) => {
                     if let Some(artifact) = exec.artifact {
-                        tx
-                            .send_or_log(Event::ToolArtifact {
-                                name: tu.name.clone(),
-                                artifact: Box::new(artifact),
-                            })
-                            .await;
-                    }
-                    let end_summary = format_tool_result(&tu.name, &exec.result.as_text());
-                    tx
-                        .send_or_log(Event::ToolEnd {
+                        tx.send_or_log(Event::ToolArtifact {
                             name: tu.name.clone(),
-                            summary: end_summary,
+                            artifact: Box::new(artifact),
                         })
                         .await;
+                    }
+                    let end_summary = format_tool_result(&tu.name, &exec.result.as_text());
+                    tx.send_or_log(Event::ToolEnd {
+                        name: tu.name.clone(),
+                        summary: end_summary,
+                    })
+                    .await;
                     if let Some(name) = &skill {
-                        tx.send_or_log(Event::SkillEnd(format!("loaded {name}"))).await;
+                        tx.send_or_log(Event::SkillEnd(format!("loaded {name}")))
+                            .await;
                     }
                     exec.result
                 }
                 Err(e) => {
                     let msg = format!("Error: {e}");
-                    tx
-                        .send_or_log(Event::ToolEnd {
-                            name: tu.name.clone(),
-                            summary: msg.clone(),
-                        })
-                        .await;
+                    tx.send_or_log(Event::ToolEnd {
+                        name: tu.name.clone(),
+                        summary: msg.clone(),
+                    })
+                    .await;
                     if let Some(name) = &skill {
-                        tx
-                            .send_or_log(Event::SkillEnd(format!("failed to load {name}")))
+                        tx.send_or_log(Event::SkillEnd(format!("failed to load {name}")))
                             .await;
                     }
                     msg.into()
@@ -870,7 +874,8 @@ mod tests {
         ];
 
         let start = std::time::Instant::now();
-        let results = execute_tools(&calls, &registry, &tx, cancel, Default::default(), "test").await;
+        let results =
+            execute_tools(&calls, &registry, &tx, cancel, Default::default(), "test").await;
         let elapsed = start.elapsed();
 
         assert_eq!(results.len(), 2);
