@@ -52,7 +52,7 @@ pub async fn run() -> anyhow::Result<()> {
                         session_id = sid.clone();
                         agent_tx = Some(atx);
 
-                        transport::respond(id, serde_json::json!({ "sessionId": sid }));
+                        transport::respond(id, session_new_response(&sid));
                     }
 
                     "session/prompt" => {
@@ -103,8 +103,10 @@ pub async fn run() -> anyhow::Result<()> {
                     }
 
                     _ => {
+                        // Log unknown methods for debugging, return null.
+                        eprintln!("ACP unknown method: {} id={}", req.method, id);
                         if !id.is_null() {
-                            transport::respond_error(id, -32601, "Method not found".into());
+                            transport::respond(id, serde_json::Value::Null);
                         }
                     }
                 }
@@ -138,12 +140,15 @@ pub async fn run() -> anyhow::Result<()> {
                     Event::ToolStart { name, summary } => {
                         tool_call_seq += 1;
                         current_tool_call_id = format!("tc_{tool_call_seq}");
+                        let kind = tool_kind(&name);
                         transport::notify("session/update", serde_json::json!({
                             "sessionId": sid,
                             "update": {
-                                "sessionUpdate": "tool_call_start",
+                                "sessionUpdate": "tool_call",
                                 "toolCallId": current_tool_call_id,
                                 "title": format!("{name}: {summary}"),
+                                "kind": kind,
+                                "status": "in_progress",
                             }
                         }));
                     }
@@ -155,19 +160,21 @@ pub async fn run() -> anyhow::Result<()> {
                                 "sessionUpdate": "tool_call_update",
                                 "toolCallId": current_tool_call_id,
                                 "status": "in_progress",
-                                "content": [{ "type": "text", "text": chunk }]
+                                "content": [{ "type": "content", "content": { "type": "text", "text": chunk } }]
                             }
                         }));
                     }
 
-                    Event::ToolEnd { summary, .. } if !current_tool_call_id.is_empty() => {
+                    Event::ToolEnd { name, summary } if !current_tool_call_id.is_empty() => {
+                        let kind = tool_kind(&name);
                         transport::notify("session/update", serde_json::json!({
                             "sessionId": sid,
                             "update": {
                                 "sessionUpdate": "tool_call_update",
                                 "toolCallId": current_tool_call_id,
+                                "kind": kind,
                                 "status": "completed",
-                                "content": [{ "type": "text", "text": summary }]
+                                "content": [{ "type": "content", "content": { "type": "text", "text": summary } }]
                             }
                         }));
                         current_tool_call_id.clear();
@@ -245,6 +252,105 @@ fn resolve_search(source: &str) -> Option<crate::tool::web_search::SearchBackend
         return Some(SearchBackend::Tavily { api_key: key });
     }
     None
+}
+
+/// Build the `session/new` response with models and modes.
+fn session_new_response(session_id: &str) -> serde_json::Value {
+    let models = crate::config::models::all_models();
+    let available: Vec<serde_json::Value> = models
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "modelId": m.id,
+                "name": format!("{} ({})", m.id, m.source),
+            })
+        })
+        .collect();
+
+    let current_mode = crate::config::prefs::load_mode();
+    let current_model = crate::config::models::resolve_default(current_mode);
+    let current_model_id = current_model.as_ref().map(|m| m.id.as_str());
+
+    let modes: Vec<serde_json::Value> = [
+        crate::config::models::AgentMode::Rush,
+        crate::config::models::AgentMode::Smart,
+        crate::config::models::AgentMode::Deep,
+    ]
+    .iter()
+    .map(|m| {
+        serde_json::json!({
+            "id": m.as_str(),
+            "name": m.as_str(),
+        })
+    })
+    .collect();
+
+    let mode_options: Vec<serde_json::Value> = [
+        crate::config::models::AgentMode::Rush,
+        crate::config::models::AgentMode::Smart,
+        crate::config::models::AgentMode::Deep,
+    ]
+    .iter()
+    .map(|m| {
+        serde_json::json!({
+            "value": m.as_str(),
+            "name": m.as_str(),
+        })
+    })
+    .collect();
+
+    let model_options: Vec<serde_json::Value> = models
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "value": m.id,
+                "name": format!("{} ({})", m.id, m.source),
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "sessionId": session_id,
+        "models": {
+            "availableModels": available,
+            "currentModelId": current_model_id,
+        },
+        "modes": {
+            "availableModes": modes,
+            "currentModeId": current_mode.as_str(),
+        },
+        "configOptions": [
+            {
+                "id": "mode",
+                "type": "select",
+                "category": "mode",
+                "name": "Mode",
+                "options": mode_options,
+                "currentValue": current_mode.as_str(),
+            },
+            {
+                "id": "model",
+                "type": "select",
+                "category": "model",
+                "name": "Model",
+                "options": model_options,
+                "currentValue": current_model_id,
+            }
+        ],
+    })
+}
+
+/// Map Luma tool names to ACP ToolKind enum values.
+fn tool_kind(name: &str) -> &'static str {
+    match name {
+        "Bash" => "execute",
+        "Read" => "read",
+        "Write" | "Edit" | "MultiEdit" | "ApplyPatch" => "edit",
+        "Glob" | "Grep" | "GhSearch" => "search",
+        "WebSearch" => "search",
+        "WebFetch" | "GhFile" | "GhLs" => "fetch",
+        _ => "other",
+    }
 }
 
 fn extract_text(blocks: &[PromptContent]) -> String {
@@ -331,7 +437,7 @@ fn replay_history(sid: &str, session: &crate::core::session::Session) {
                                         "sessionUpdate": "tool_call_update",
                                         "toolCallId": tool_use_id,
                                         "status": "completed",
-                                        "content": [{ "type": "text", "text": content.as_text() }]
+                                        "content": [{ "type": "content", "content": { "type": "text", "text": content.as_text() } }]
                                     }
                                 }),
                             );
@@ -374,9 +480,11 @@ fn replay_history(sid: &str, session: &crate::core::session::Session) {
                                 serde_json::json!({
                                     "sessionId": sid,
                                     "update": {
-                                        "sessionUpdate": "tool_call_start",
+                                        "sessionUpdate": "tool_call",
                                         "toolCallId": id,
                                         "title": name,
+                                        "kind": tool_kind(name),
+                                        "status": "completed",
                                     }
                                 }),
                             );
