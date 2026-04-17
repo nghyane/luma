@@ -28,6 +28,7 @@ mod config;
 mod core;
 mod event;
 mod event_bus;
+mod mcp;
 mod provider;
 mod tool;
 mod tui;
@@ -444,8 +445,15 @@ async fn main() {
         }
         Some("help" | "--help" | "-h") => {
             println!(
-                "luma - lightweight coding agent\n\nusage:\n  luma                     start TUI\n  luma sync                sync models\n  luma auth                show resolved auth per provider\n  luma login [provider]    add an account; omit for picker\n  luma accounts            list accounts in the pool\n  luma export              print auth as base64 (share via chat/slack)\n  luma import [string]     import auth (interactive paste if no arg)\n  luma update              update to latest\n  luma version             show version"
+                "luma - lightweight coding agent\n\nusage:\n  luma                     start TUI\n  luma sync                sync models\n  luma auth                show resolved auth per provider\n  luma login [provider]    add an account; omit for picker\n  luma accounts            list accounts in the pool\n  luma mcp <subcmd>        manage MCP servers (list|add|remove)\n  luma export              print auth as base64 (share via chat/slack)\n  luma import [string]     import auth (interactive paste if no arg)\n  luma update              update to latest\n  luma version             show version"
             );
+        }
+        Some("mcp") => {
+            let sub_args: Vec<String> = args.iter().skip(2).cloned().collect();
+            if let Err(e) = mcp::cli::run(&sub_args) {
+                eprintln!("error: {e:#}");
+                std::process::exit(1);
+            }
         }
         Some(unknown) => {
             eprintln!("unknown command: {unknown}\nrun 'luma help'");
@@ -467,6 +475,12 @@ async fn main() {
             }
 
             let env_context = build_env_context();
+
+            // Initialize MCP servers before TUI so tools are available on first turn.
+            let mcp_config = mcp::config::load();
+            let manager = mcp::manager::McpManager::start(&mcp_config).await;
+            mcp::bridge::set_global_manager(manager);
+
             let app = tui::app::App::new(env_context);
             if let Err(e) = app.run().await {
                 eprintln!("error: {e}");

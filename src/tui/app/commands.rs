@@ -117,6 +117,49 @@ impl super::App {
                 Action::Render
             }
             "exit" => Action::Quit,
+            "mcp" => {
+                self.enter_chat();
+                let config = crate::mcp::config::load();
+                match crate::mcp::bridge::global_manager() {
+                    Some(manager) => {
+                        let statuses = manager.statuses();
+                        if statuses.is_empty() {
+                            self.doc.info("no MCP servers configured");
+                            self.doc
+                                .info("add one with: luma mcp add <name> -- <cmd> [args...]");
+                        } else {
+                            self.doc.info(&format!("MCP servers ({}):", statuses.len()));
+                            for (name, status) in statuses {
+                                let line = match status {
+                                    crate::mcp::manager::McpStatus::Connected { tool_count } => {
+                                        format!("  ✓ {name} ({tool_count} tools)")
+                                    }
+                                    crate::mcp::manager::McpStatus::Failed(err) => {
+                                        format!("  ✗ {name} — {err}")
+                                    }
+                                };
+                                self.doc.info(&line);
+                            }
+                        }
+                    }
+                    None => {
+                        if config.servers.is_empty() {
+                            self.doc.info("no MCP servers configured");
+                            self.doc
+                                .info("add one with: luma mcp add <name> -- <cmd> [args...]");
+                        } else {
+                            self.doc.info(&format!(
+                                "{} MCP server(s) configured but not started (restart luma)",
+                                config.servers.len()
+                            ));
+                            for name in config.servers.keys() {
+                                self.doc.info(&format!("  - {name}"));
+                            }
+                        }
+                    }
+                }
+                Action::Render
+            }
             _ => {
                 self.doc.warn(&format!("unknown command: /{cmd}"));
                 Action::Render
@@ -262,8 +305,7 @@ impl super::App {
                 self.config.env_context
             );
             let search_pref = crate::tool::search_preference_for(&desired.source);
-            let registry =
-                crate::tool::build_registry(style, Self::search_backend(), search_pref);
+            let registry = crate::tool::build_registry(style, Self::search_backend(), search_pref);
             let _ = tx.try_send(AgentCommand::SetContext {
                 system_prompt,
                 registry,

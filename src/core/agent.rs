@@ -42,10 +42,8 @@ pub fn spawn(
                     .map(|s| s.to_string())
                     .or_else(|| e.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "unknown cause".into());
-                tx.send_or_log(Event::AgentError(format!(
-                    "agent task panicked: {detail}"
-                )))
-                .await;
+                tx.send_or_log(Event::AgentError(format!("agent task panicked: {detail}")))
+                    .await;
             }
         }
     });

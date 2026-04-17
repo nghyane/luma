@@ -115,5 +115,11 @@ pub fn build_registry(
     }
 
     reg.register(Box::new(web_fetch::WebFetchTool));
+
+    // MCP tools — register from global manager if available.
+    if let Some(manager) = crate::mcp::bridge::global_manager() {
+        manager.register_tools(&mut reg);
+    }
+
     reg
 }
