@@ -34,9 +34,19 @@ pub fn spawn(
     let tx = event_tx.clone();
     tokio::spawn(async move {
         let result = std::panic::AssertUnwindSafe(agent_loop(config, registry, cmd_rx, event_tx));
-        if futures::FutureExt::catch_unwind(result).await.is_err() {
-            tx.send_or_log(Event::AgentError("agent task panicked".into()))
+        match futures::FutureExt::catch_unwind(result).await {
+            Ok(()) => {}
+            Err(e) => {
+                let detail = e
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| e.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown cause".into());
+                tx.send_or_log(Event::AgentError(format!(
+                    "agent task panicked: {detail}"
+                )))
                 .await;
+            }
         }
     });
     cmd_tx

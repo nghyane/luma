@@ -86,10 +86,9 @@ pub async fn run_chat_turn(
         if let Some(rl) = err.downcast_ref::<ProviderRateLimited>() {
             let label = rl.label.clone();
             let retry_after = rl.retry_after_secs;
-            let key = auth_cred
-                .account_key
-                .as_ref()
-                .expect("resolved credential must carry account_key");
+            let Some(key) = auth_cred.account_key.as_ref() else {
+                return Err(err);
+            };
             let _ = AuthService::new(SqliteAuthRepository::with_default_path())
                 .mark_rate_limited(key, retry_after);
             tx.send_or_log(Event::ToolOutput {
@@ -117,10 +116,9 @@ pub async fn run_chat_turn(
         if let Some(unauth) = err.downcast_ref::<crate::provider::retry::ProviderUnauthorized>() {
             if auth_cred.is_oauth && unauth.status == 403 {
                 let dead_label = auth_cred.label.clone();
-                let key = auth_cred
-                    .account_key
-                    .as_ref()
-                    .expect("resolved credential must carry account_key");
+                let Some(key) = auth_cred.account_key.as_ref() else {
+                    return Err(err);
+                };
                 let _ = AuthService::new(SqliteAuthRepository::with_default_path())
                     .mark_auth_failed(key, AuthFailure::Revoked);
                 tx.send_or_log(Event::ToolOutput {
@@ -160,10 +158,9 @@ pub async fn run_chat_turn(
                 provider_kind,
                 crate::config::auth::AuthVendor::OpenAI | crate::config::auth::AuthVendor::Kiro
             ) {
-                let key = auth_cred
-                    .account_key
-                    .as_ref()
-                    .expect("resolved credential must carry account_key");
+                let Some(key) = auth_cred.account_key.as_ref() else {
+                    return Err(err);
+                };
                 auth_cred = AuthService::new(SqliteAuthRepository::with_default_path())
                     .refresh_credential(key)
                     .await?;
@@ -392,11 +389,11 @@ async fn run_turn(ctx: RunTurnCtx<'_>) -> Result<()> {
         // same cap would waste a request; surface the failure directly.
         if result.stop_reason == StopReason::MaxTokens && provider.supports_max_tokens_override() {
             crate::dbg_log!("max_tokens hit — escalating to {ESCALATED_MAX_TOKENS} and retrying");
-            tx.send_or_log(Event::ProviderRetry {
-                provider: provider.name().to_owned(),
-                delay_secs: 0,
-                attempt: 1,
-                max_attempts: 2,
+            tx.send_or_log(Event::ToolOutput {
+                name: String::new(),
+                chunk: format!(
+                    "output limit hit, escalating max_tokens to {ESCALATED_MAX_TOKENS}…"
+                ),
             })
             .await;
             match stream_with_retry(&ctx, &routed, Some(ESCALATED_MAX_TOKENS), None).await {
