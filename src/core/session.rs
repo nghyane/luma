@@ -273,19 +273,13 @@ pub enum Resolved {
 
 /// Resolve a URI-style path to a concrete filesystem location.
 ///
-/// Single-scheme registry (`artifact://`) with typed sub-resolvers so
-/// the model only ever needs to remember one URL form. Currently
-/// registered types:
+/// Registered types:
 ///
-/// * `artifact://ev/{id}` — re-read a stored evidence blob from the
-///   current session's `evidence/` directory. Requires an active
-///   [`scope_current_session`].
+/// * `artifact://ev/{id}` — re-read a stored evidence blob.
 /// * `artifact://skill/{name}` — load a skill's `SKILL.md` body
-///   (frontmatter stripped). Names come from the `<available_skills>`
-///   catalog injected into the system prompt.
+///   (frontmatter stripped, skill directory hint prepended).
 ///
-/// Non-URI strings pass through as plain filesystem paths so the vast
-/// majority of tool calls take no penalty.
+/// Non-URI strings pass through as plain filesystem paths.
 pub fn resolve_resource_path(path: &str) -> std::io::Result<Resolved> {
     let Some((scheme, rest)) = path.split_once("://") else {
         return Ok(Resolved::Path(PathBuf::from(path)));
@@ -304,7 +298,7 @@ pub fn resolve_resource_path(path: &str) -> std::io::Result<Resolved> {
     })?;
     match kind {
         "ev" => resolve_evidence(id).map(Resolved::Path),
-        "skill" => resolve_skill(id).map(Resolved::PathStripFrontmatter),
+        "skill" => resolve_skill_uri(path),
         other => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("unknown artifact type: {other}"),
@@ -339,16 +333,14 @@ fn resolve_evidence(id: &str) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
-fn resolve_skill(name: &str) -> std::io::Result<PathBuf> {
-    if !is_safe_id_segment(name) {
-        return Err(std::io::Error::new(
+/// Resolve `artifact://skill/{name}` to the skill's `SKILL.md` path.
+fn resolve_skill_uri(full_uri: &str) -> std::io::Result<Resolved> {
+    let name = crate::config::skills::parse_skill_read_path(full_uri).ok_or_else(|| {
+        std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("invalid skill name: {name}"),
-        ));
-    }
-    // Discovery already walks project + user skill directories with
-    // precedence rules — reuse it so resolution matches what the
-    // catalog advertises byte-for-byte.
+            format!("invalid skill URI: {full_uri}"),
+        )
+    })?;
     let skills = crate::config::skills::discover();
     let skill = skills.iter().find(|s| s.name == name).ok_or_else(|| {
         std::io::Error::new(
@@ -356,7 +348,7 @@ fn resolve_skill(name: &str) -> std::io::Result<PathBuf> {
             format!("skill not found: {name}"),
         )
     })?;
-    Ok(skill.path.clone())
+    Ok(Resolved::PathStripFrontmatter(skill.path.clone()))
 }
 
 /// Save image bytes to `sessions/{session_id}/images/{filename}`. Returns filename.

@@ -663,24 +663,13 @@ fn maybe_promote_to_evidence(
     }
 }
 
-/// Check if a Read tool call targets a skill — either the canonical
-/// `artifact://skill/{name}` URI or a legacy absolute path ending in
-/// `SKILL.md`. Returns the skill name for the UI skill-block event.
+/// Check if a Read tool call targets a skill. Returns the skill name.
 fn skill_name_from_read(tool_name: &str, args: &serde_json::Value) -> Option<String> {
     if !tool_name.eq_ignore_ascii_case("read") {
         return None;
     }
     let path = args.get("path")?.as_str()?;
-    if let Some(name) = path.strip_prefix("artifact://skill/") {
-        return Some(name.to_owned());
-    }
-    if !path.ends_with("SKILL.md") {
-        return None;
-    }
-    std::path::Path::new(path)
-        .parent()
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().into_owned())
+    crate::config::skills::parse_skill_read_path(path)
 }
 
 /// Owned reference to a single tool_use request being executed. Held across

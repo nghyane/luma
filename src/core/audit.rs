@@ -340,7 +340,11 @@ fn inspect_session(session: &Session) -> SessionFacts {
                     match name.as_str() {
                         "Read" => {
                             let path = input["path"].as_str().unwrap_or("");
-                            if path.starts_with("artifact://skill/") {
+                            // Detect skill reads (canonical URI or legacy
+                            // `.../SKILL.md` path) with the shared parser
+                            // so audit metrics match what turn.rs emits
+                            // to the UI.
+                            if crate::config::skills::parse_skill_read_path(path).is_some() {
                                 facts.has_skill_load = true;
                             } else if !path.is_empty() && !path.starts_with("artifact://") {
                                 facts.used_local_read = true;

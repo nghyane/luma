@@ -53,7 +53,8 @@ impl Tool for ReadTool {
                 "  - `artifact://ev/{id}` — re-read a stored evidence blob from this session\n",
                 "    (ids appear in prior tool summaries, e.g. 'stored as artifact://ev/ev_abc').\n",
                 "  - `artifact://skill/{name}` — load a skill's instructions\n",
-                "    (names come from the `<available_skills>` catalog; frontmatter is stripped).\n",
+                "    (names come from the `<available_skills>` catalog; frontmatter is stripped,\n",
+                "    skill directory path is included so you can reference companion files).\n",
                 "- Default reads up to 2000 lines. Use offset/limit for large files.\n",
                 "- Files larger than 10MB require offset and limit parameters.\n",
                 "- Avoid tiny repeated slices (e.g. 30-line chunks). Read a larger window instead.\n",
@@ -178,6 +179,18 @@ impl Tool for ReadTool {
                 0
             };
 
+            // When loading a skill, prepend the absolute directory path
+            // so the agent can reference companion files (scripts,
+            // templates, etc.) without needing a separate URI scheme.
+            let skill_dir_hint = if strip_frontmatter {
+                path.parent()
+                    .and_then(|p| p.canonicalize().ok())
+                    .map(|p| format!("[skill-directory: {}]\n\n", p.display()))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+
             let file = fs::File::open(&path)?;
             let mut reader = BufReader::new(file);
 
@@ -250,7 +263,7 @@ impl Tool for ReadTool {
             }
 
             Ok(ToolExecution {
-                result: result.into(),
+                result: format!("{skill_dir_hint}{result}").into(),
                 artifact: None,
             })
         })
