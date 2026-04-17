@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-beta.22] - 2026-04-17
+
+### Changed
+- **Skill discovery: multi-CLI interop** — now scans `.kiro/skills/` and `.codex/skills/` (workspace + user-level) alongside existing `.agents/skills/` and `.claude/skills/` roots; skills authored for Codex, Kiro, or Claude Code are picked up transparently
+- **Recursive skill scan** — walks each root up to 6 levels deep so Codex nested layouts (`.system/plan/`, category folders) are discovered without extra config
+- **Robust YAML frontmatter parser** — handles block scalars (`>` / `|`), quoted values, BOM, and unknown fields (`license`, `metadata`, `compatibility`) without errors; forward-compatible with agentskills.io schema
+- **Skill name fallback** — when `name:` is missing from frontmatter, the containing folder name is used (Codex convention)
+- **Skill directory hint on load** — reading a skill via `artifact://skill/{name}` now prepends `[skill-directory: /absolute/path]` to the output so the agent can reference companion files (scripts, templates, assets) by absolute path
+- **Unified skill detection** — `turn.rs` (UI events) and `audit.rs` (metrics) share a single `parse_skill_read_path()` parser; audit `sessions_with_skill_loads` counter now matches UI exactly
+- Skill name charset widened to `[A-Za-z0-9_.-]+` (adds `.` for `v1.2`-style names seen in the wild)
+- Duplicate skill names across discovery roots now log a debug warning instead of silently shadowing
+
+### Removed
+- Legacy `SKILL.md` filesystem path detection (beta reset — only `artifact://skill/{name}` URI is recognised)
+- `<directory>` and `<assets>` XML blocks from skill catalog (replaced by runtime directory hint)
+- `artifact://skill/{name}/{subpath}` URI form (agent uses absolute paths from the hint instead)
+
 ## [0.4.0-beta.21] - 2026-04-17
 
 ### Added
