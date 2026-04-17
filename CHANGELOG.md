@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-beta.21] - 2026-04-17
+
+### Added
+- **MCP (Model Context Protocol) client integration (RFC 0015)** — agent can now call tools from external MCP servers alongside built-in tools
+  - `src/mcp/` module: `config` (load + merge), `manager` (spawn + route calls), `bridge` (`McpTool` implementing `core::tool::Tool`), `cli` (subcommands)
+  - Stdio transport via `rmcp 1.5` with `transport-child-process` (HTTP/SSE deferred to phase 2)
+  - Config format matches Claude Code's `mcpServers` shape byte-for-byte; reads `.luma/mcp.json` (project) and `~/.config/luma/mcp.json` (user), with fallback to `.claude/settings.json`
+  - Tool naming `mcp__{normalized_server}__{tool}` matches Claude Code convention
+  - 30s connect timeout with stderr capture — failed servers surface subprocess stderr in the error message instead of a generic "connection closed"
+  - Per-server failure isolation: one bad server does not block luma startup or affect other servers
+- `luma mcp list` / `luma mcp add <name> -- <cmd> [args...]` / `luma mcp remove <name>` CLI subcommands, with `-e KEY=VAL` support for env vars
+- `/mcp` TUI command showing connection status (connected + tool count, or failed + error) and prompt autocomplete entry
+
+## [0.4.0-beta.20] - 2026-04-17
+
+### Changed
+- Agent panic hook now extracts detail from `&str` / `String` payloads before reporting, surfacing the real cause instead of "unknown"
+- `expect` on event channel send replaced with graceful error return so a dropped receiver cannot abort the agent task
+- Max-tokens escalation now emits `ToolOutput` (not `Token`) so the UI shows escalation notices as inline tool output rather than assistant text
+
 ## [0.4.0-beta.15] - 2026-04-16
 
 ### Added

@@ -1,6 +1,6 @@
 # Roadmap
 
-Current: ~20K lines Rust, 360 tests, 3 providers, 12 tools. Cross-platform (macOS, Linux, Windows).
+Current: ~20K lines Rust, 640+ tests, 5 providers, 12 built-in tools + MCP client. Cross-platform (macOS, Linux, Windows).
 
 ## v0.2 — Done
 
@@ -50,13 +50,14 @@ Current: ~20K lines Rust, 360 tests, 3 providers, 12 tools. Cross-platform (macO
 - [x] Crash safety — panic hook, crash log, orphaned tool_use repair on resume
 - [x] Input polish — dynamic height, wrap, cursor tracking
 - [x] Large-session profiling (65K+ tokens) — Layout/renderer not bottleneck; FxHash for row diff (6.9x, 63→9 µs)
+- [x] **MCP integration (RFC 0015)** — phase 1: stdio transport, Claude Code config format, `luma mcp add/list/remove`, `/mcp` TUI command
 - [ ] Bare URL highlighting in markdown
 - [ ] Streaming resize stability across providers
 - [ ] Tool output polish — clearer summaries and more consistent formatting
 
 ## v0.5 — UX & Extensibility
 
-- [ ] MCP server support — connect to external tool servers
+- [ ] MCP — HTTP/SSE transports + OAuth (phase 2, extends RFC 0015)
 - [ ] Custom tools via config — shell commands + schema
 - [ ] File watcher — detect external changes, warn before overwrite
 - [ ] Copy selection to clipboard
