@@ -223,12 +223,12 @@ impl Renderer {
             c.flags = CellFlag(CellFlag::NONE);
             match cell {
                 ScrollCell::Track => {
-                    c.ch = '█';
+                    c.ch = ' ';
                     c.fg = ov.fg_track;
                     c.bg = ov.fg_track;
                 }
                 ScrollCell::Thumb => {
-                    c.ch = '█';
+                    c.ch = ' ';
                     c.fg = ov.fg_thumb;
                     c.bg = ov.fg_thumb;
                 }
