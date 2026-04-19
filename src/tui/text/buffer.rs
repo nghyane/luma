@@ -129,6 +129,28 @@ impl ScreenBuffer {
                     continue;
                 }
                 let cw = char_width(ch);
+                // Expand tab to spaces.
+                if ch == '\t' {
+                    let tab_w = cw as u16;
+                    for _ in 0..tab_w {
+                        if x >= max_col {
+                            break;
+                        }
+                        let cell = self.get_mut(row, x);
+                        cell.ch = ' ';
+                        cell.fg = span.fg;
+                        if let Some(bg) = span.bg.or(line.bg) {
+                            cell.bg = bg;
+                        }
+                        cell.flags = CellFlag(if x < deco_end {
+                            span_flags(span) | CellFlag::DECORATION
+                        } else {
+                            span_flags(span)
+                        });
+                        x += 1;
+                    }
+                    continue;
+                }
                 // Skip zero-width chars (variation selectors, combining marks).
                 if cw == 0 {
                     continue;

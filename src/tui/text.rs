@@ -218,6 +218,9 @@ pub fn display_width(s: &str) -> usize {
 /// Emoji_Presentation may render wider on certain terminals — that's
 /// a terminal-specific behavior we can't reliably predict.
 pub fn char_width(ch: char) -> usize {
+    if ch == '\t' {
+        return 4;
+    }
     use unicode_width::UnicodeWidthChar;
     ch.width().unwrap_or(0)
 }
