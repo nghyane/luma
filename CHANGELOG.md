@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MCP OAuth DCR client name** — use `Claude Code ({name})` format for DCR `client_name` to pass server-side allowlists
 - **MCP CLI runtime panic** — `luma mcp auth` and `luma mcp revoke` no longer panic with "Cannot start a runtime from within a runtime"
 - **Tab rendering in TUI** — tab characters (`\t`) were rendered as zero-width (skipped), causing files with tab indentation (common in JSX/TSX) to appear flush-left in diff output; tabs now expand to 4 spaces
+- **Text selection excludes line numbers** — selecting diff/edit output no longer copies gutter (line numbers, +/- markers); clipboard via OSC 52 now contains clean code only
+- **Scrollbar not copied on select** — scrollbar uses background color instead of block characters, so text selection is clean
 - **Evidence preview marker** — clearer preview marker for single-line payloads
 - **Tool-input JSON parse failures** — parse errors in tool inputs are now surfaced instead of silently dropped
 
