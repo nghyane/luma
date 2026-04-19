@@ -148,7 +148,7 @@ impl Tool for EditTool {
                 && meta.len() > MAX_EDIT_FILE_SIZE
             {
                 bail!(
-                    "File too large ({:.1} MB). Use Bash with sed for large files.",
+                    "File too large ({:.1} MB). Read the file, apply changes in memory, and use Write to replace it.",
                     meta.len() as f64 / 1_048_576.0
                 );
             }
