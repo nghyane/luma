@@ -231,8 +231,14 @@ pub fn classify(tool_name: &str, args: &serde_json::Value, result: &str) -> Opti
 
 /// Return the first `max_chars` characters of `blob`, trimmed back to
 /// the last newline so the preview never stops mid-line. Returns an
-/// empty string when the blob is short enough that the full content
-/// fits the threshold — the caller then skips the preview section.
+/// empty string when:
+///
+/// * the blob is short enough that the full content fits the threshold
+///   (the caller then skips the preview section), or
+/// * the preview window contains no newline — a mid-token cut through a
+///   JSON payload or minified SVG produces invalid syntax that misleads
+///   the reader more than a missing preview does. Better to force the
+///   caller to `Read artifact://ev/{id}` than to dangle a broken snippet.
 fn head_preview(blob: &str, max_chars: usize) -> String {
     let total = blob.chars().count();
     if total <= max_chars {
@@ -241,10 +247,13 @@ fn head_preview(blob: &str, max_chars: usize) -> String {
     let mut out: String = blob.chars().take(max_chars).collect();
     // Cut back to the last full line break so we never split a line
     // (and never a UTF-8 codepoint, since we indexed by chars).
-    if let Some(pos) = out.rfind('\n') {
-        out.truncate(pos);
+    match out.rfind('\n') {
+        Some(pos) => {
+            out.truncate(pos);
+            out
+        }
+        None => String::new(),
     }
-    out
 }
 
 /// Whether a shell command is a verification invocation (build/test/lint).
@@ -374,7 +383,23 @@ fn build_summary(tool_name: &str, args: &serde_json::Value, result: &str) -> Str
                 .collect();
             format!("$ {cmd_preview} → exit {exit}, {lines} lines, stored as artifact://ev/{{id}}")
         }
-        _ => format!("{tool_name}: {lines} lines, stored as artifact://ev/{{id}}"),
+        _ => {
+            // MCP tools and other non-shape-aware results often return a
+            // single-line JSON blob where `lines` = 1 regardless of
+            // payload size. Surface byte count too so the reader can
+            // tell whether the inline preview is the full payload or
+            // just the head.
+            let bytes = result.len();
+            if lines <= 1 {
+                format!(
+                    "{tool_name}: {bytes} bytes (single-line payload), stored as artifact://ev/{{id}}"
+                )
+            } else {
+                format!(
+                    "{tool_name}: {lines} lines / {bytes} bytes, stored as artifact://ev/{{id}}"
+                )
+            }
+        }
     };
     truncate_summary(&raw)
 }

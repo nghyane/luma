@@ -648,7 +648,16 @@ fn maybe_promote_to_evidence(
             let content = if preview.is_empty() {
                 header
             } else {
-                format!("{header}\n\n{preview}\n\n[… pull artifact://ev/{id} for the rest]")
+                // Marker tells the model the inline block is a head
+                // preview only, names the exact byte count of the full
+                // blob, and points at the URI to fetch the rest. Wording
+                // is deliberate: "preview only" + total size nudges the
+                // model to re-read when the preview is insufficient,
+                // instead of treating the snippet as the full answer.
+                let total_bytes = text.len();
+                format!(
+                    "{header}\n\n{preview}\n\n[preview only — {total_bytes} bytes total, read artifact://ev/{id} for full content]"
+                )
             };
             (rebuild(content, images), Some(id))
         }

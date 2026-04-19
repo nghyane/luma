@@ -12,6 +12,7 @@
 - Use local file tools before GitHub or web tools.
 - Use GitHub tools only for remote repositories, other refs, or explicit comparisons.
 - Use web sources for documentation, current external facts, and prior art — not to verify local implementation details.
+- When a tool result ends with `[preview only — N bytes total, read artifact://ev/...]`, the inline block is a head preview, not the full payload. If the preview does not fully answer the task, call `Read { path: "artifact://ev/..." }` — the blob is on local disk, there is no network round-trip.
 
 # Response Style
 
