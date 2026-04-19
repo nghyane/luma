@@ -4,10 +4,10 @@
 | ---------------- | -------------------------------------------- |
 | RFC              | 0015                                         |
 | Title            | MCP (Model Context Protocol) Integration     |
-| Status           | Draft                                        |
+| Status           | Accepted                                     |
 | Author(s)        | Nghia Hoang                                  |
 | Created          | 2025-07-15                                   |
-| Updated          | 2025-07-15                                   |
+| Updated          | 2026-04-18                                   |
 | Tracking issue   | N/A                                          |
 | Supersedes       | N/A                                          |
 | Superseded by    | N/A                                          |
