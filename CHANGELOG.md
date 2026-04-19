@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **MCP remote transport & OAuth auth flow** — MCP servers can now run over HTTP+SSE with full OAuth 2.0 authorization (RFC in `docs/rfc/`)
+- **MCP DCR fallback & auto-discovery** — dynamic client registration with automatic metadata discovery; `luma mcp revoke` command to clear stored tokens
+- **Bash artifact expansion** — `artifact://ev/{id}` references in shell commands are expanded to local blob paths before execution
+
+### Fixed
+- **MCP OAuth + remote server connectivity** — resolved issues with OAuth token exchange and remote MCP server connections
+- **Evidence preview marker** — clearer preview marker for single-line payloads
+- **Tool-input JSON parse failures** — parse errors in tool inputs are now surfaced instead of silently dropped
+
 ## [0.4.0-beta.22] - 2026-04-17
 
 ### Changed
