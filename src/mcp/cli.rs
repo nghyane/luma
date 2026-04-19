@@ -394,24 +394,14 @@ fn auth(args: &[String]) -> anyhow::Result<()> {
         anyhow::bail!("browser auth is only supported for remote MCP servers");
     };
 
-    let thread = std::thread::spawn({
-        let name = name.clone();
-        let entry = entry.clone();
-        move || -> anyhow::Result<()> {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
-            runtime.block_on(async {
-                super::oauth::ensure_authorizable(&name, &entry).await?;
-                super::oauth::authorize(&name, &entry)
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))
-            })
-        }
-    });
-    thread
-        .join()
-        .map_err(|_| anyhow::anyhow!("mcp auth worker thread panicked"))??;
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            super::oauth::ensure_authorizable(name, entry).await?;
+            super::oauth::authorize(name, entry)
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))
+        })
+    })?;
     println!("authorized MCP server '{name}'");
     Ok(())
 }
@@ -567,12 +557,11 @@ fn revoke(args: &[String]) -> anyhow::Result<()> {
         anyhow::bail!("revoke is only supported for remote MCP servers");
     };
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    runtime
-        .block_on(super::oauth::revoke(name, entry))
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current()
+            .block_on(super::oauth::revoke(name, entry))
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
+    })?;
     println!("revoked OAuth tokens for MCP server '{name}'");
     Ok(())
 }

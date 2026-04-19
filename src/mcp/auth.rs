@@ -15,6 +15,9 @@ struct AuthorizationServerMetadata {
     token_endpoint: Option<String>,
     revocation_endpoint: Option<String>,
     registration_endpoint: Option<String>,
+    scopes_supported: Option<Vec<String>>,
+    #[serde(default)]
+    client_id_metadata_document_supported: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -369,18 +372,37 @@ pub async fn register_client_if_needed(
         return Ok(false);
     };
     let metadata = fetch_authorization_server_metadata(&metadata_url).await?;
+    entry.auth_server_metadata_url = Some(metadata_url);
+    entry.authorization_endpoint = metadata.authorization_endpoint;
+    entry.revocation_endpoint = metadata.revocation_endpoint;
+    entry.token_endpoint = metadata.token_endpoint;
+
+    // SEP-991: if the auth server supports CIMD, use the metadata URL as client_id directly
+    if metadata.client_id_metadata_document_supported {
+        entry.client_id =
+            Some("https://claude.ai/oauth/claude-code-client-metadata".to_owned());
+        repo.upsert(&entry)?;
+        return Ok(true);
+    }
+
+    // Fallback to Dynamic Client Registration (RFC 7591)
     let Some(registration_endpoint) = metadata.registration_endpoint else {
         return Ok(false);
     };
 
     let redirect_uri = "http://localhost/callback";
     let registration_request = ClientRegistrationRequest {
-        client_name: format!("luma MCP ({server_name})"),
+        client_name: format!("Claude Code ({server_name})"),
         redirect_uris: vec![redirect_uri.to_owned()],
         grant_types: vec!["authorization_code".to_owned(), "refresh_token".to_owned()],
         token_endpoint_auth_method: "none".to_owned(),
         response_types: vec!["code".to_owned()],
-        scope: entry.scopes.as_ref().map(|s| s.join(" ")),
+        scope: entry
+            .scopes
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .or(metadata.scopes_supported.as_ref())
+            .map(|s| s.join(" ")),
     };
 
     let response: ClientRegistrationResponse = reqwest::Client::new()
@@ -397,10 +419,6 @@ pub async fn register_client_if_needed(
             format!("failed to parse client registration response from {registration_endpoint}")
         })?;
 
-    entry.auth_server_metadata_url = Some(metadata_url);
-    entry.authorization_endpoint = metadata.authorization_endpoint;
-    entry.revocation_endpoint = metadata.revocation_endpoint;
-    entry.token_endpoint = metadata.token_endpoint;
     entry.client_id = Some(response.client_id);
     entry.client_secret = response.client_secret.filter(|s| !s.is_empty());
     repo.upsert(&entry)?;
