@@ -1,10 +1,11 @@
 use super::bridge::McpTool;
-use super::config::{McpConfig, McpServerEntry};
+use super::config::{McpConfig, McpHttpServerEntry, McpServerEntry, McpStdioServerEntry};
 use crate::core::registry::Registry;
 use rmcp::model::RawContent;
 use rmcp::model::Tool as RmcpTool;
-use rmcp::service::RunningService;
-use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
+use rmcp::service::{ClientInitializeError, RunningService};
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{RoleClient, ServiceExt};
 use std::collections::HashMap;
 use tokio::process::Command;
@@ -19,7 +20,14 @@ pub struct McpConnection {
 /// Status of an MCP server.
 #[derive(Debug, Clone)]
 pub enum McpStatus {
-    Connected { tool_count: usize },
+    Connected {
+        tool_count: usize,
+        transport: &'static str,
+    },
+    NeedsAuth {
+        transport: &'static str,
+        message: String,
+    },
     Failed(String),
 }
 
@@ -36,17 +44,34 @@ impl McpManager {
         let mut statuses = HashMap::new();
 
         for (name, entry) in &config.servers {
-            match connect_stdio(name, entry).await {
+            match connect(name, entry).await {
                 Ok(conn) => {
                     let count = conn.tools.len();
-                    statuses.insert(name.clone(), McpStatus::Connected { tool_count: count });
-                    crate::dbg_log!("mcp: connected to {name} ({count} tools)");
+                    let transport = entry.transport_name();
+                    statuses.insert(
+                        name.clone(),
+                        McpStatus::Connected {
+                            tool_count: count,
+                            transport,
+                        },
+                    );
+                    crate::dbg_log!("mcp: connected to {name} via {transport} ({count} tools)");
                     connections.insert(name.clone(), conn);
                 }
                 Err(e) => {
-                    let msg = format!("{e:#}");
+                    let msg = format!("{} connection failed: {e:#}", entry.transport_name());
                     crate::dbg_log!("mcp: failed to connect to {name}: {msg}");
-                    statuses.insert(name.clone(), McpStatus::Failed(msg));
+                    if is_needs_auth_message(&msg) {
+                        statuses.insert(
+                            name.clone(),
+                            McpStatus::NeedsAuth {
+                                transport: entry.transport_name(),
+                                message: msg,
+                            },
+                        );
+                    } else {
+                        statuses.insert(name.clone(), McpStatus::Failed(msg));
+                    }
                 }
             }
         }
@@ -134,7 +159,14 @@ impl McpManager {
     }
 }
 
-async fn connect_stdio(name: &str, entry: &McpServerEntry) -> anyhow::Result<McpConnection> {
+async fn connect(name: &str, entry: &McpServerEntry) -> anyhow::Result<McpConnection> {
+    match entry {
+        McpServerEntry::Stdio(entry) => connect_stdio(name, entry).await,
+        McpServerEntry::Http(entry) => connect_remote(name, entry).await,
+    }
+}
+
+async fn connect_stdio(name: &str, entry: &McpStdioServerEntry) -> anyhow::Result<McpConnection> {
     use std::process::Stdio;
     use tokio::io::AsyncReadExt;
 
@@ -155,13 +187,10 @@ async fn connect_stdio(name: &str, entry: &McpServerEntry) -> anyhow::Result<Mcp
         }
     });
 
-    // Pipe stderr so we can include subprocess error output in connect failures.
-    // Otherwise `Stdio::inherit()` (rmcp default) lets messages leak to the user's terminal.
     let (transport, stderr_opt) = TokioChildProcess::builder(cmd)
         .stderr(Stdio::piped())
         .spawn()?;
 
-    // Capture stderr into a shared buffer so connect errors can include the last output.
     let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     if let Some(mut stderr) = stderr_opt {
         let buf = std::sync::Arc::clone(&stderr_buf);
@@ -195,6 +224,234 @@ async fn connect_stdio(name: &str, entry: &McpServerEntry) -> anyhow::Result<Mcp
         Ok(Ok(svc)) => svc,
     };
 
+    finish_connection(name, service).await
+}
+
+async fn connect_remote(name: &str, entry: &McpHttpServerEntry) -> anyhow::Result<McpConnection> {
+    let headers = merged_remote_headers(name, entry)?;
+    let mut config = StreamableHttpClientTransportConfig::with_uri(entry.url.clone())
+        .custom_headers(headers)
+        .reinit_on_expired_session(true);
+
+    if entry.r#type == "sse" {
+        config.allow_stateless = false;
+    }
+
+    let transport = StreamableHttpClientTransport::from_config(config);
+
+    let service =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), ().serve(transport)).await {
+            Err(_) => anyhow::bail!("timeout connecting to MCP server '{name}' after 30s"),
+            Ok(Ok(service)) => service,
+            Ok(Err(err)) => return handle_remote_connect_error(name, entry, err).await,
+        };
+
+    finish_connection(name, service).await
+}
+
+fn merged_remote_headers(
+    server_name: &str,
+    entry: &McpHttpServerEntry,
+) -> anyhow::Result<std::collections::HashMap<http::HeaderName, http::HeaderValue>> {
+    let mut merged = entry.headers.clone();
+
+    if let Some(helper) = &entry.headers_helper {
+        let dynamic = resolve_headers_helper(server_name, entry, helper)?;
+        merged.extend(dynamic);
+    }
+
+    let auth = crate::mcp::auth::resolve_remote_auth(server_name, entry)?;
+    if let Some(token) = auth.bearer_token {
+        merged.insert(String::from("Authorization"), format!("Bearer {token}"));
+    }
+
+    merged
+        .into_iter()
+        .map(|(header_name, header_value)| {
+            let parsed_name = header_name.parse().map_err(|e| {
+                anyhow::anyhow!(
+                    "invalid HTTP header name '{}' for MCP server '{}': {e}",
+                    header_name,
+                    server_name
+                )
+            })?;
+            let parsed_value = header_value.parse().map_err(|e| {
+                anyhow::anyhow!(
+                    "invalid HTTP header value for MCP server '{}' header '{}': {e}",
+                    server_name,
+                    header_name
+                )
+            })?;
+            Ok((parsed_name, parsed_value))
+        })
+        .collect()
+}
+
+fn resolve_headers_helper(
+    server_name: &str,
+    entry: &McpHttpServerEntry,
+    helper: &str,
+) -> anyhow::Result<HashMap<String, String>> {
+    let output = if cfg!(windows) {
+        std::process::Command::new("cmd")
+            .args(["/C", helper])
+            .env("LUMA_MCP_SERVER_NAME", server_name)
+            .env("LUMA_MCP_SERVER_URL", &entry.url)
+            .output()?
+    } else {
+        std::process::Command::new("sh")
+            .args(["-c", helper])
+            .env("LUMA_MCP_SERVER_NAME", server_name)
+            .env("LUMA_MCP_SERVER_URL", &entry.url)
+            .output()?
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "headersHelper failed for MCP server '{}': {}",
+            server_name,
+            stderr.trim()
+        );
+    }
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())?;
+    let obj = parsed.as_object().ok_or_else(|| {
+        anyhow::anyhow!(
+            "headersHelper for MCP server '{}' must return a JSON object",
+            server_name
+        )
+    })?;
+
+    obj.iter()
+        .map(|(k, v)| {
+            let value = v.as_str().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "headersHelper for MCP server '{}' returned non-string value for key '{}'",
+                    server_name,
+                    k
+                )
+            })?;
+            Ok((k.clone(), value.to_owned()))
+        })
+        .collect()
+}
+
+async fn handle_remote_connect_error(
+    name: &str,
+    entry: &McpHttpServerEntry,
+    err: ClientInitializeError,
+) -> anyhow::Result<McpConnection> {
+    let msg = format!("{err}");
+    if let Some(discovered) = discover_auth_metadata_from_error(name, entry, &msg).await? {
+        crate::dbg_log!(
+            "mcp: discovered OAuth metadata for {name} via resource metadata {}",
+            discovered
+                .resource_metadata_url
+                .as_deref()
+                .unwrap_or("<unknown>")
+        );
+    }
+    if is_auth_required_error(&msg)
+        && let Some(token) = crate::mcp::auth::refresh_access_token(name, entry).await?
+    {
+        crate::dbg_log!("mcp: refreshed OAuth token for {name}");
+        let headers = merged_remote_headers(name, entry)?;
+        let mut config = StreamableHttpClientTransportConfig::with_uri(entry.url.clone())
+            .custom_headers(headers)
+            .reinit_on_expired_session(true);
+        if entry.r#type == "sse" {
+            config.allow_stateless = false;
+        }
+        let transport = StreamableHttpClientTransport::from_config(config);
+        let service = tokio::time::timeout(std::time::Duration::from_secs(30), ().serve(transport))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("timeout reconnecting to MCP server '{name}' after refresh")
+            })??;
+        let _ = token;
+        return finish_connection(name, service).await;
+    }
+
+    if is_auth_required_error(&msg) {
+        let auth = crate::mcp::auth::resolve_remote_auth(name, entry)?;
+        if let Some(authorization_endpoint) = auth.authorization_endpoint {
+            anyhow::bail!(
+                "authentication required for MCP server '{name}' — run `luma mcp auth {name}` to authorize (authorization endpoint: {authorization_endpoint})"
+            );
+        }
+        anyhow::bail!(
+            "authentication required for MCP server '{name}' — store tokens with `luma mcp set-secret {name} --access-token ...` or configure OAuth metadata"
+        );
+    }
+
+    if is_insufficient_scope_error(&msg) {
+        anyhow::bail!(
+            "insufficient OAuth scope for MCP server '{name}' — stored token is missing required permissions"
+        );
+    }
+
+    Err(err.into())
+}
+
+fn is_auth_required_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("auth required")
+        || lower.contains("authentication required")
+        || lower.contains("www-authenticate")
+        || lower.contains("401")
+}
+
+fn is_insufficient_scope_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("insufficient scope")
+        || lower.contains("insufficient_scope")
+        || lower.contains("403")
+}
+
+fn is_needs_auth_message(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("authentication required")
+        || lower.contains("auth required")
+        || lower.contains("needs auth")
+        || lower.contains("store tokens")
+}
+
+async fn discover_auth_metadata_from_error(
+    server_name: &str,
+    entry: &McpHttpServerEntry,
+    msg: &str,
+) -> anyhow::Result<Option<crate::mcp::auth::McpOAuthEntry>> {
+    if let Some(www_authenticate) = extract_www_authenticate_header(msg) {
+        return crate::mcp::auth::discover_from_www_authenticate(
+            server_name,
+            entry,
+            &www_authenticate,
+        )
+        .await;
+    }
+    Ok(None)
+}
+
+fn extract_www_authenticate_header(msg: &str) -> Option<String> {
+    let lower = msg.to_ascii_lowercase();
+    let key = "www-authenticate";
+    let start = lower.find(key)?;
+    let value = msg[start + key.len()..]
+        .trim_start_matches([':', ' ', '='])
+        .trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+async fn finish_connection(
+    name: &str,
+    service: RunningService<RoleClient, ()>,
+) -> anyhow::Result<McpConnection> {
     let tools_result = service.list_all_tools().await?;
 
     Ok(McpConnection {
@@ -215,7 +472,6 @@ fn stderr_tail(buf: &std::sync::Arc<std::sync::Mutex<String>>) -> String {
     }
     const MAX: usize = 400;
     let start = text.len().saturating_sub(MAX);
-    // Align to char boundary.
     let start = text
         .char_indices()
         .find(|(i, _)| *i >= start)

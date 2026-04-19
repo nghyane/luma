@@ -16,6 +16,7 @@ categories = ["command-line-utilities", "development-tools"]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "process", "signal", "io-util", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
+http = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smallvec = "1"
@@ -32,7 +33,7 @@ base64 = "0.22.1"
 getrandom = "0.2"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 rusqlite = { version = "0.35", features = ["bundled"] }
-rmcp = { version = "1.5", default-features = false, features = ["client", "transport-child-process"] }
+rmcp = { version = "1.5", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
 
 [dev-dependencies]
 tempfile = "3"

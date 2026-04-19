@@ -127,15 +127,26 @@ impl super::App {
                             self.doc.info("no MCP servers configured");
                             self.doc
                                 .info("add one with: luma mcp add <name> -- <cmd> [args...]");
+                            self.doc
+                                .info("or remote: luma mcp add --transport http <name> <url>");
                         } else {
                             self.doc.info(&format!("MCP servers ({}):", statuses.len()));
                             for (name, status) in statuses {
                                 let line = match status {
-                                    crate::mcp::manager::McpStatus::Connected { tool_count } => {
-                                        format!("  ✓ {name} ({tool_count} tools)")
+                                    crate::mcp::manager::McpStatus::Connected {
+                                        tool_count,
+                                        transport,
+                                    } => {
+                                        format!("  ✓ {name} [{transport}] ({tool_count} tools)")
                                     }
                                     crate::mcp::manager::McpStatus::Failed(err) => {
                                         format!("  ✗ {name} — {err}")
+                                    }
+                                    crate::mcp::manager::McpStatus::NeedsAuth {
+                                        transport,
+                                        message,
+                                    } => {
+                                        format!("  ! {name} [{transport}] — {message}")
                                     }
                                 };
                                 self.doc.info(&line);
@@ -147,6 +158,8 @@ impl super::App {
                             self.doc.info("no MCP servers configured");
                             self.doc
                                 .info("add one with: luma mcp add <name> -- <cmd> [args...]");
+                            self.doc
+                                .info("or remote: luma mcp add --transport http <name> <url>");
                         } else {
                             self.doc.info(&format!(
                                 "{} MCP server(s) configured but not started (restart luma)",

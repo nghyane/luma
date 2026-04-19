@@ -4,28 +4,36 @@ use std::path::PathBuf;
 
 /// MCP server configuration file format.
 ///
-/// Format matches Claude Code's `mcpServers` shape byte-for-byte so config
-/// files roundtrip between the two tools without edits.
+/// Format matches Claude Code's `mcpServers` shape so config files can
+/// roundtrip between the two tools without edits.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct McpConfig {
     #[serde(rename = "mcpServers", default)]
     pub servers: HashMap<String, McpServerEntry>,
 }
 
-/// A single MCP server entry. Stdio-only for now.
+/// A single MCP server entry.
 ///
-/// Shape matches Claude Code's `McpStdioServerConfig`:
-///   - `type`: optional, defaults to "stdio" when omitted (backward compat).
-///   - `command`: required, path or name of the executable.
-///   - `args`: positional args.
-///   - `env`: environment variables.
+/// Supported transports:
+/// - stdio (default when `type` is omitted)
+/// - http (streamable HTTP)
+/// - sse (mapped to the same rmcp streamable HTTP transport configuration)
 ///
-/// Unknown fields are ignored so future Claude Code additions
-/// (sse/http transports, oauth, etc.) don't break config parsing.
+/// Unknown fields are ignored so future Claude Code additions don't break
+/// config parsing of supported entries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpServerEntry {
-    /// Transport type — "stdio" or omitted. Non-stdio types are rejected
-    /// at load time with a clear error (we only implement stdio today).
+#[serde(untagged)]
+pub enum McpServerEntry {
+    /// Backward-compatible stdio transport. Claude Code also omits
+    /// `type: "stdio"` for this shape.
+    Stdio(McpStdioServerEntry),
+    /// Remote HTTP/SSE transports.
+    Http(McpHttpServerEntry),
+}
+
+/// A stdio MCP server config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpStdioServerEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub r#type: Option<String>,
     pub command: String,
@@ -35,19 +43,62 @@ pub struct McpServerEntry {
     pub env: HashMap<String, String>,
 }
 
+/// OAuth metadata for remote MCP servers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpOAuthConfig {
+    #[serde(rename = "clientId", default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(
+        rename = "authServerMetadataUrl",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auth_server_metadata_url: Option<String>,
+}
+
+/// A remote MCP server config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpHttpServerEntry {
+    pub r#type: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
+    #[serde(
+        rename = "headersHelper",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub headers_helper: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpOAuthConfig>,
+}
+
+impl McpServerEntry {
+    /// Human-readable transport name for status and CLI output.
+    pub fn transport_name(&self) -> &'static str {
+        match self {
+            Self::Stdio(_) => "stdio",
+            Self::Http(entry) => {
+                if entry.r#type == "sse" {
+                    "sse"
+                } else {
+                    "http"
+                }
+            }
+        }
+    }
+}
+
 /// Load and merge MCP configs. Project-local overrides user-global.
 pub fn load() -> McpConfig {
     let mut merged = McpConfig::default();
 
-    // User-global
     if let Some(path) = global_config_path() {
         merge_from(&mut merged, &path);
     }
 
-    // Project-local
     merge_from(&mut merged, &PathBuf::from(".luma/mcp.json"));
 
-    // Claude Code compat fallback (only servers not already defined)
     if merged.servers.is_empty() {
         for path in claude_code_paths() {
             if merge_claude_code(&mut merged, &path) {
@@ -85,19 +136,22 @@ fn merge_from(config: &mut McpConfig, path: &PathBuf) {
         }
     };
     for (name, entry) in parsed.servers {
-        // Only stdio is supported today. Reject anything else with a log
-        // line so users running a newer config (sse/http) know why their
-        // server isn't showing up.
-        if let Some(ref t) = entry.r#type
-            && t != "stdio"
-        {
+        if supports_entry(&entry) {
+            config.servers.insert(name, entry);
+        } else {
             crate::dbg_log!(
-                "mcp: skipping '{name}' from {} — transport '{t}' not supported (stdio only)",
-                path.display()
+                "mcp: skipping '{name}' from {} — transport '{}' not supported",
+                path.display(),
+                entry.transport_name()
             );
-            continue;
         }
-        config.servers.insert(name, entry);
+    }
+}
+
+fn supports_entry(entry: &McpServerEntry) -> bool {
+    match entry {
+        McpServerEntry::Stdio(s) => s.r#type.as_deref().is_none_or(|t| t == "stdio"),
+        McpServerEntry::Http(h) => matches!(h.r#type.as_str(), "http" | "sse"),
     }
 }
 
@@ -114,16 +168,12 @@ fn merge_claude_code(config: &mut McpConfig, path: &PathBuf) -> bool {
     };
     let mut found = false;
     for (name, entry) in servers {
-        if let Ok(parsed) = serde_json::from_value::<McpServerEntry>(entry.clone()) {
-            if let Some(ref t) = parsed.r#type
-                && t != "stdio"
-            {
-                continue;
-            }
-            if !config.servers.contains_key(name) {
-                config.servers.insert(name.clone(), parsed);
-                found = true;
-            }
+        if let Ok(parsed) = serde_json::from_value::<McpServerEntry>(entry.clone())
+            && supports_entry(&parsed)
+            && !config.servers.contains_key(name)
+        {
+            config.servers.insert(name.clone(), parsed);
+            found = true;
         }
     }
     found
@@ -134,7 +184,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_claude_code_format() {
+    fn parses_claude_code_stdio_format() {
         let json = r#"{
             "mcpServers": {
                 "laravel-boost": {
@@ -145,7 +195,9 @@ mod tests {
         }"#;
         let cfg: McpConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.servers.len(), 1);
-        let entry = cfg.servers.get("laravel-boost").unwrap();
+        let McpServerEntry::Stdio(entry) = cfg.servers.get("laravel-boost").unwrap() else {
+            panic!("expected stdio entry");
+        };
         assert_eq!(entry.command, "php");
         assert_eq!(entry.args, vec!["artisan", "boost:mcp"]);
         assert!(entry.env.is_empty());
@@ -160,12 +212,60 @@ mod tests {
             }
         }"#;
         let cfg: McpConfig = serde_json::from_str(json).unwrap();
-        let entry = cfg.servers.get("x").unwrap();
+        let McpServerEntry::Stdio(entry) = cfg.servers.get("x").unwrap() else {
+            panic!("expected stdio entry");
+        };
         assert_eq!(entry.r#type.as_deref(), Some("stdio"));
     }
 
-    /// Legacy `servers` key (non-Claude-Code format) must be rejected so
-    /// users are nudged toward the standard `mcpServers` format.
+    #[test]
+    fn parses_http_entry() {
+        let json = r#"{
+            "mcpServers": {
+                "figma": {
+                    "type": "http",
+                    "url": "https://example.com/mcp",
+                    "headers": { "Authorization": "Bearer token" },
+                    "oauth": { "clientId": "abc" },
+                    "headersHelper": "print-headers"
+                }
+            }
+        }"#;
+        let cfg: McpConfig = serde_json::from_str(json).unwrap();
+        let McpServerEntry::Http(entry) = cfg.servers.get("figma").unwrap() else {
+            panic!("expected http entry");
+        };
+        assert_eq!(entry.r#type, "http");
+        assert_eq!(entry.url, "https://example.com/mcp");
+        assert_eq!(
+            entry.headers.get("Authorization").map(String::as_str),
+            Some("Bearer token")
+        );
+        assert_eq!(
+            entry.oauth.as_ref().and_then(|o| o.client_id.as_deref()),
+            Some("abc")
+        );
+        assert_eq!(entry.headers_helper.as_deref(), Some("print-headers"));
+    }
+
+    #[test]
+    fn parses_sse_entry() {
+        let json = r#"{
+            "mcpServers": {
+                "remote": {
+                    "type": "sse",
+                    "url": "https://example.com/sse"
+                }
+            }
+        }"#;
+        let cfg: McpConfig = serde_json::from_str(json).unwrap();
+        let McpServerEntry::Http(entry) = cfg.servers.get("remote").unwrap() else {
+            panic!("expected remote entry");
+        };
+        assert_eq!(entry.r#type, "sse");
+        assert_eq!(cfg.servers.get("remote").unwrap().transport_name(), "sse");
+    }
+
     #[test]
     fn ignores_legacy_servers_key() {
         let json = r#"{
@@ -177,16 +277,14 @@ mod tests {
         assert!(cfg.servers.is_empty());
     }
 
-    /// Unknown fields (future Claude Code additions like sse/http) must
-    /// not break parsing of the stdio entries we do understand.
     #[test]
     fn tolerates_unknown_fields() {
         let json = r#"{
             "mcpServers": {
                 "x": {
-                    "command": "echo",
-                    "headers": { "X-Foo": "bar" },
-                    "oauth": { "clientId": "abc" }
+                    "type": "http",
+                    "url": "https://example.com/mcp",
+                    "oauth": { "clientId": "abc", "callbackPort": 3000 }
                 }
             }
         }"#;
@@ -206,10 +304,11 @@ mod tests {
             }
         }"#;
         let cfg: McpConfig = serde_json::from_str(json).unwrap();
-        let entry = cfg.servers.get("x").unwrap();
+        let McpServerEntry::Stdio(entry) = cfg.servers.get("x").unwrap() else {
+            panic!("expected stdio entry");
+        };
         assert_eq!(entry.env.get("API_KEY").map(String::as_str), Some("secret"));
 
-        // Roundtrip must produce `mcpServers` and omit empty optional fields.
         let out = serde_json::to_string(&cfg).unwrap();
         assert!(out.contains("\"mcpServers\""));
         assert!(!out.contains("\"type\""));
