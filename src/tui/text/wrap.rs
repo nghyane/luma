@@ -128,6 +128,7 @@ fn build_wrapped_line(
         margin: false,
         indent: 0,
         bleed,
+        deco: 0,
     }
 }
 

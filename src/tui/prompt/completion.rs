@@ -122,7 +122,7 @@ pub fn dropdown_line(
             bg: Some(palette::SURFACE),
             margin: false,
             indent: 0,
-            bleed: pad,
+            bleed: pad, deco: 0,
         }
     } else {
         Line {
@@ -138,7 +138,7 @@ pub fn dropdown_line(
             bg: None,
             margin: false,
             indent: 0,
-            bleed: pad,
+            bleed: pad, deco: 0,
         }
     }
 }

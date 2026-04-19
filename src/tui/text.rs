@@ -134,6 +134,9 @@ pub struct Line {
     pub indent: u16,
     /// Bleed into left padding by this many cells (for accent bars).
     pub bleed: u16,
+    /// Number of leading characters that are decoration (line numbers, markers).
+    /// These are flagged DECORATION so they are excluded from text selection.
+    pub deco: u16,
 }
 
 impl Line {
@@ -144,7 +147,7 @@ impl Line {
             bg: None,
             margin: false,
             indent: 0,
-            bleed: 0,
+            bleed: 0, deco: 0,
         }
     }
     /// Create an empty line.
@@ -154,7 +157,7 @@ impl Line {
             bg: None,
             margin: false,
             indent: 0,
-            bleed: 0,
+            bleed: 0, deco: 0,
         }
     }
     /// Total visible character width.

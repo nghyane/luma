@@ -46,7 +46,11 @@ pub fn diff_line_lang(raw: &str, lang: Option<&str>) -> Line {
         spans.push(s);
     }
 
-    Line::new(spans)
+    let mut line = Line::new(spans);
+    // Mark gutter (indent + line number + marker) as decoration
+    // so it's excluded from text selection: "  " (2) + "NNN " (4) + "+ " (2) = 8
+    line.deco = 8;
+    line
 }
 
 /// Infer language hint from a file path extension.

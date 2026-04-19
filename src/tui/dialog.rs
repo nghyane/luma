@@ -168,7 +168,7 @@ impl Dialog {
                     bg: Some(palette::SURFACE),
                     margin: false,
                     indent: 0,
-                    bleed: 0,
+                    bleed: 0, deco: 0,
                 });
             } else {
                 // │  ● col1 <pad> col2  │

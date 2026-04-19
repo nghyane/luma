@@ -160,7 +160,7 @@ pub fn render_user(content: &[crate::core::types::ContentBlock], content_w: usiz
         bg: Some(bg),
         margin: false,
         indent: 0,
-        bleed,
+        bleed, deco: 0,
     };
 
     let mut result = vec![bar_line.clone()];
@@ -173,7 +173,7 @@ pub fn render_user(content: &[crate::core::types::ContentBlock], content_w: usiz
                 bg: Some(bg),
                 margin: false,
                 indent: 0,
-                bleed,
+                bleed, deco: 0,
             });
         }
     }

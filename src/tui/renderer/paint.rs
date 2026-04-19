@@ -96,7 +96,7 @@ fn write_line_content(
         let text_w = content_w.saturating_sub(indent);
         buf.write_line(line, row, text_col, text_w);
     } else {
-        buf.write_line(line, row, content_col, content_w);
+        buf.write_line_decorated(line, row, content_col, content_w, line.deco);
     }
 }
 
