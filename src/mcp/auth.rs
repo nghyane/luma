@@ -379,8 +379,7 @@ pub async fn register_client_if_needed(
 
     // SEP-991: if the auth server supports CIMD, use the metadata URL as client_id directly
     if metadata.client_id_metadata_document_supported {
-        entry.client_id =
-            Some("https://claude.ai/oauth/claude-code-client-metadata".to_owned());
+        entry.client_id = Some("https://claude.ai/oauth/claude-code-client-metadata".to_owned());
         repo.upsert(&entry)?;
         return Ok(true);
     }
