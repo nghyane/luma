@@ -10,10 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **MCP remote transport & OAuth auth flow** — MCP servers can now run over HTTP+SSE with full OAuth 2.0 authorization (RFC in `docs/rfc/`)
 - **MCP DCR fallback & auto-discovery** — dynamic client registration with automatic metadata discovery; `luma mcp revoke` command to clear stored tokens
+- **MCP CIMD support (SEP-991)** — when auth server advertises `client_id_metadata_document_supported`, uses URL-based client ID instead of dynamic client registration
 - **Bash artifact expansion** — `artifact://ev/{id}` references in shell commands are expanded to local blob paths before execution
 
 ### Fixed
-- **MCP OAuth + remote server connectivity** — resolved issues with OAuth token exchange and remote MCP server connections
+- **MCP remote TLS** — enabled rustls for rmcp's reqwest transport; HTTPS connections to remote MCP servers (e.g. Figma) were silently failing
+- **MCP OAuth DCR scope** — DCR requests now include `scopes_supported` from auth server metadata when entry scopes are empty (required by Figma)
+- **MCP OAuth DCR client name** — use `Claude Code ({name})` format for DCR `client_name` to pass server-side allowlists
+- **MCP CLI runtime panic** — `luma mcp auth` and `luma mcp revoke` no longer panic with "Cannot start a runtime from within a runtime"
+- **Tab rendering in TUI** — tab characters (`\t`) were rendered as zero-width (skipped), causing files with tab indentation (common in JSX/TSX) to appear flush-left in diff output; tabs now expand to 4 spaces
 - **Evidence preview marker** — clearer preview marker for single-line payloads
 - **Tool-input JSON parse failures** — parse errors in tool inputs are now surfaced instead of silently dropped
 
