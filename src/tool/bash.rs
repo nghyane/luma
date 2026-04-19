@@ -1,4 +1,5 @@
 /// Shell tool — execute commands via platform shell with streaming output and timeout.
+use crate::core::session::{Resolved, resolve_resource_path};
 use crate::core::tool::{Tool, ToolExecution};
 use crate::core::types::ToolSchema;
 use crate::tool::bash_safety;
@@ -57,7 +58,8 @@ impl Tool for BashTool {
                 "- Do NOT use interactive commands (editors, REPLs, password prompts).\n",
                 "- Dependent commands: chain with && in a single call.\n",
                 "- Only run git commit/push if explicitly instructed.\n",
-                "- Timeout default 30s, max 120s.",
+                "- Timeout default 30s, max 120s.\n",
+                "- `artifact://ev/{id}` references expand to the evidence blob's local path before the shell runs, so tools like `jq`, `grep`, `sed` can read promoted tool outputs directly (e.g. `jq '.heart' artifact://ev/ev_abc`).",
             )
             .into(),
             parameters: serde_json::json!({
@@ -84,6 +86,14 @@ impl Tool for BashTool {
             if command.is_empty() {
                 bail!("missing command argument");
             }
+
+            // Expand `artifact://ev/{id}` references to shell-quoted
+            // absolute paths before anything else sees the command. Done
+            // pre-safety so bash_safety inspects the literal path the
+            // shell will execute — not the URI that might otherwise mask
+            // a dangerous target after the shell parses it.
+            let command = expand_artifact_refs(command)?;
+            let command = command.as_str();
 
             let timeout_ms = args
                 .get("timeout")
@@ -221,6 +231,66 @@ fn accumulate(out: &mut String, tail: &mut String, truncated: &mut bool, chunk: 
             *tail = tail[start..].to_owned();
         }
     }
+}
+
+/// Expand every `artifact://ev/{id}` token in `command` to its
+/// session-local absolute path, shell-quoted.
+///
+/// Expansion runs **before** safety screening so `bash_safety` sees the
+/// real path the shell will execute. Invalid ids, non-`ev` artifact
+/// types, and unresolved blobs all fail loudly instead of silently
+/// leaving the URI in the command (where the shell would treat it as a
+/// literal filename and fail with a confusing "No such file" error).
+///
+/// Token boundary: the id consists of ASCII alphanumerics and `_`, which
+/// matches `next_evidence_id` in `core::evidence`. Anything outside that
+/// set terminates the id — whitespace, punctuation, end-of-string all
+/// work naturally.
+fn expand_artifact_refs(command: &str) -> Result<String> {
+    const PREFIX: &str = "artifact://ev/";
+    let mut out = String::with_capacity(command.len());
+    let mut rest = command;
+    while let Some(start) = rest.find(PREFIX) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + PREFIX.len()..];
+        let id_end = after
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(after.len());
+        let id = &after[..id_end];
+        if id.is_empty() {
+            bail!("empty evidence id in `artifact://ev/` reference");
+        }
+        let uri = format!("{PREFIX}{id}");
+        let path = match resolve_resource_path(&uri) {
+            Ok(Resolved::Path(p)) => p,
+            Ok(Resolved::PathStripFrontmatter(_)) => {
+                bail!("unsupported artifact type in Bash: {uri}");
+            }
+            Err(e) => bail!("cannot resolve {uri}: {e}"),
+        };
+        let path_str = path.to_string_lossy();
+        out.push_str(&shell_single_quote(&path_str));
+        rest = &after[id_end..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// Wrap `s` in single quotes for POSIX shells, escaping any embedded
+/// single quote via the classic `'\''` dance. Works for every byte
+/// sequence the shell accepts — we never inspect the bytes themselves.
+fn shell_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str(r"'\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 /// Find the largest byte index `<= idx` that is a char boundary.
@@ -366,5 +436,68 @@ mod tests {
         let big_tail: String = "│".repeat(TAIL_BYTES * 3);
         accumulate(&mut out, &mut tail, &mut truncated, &big_tail);
         assert!(tail.len() <= TAIL_BYTES * 2 + 3); // +3 for rounding to char boundary
+    }
+
+    #[test]
+    fn shell_quote_wraps_and_escapes_quotes() {
+        assert_eq!(shell_single_quote("hello"), "'hello'");
+        assert_eq!(shell_single_quote("a b"), "'a b'");
+        assert_eq!(shell_single_quote("it's"), r"'it'\''s'");
+        assert_eq!(shell_single_quote(""), "''");
+    }
+
+    #[test]
+    fn expand_noop_when_no_artifact_ref() {
+        let cmd = "jq '.foo' /tmp/x.json";
+        assert_eq!(expand_artifact_refs(cmd).unwrap(), cmd);
+    }
+
+    #[test]
+    fn expand_empty_id_is_rejected() {
+        // A bare `artifact://ev/` with nothing after must not silently
+        // produce a quoted empty path — that would crash jq/grep with a
+        // cryptic error instead of pointing at the real problem.
+        let err = expand_artifact_refs("cat artifact://ev/ here").unwrap_err();
+        assert!(err.to_string().contains("empty evidence id"));
+    }
+
+    #[test]
+    fn expand_unknown_id_surfaces_error() {
+        // No active session scope → resolver returns an error. Bash must
+        // surface it instead of leaving `artifact://ev/...` literal in
+        // the command for the shell to misread.
+        let err = expand_artifact_refs("cat artifact://ev/ev_nonexistent").unwrap_err();
+        assert!(err.to_string().contains("artifact://ev/ev_nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn expand_resolves_real_blob_in_scoped_session() {
+        use crate::core::evidence::{EvidenceDraft, EvidenceKind, EvidenceStore};
+        use crate::core::session::{scope_current_session, session_evidence_dir};
+
+        let session_id = format!("test_{}", std::process::id());
+        scope_current_session(&session_id, async {
+            let dir = session_evidence_dir(&session_id);
+            let mut store = EvidenceStore::default();
+            let draft = EvidenceDraft {
+                kind: EvidenceKind::Other,
+                summary: String::new(),
+                preview: String::new(),
+                blob: "payload".into(),
+                related_files: Vec::new(),
+            };
+            let id = store.ingest(&dir, 0, "tc_test", draft).unwrap();
+
+            let cmd = format!("cat artifact://ev/{id}");
+            let expanded = expand_artifact_refs(&cmd).unwrap();
+            let expected_tail = format!("{id}.txt'");
+            assert!(
+                expanded.starts_with("cat '") && expanded.ends_with(&expected_tail),
+                "unexpected expansion: {expanded}"
+            );
+
+            std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+        })
+        .await;
     }
 }
