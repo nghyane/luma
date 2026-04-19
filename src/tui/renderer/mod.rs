@@ -287,8 +287,18 @@ impl Renderer {
             if row >= self.buf.height {
                 continue;
             }
-            let cs = self.buf.content_start(row);
-            let ce = self.buf.content_end(row);
+            // Find actual content bounds (skip PADDING + DECORATION)
+            let mut cs = self.buf.width;
+            let mut ce: u16 = 0;
+            for c in 0..self.buf.width {
+                let cell = self.buf.get(row, c);
+                if cell.flags.is_content() && cell.ch != ' ' {
+                    if c < cs {
+                        cs = c;
+                    }
+                    ce = c + 1;
+                }
+            }
             if cs >= ce {
                 continue;
             }
