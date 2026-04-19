@@ -688,12 +688,10 @@ impl<'a> FrameDecoder<'a> {
                     if let Some(tu_tx) = tool_use_tx
                         && let Some(entry) = self.tool_uses.get(&tool_use_id)
                     {
-                        let input: serde_json::Value = if entry.arguments.is_empty() {
-                            serde_json::json!({})
-                        } else {
-                            serde_json::from_str(&entry.arguments)
-                                .unwrap_or_else(|_| serde_json::json!({}))
-                        };
+                        let input = crate::provider::json_stream::finalize_tool_input(
+                            &entry.arguments,
+                            &format!("{tool_use_id} ({})", entry.name),
+                        );
                         let _ = tu_tx
                             .send(ContentBlock::ToolUse {
                                 id: tool_use_id,
@@ -733,11 +731,10 @@ impl<'a> FrameDecoder<'a> {
             let Some(tool) = self.tool_uses.get(&id) else {
                 continue;
             };
-            let input: serde_json::Value = if tool.arguments.is_empty() {
-                json!({})
-            } else {
-                serde_json::from_str(&tool.arguments).unwrap_or_else(|_| json!({}))
-            };
+            let input = crate::provider::json_stream::finalize_tool_input(
+                &tool.arguments,
+                &format!("{id} ({})", tool.name),
+            );
             content.push(ContentBlock::ToolUse {
                 id,
                 name: tool.name.clone(),

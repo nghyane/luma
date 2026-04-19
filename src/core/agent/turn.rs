@@ -699,6 +699,26 @@ async fn execute_one(
     cancel: tokio_util::sync::CancellationToken,
     caps: crate::core::tool::ModelCaps,
 ) -> (String, ToolResultBody) {
+    // Provider decoders tag malformed tool-input JSON with a synthetic
+    // `_parse_error` field instead of feeding partial/empty input to the
+    // tool (which then fails with a cryptic "missing path argument"
+    // that doesn't tell the model what went wrong). Short-circuit here
+    // with a targeted error so the model sees the decode failure and
+    // can retry with a fresh tool call.
+    if let Some(err) = tu.input.get("_parse_error").and_then(|v| v.as_str()) {
+        let msg = format!(
+            "tool_input decode failed: {err}. The provider streamed tool \
+             arguments that did not parse as JSON. Retry the tool call \
+             — do not assume the previous arguments reached the tool."
+        );
+        tx.send_or_log(Event::ToolEnd {
+            name: tu.name.clone(),
+            summary: msg.clone(),
+        })
+        .await;
+        return (tu.id.clone(), msg.into());
+    }
+
     let skill = skill_name_from_read(&tu.name, &tu.input);
 
     let result: ToolResultBody = match registry.get(&tu.name) {
@@ -880,6 +900,48 @@ mod tests {
             elapsed.as_millis() < 100,
             "took {}ms, expected parallel",
             elapsed.as_millis()
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_error_input_short_circuits_without_running_tool() {
+        // Bug history: Anthropic decoder silently replaced unparseable
+        // tool-input buffers with `{}`, so Edit ran with no `path` and
+        // bailed "missing path argument" — useless to the model. Now
+        // the decoder tags the failure with `_parse_error`; this test
+        // locks in that the turn loop honors the tag and returns a
+        // targeted error instead of invoking the tool.
+        static CALLED: AtomicUsize = AtomicUsize::new(0);
+        CALLED.store(0, Ordering::SeqCst);
+
+        let mut registry = Registry::new();
+        registry.register(Box::new(SlowTool { counter: &CALLED }));
+
+        let (tx, _rx) = crate::event_bus::channel();
+        let cancel = CancellationToken::new();
+
+        let calls = vec![ToolUseRef {
+            id: "tc_bad".into(),
+            name: "slow".into(),
+            input: serde_json::json!({
+                "_parse_error": "EOF while parsing a string",
+                "_raw_buffer": r#"{"path":"/tmp"#,
+            }),
+        }];
+
+        let results =
+            execute_tools(&calls, &registry, &tx, cancel, Default::default(), "test").await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "tc_bad");
+        let body = results[0].1.as_text();
+        assert!(
+            body.contains("tool_input decode failed"),
+            "unexpected body: {body}"
+        );
+        assert_eq!(
+            CALLED.load(Ordering::SeqCst),
+            0,
+            "tool must not run when input failed to decode",
         );
     }
 

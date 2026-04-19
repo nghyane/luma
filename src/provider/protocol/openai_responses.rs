@@ -470,11 +470,10 @@ impl ResponsesDecoder {
             if tool.id.is_empty() || tool.name.is_empty() {
                 continue;
             }
-            let input: serde_json::Value = if tool.arguments.is_empty() {
-                serde_json::json!({})
-            } else {
-                serde_json::from_str(&tool.arguments).unwrap_or_else(|_| serde_json::json!({}))
-            };
+            let input = crate::provider::json_stream::finalize_tool_input(
+                &tool.arguments,
+                &format!("{} ({})", tool.id, tool.name),
+            );
             self.out
                 .push_back(StreamEvent::BlockComplete(ContentBlock::ToolUse {
                     id: tool.id,

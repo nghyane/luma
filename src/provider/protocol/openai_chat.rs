@@ -302,11 +302,8 @@ impl ChatDecoder {
         let mut sorted: Vec<_> = std::mem::take(&mut self.tool_map).into_iter().collect();
         sorted.sort_by_key(|(idx, _)| *idx);
         for (_, (id, name, args)) in sorted {
-            let input: serde_json::Value = if args.is_empty() {
-                serde_json::json!({})
-            } else {
-                serde_json::from_str(&args).unwrap_or_else(|_| serde_json::json!({}))
-            };
+            let input =
+                crate::provider::json_stream::finalize_tool_input(&args, &format!("{id} ({name})"));
             self.out
                 .push_back(StreamEvent::BlockComplete(ContentBlock::ToolUse {
                     id,

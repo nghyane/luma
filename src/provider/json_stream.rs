@@ -25,6 +25,39 @@ pub fn streamable_arg_for(tools: &[ToolSchema], tool_name: &str) -> Option<Strin
         .and_then(|t| t.streamable_arg.clone())
 }
 
+/// Finalize a provider's accumulated `partial_json` buffer into a
+/// tool-input `Value`.
+///
+/// Provider decoders previously dropped parse errors on the floor via
+/// `unwrap_or_else(|_| json!({}))`, which let the tool layer execute
+/// with an empty input and report a misleading error like "missing path
+/// argument" instead of surfacing the decode failure. This helper
+/// preserves the `{}` for genuinely empty buffers but tags non-empty
+/// buffers that fail to parse so `execute_one` can short-circuit with a
+/// retry-oriented error message.
+///
+/// `context` is a short label (tool id, name) for the diagnostic log.
+pub fn finalize_tool_input(args_buffer: &str, context: &str) -> serde_json::Value {
+    if args_buffer.is_empty() {
+        return serde_json::json!({});
+    }
+    match serde_json::from_str(args_buffer) {
+        Ok(v) => v,
+        Err(e) => {
+            crate::dbg_log!(
+                "tool_use {context}: failed to parse args_buffer ({len} bytes): {e}\n\
+                 raw buffer: {buf:?}",
+                len = args_buffer.len(),
+                buf = args_buffer,
+            );
+            serde_json::json!({
+                "_parse_error": e.to_string(),
+                "_raw_buffer": args_buffer,
+            })
+        }
+    }
+}
+
 /// Extracts a single top-level string field from a streaming JSON object.
 ///
 /// Call [`Self::feed`] with chunks as they arrive; it returns the unescaped
@@ -580,5 +613,36 @@ mod tests {
         assert_eq!(streamable_arg_for(&tools, "Write"), Some("content".into()));
         assert_eq!(streamable_arg_for(&tools, "Read"), None);
         assert_eq!(streamable_arg_for(&tools, "Unknown"), None);
+    }
+
+    #[test]
+    fn finalize_empty_buffer_is_empty_object() {
+        let v = finalize_tool_input("", "tc_1 (Edit)");
+        assert_eq!(v, serde_json::json!({}));
+    }
+
+    #[test]
+    fn finalize_valid_json_round_trips() {
+        let v = finalize_tool_input(r#"{"path":"/tmp/x","old_string":"a"}"#, "tc_2 (Edit)");
+        assert_eq!(v["path"], "/tmp/x");
+        assert_eq!(v["old_string"], "a");
+        assert!(v.get("_parse_error").is_none());
+    }
+
+    #[test]
+    fn finalize_malformed_json_surfaces_parse_error() {
+        // Truncated mid-string — the pre-fix behaviour silently replaced
+        // this with `{}` and downstream tools reported "missing path
+        // argument". Now the failure is tagged so the turn loop can
+        // short-circuit with a diagnostic error instead.
+        let v = finalize_tool_input(r#"{"path":"/tmp/x","old"#, "tc_3 (Edit)");
+        assert!(
+            v.get("_parse_error").and_then(|e| e.as_str()).is_some(),
+            "expected _parse_error tag, got {v}"
+        );
+        assert_eq!(
+            v.get("_raw_buffer").and_then(|b| b.as_str()),
+            Some(r#"{"path":"/tmp/x","old"#)
+        );
     }
 }

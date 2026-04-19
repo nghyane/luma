@@ -608,11 +608,9 @@ impl PendingBlock {
                 args_buffer,
                 ..
             } => {
-                let input: serde_json::Value = if args_buffer.is_empty() {
-                    serde_json::json!({})
-                } else {
-                    serde_json::from_str(&args_buffer).unwrap_or_else(|_| serde_json::json!({}))
-                };
+                let context = format!("{id} ({name})");
+                let input =
+                    crate::provider::json_stream::finalize_tool_input(&args_buffer, &context);
                 Some(ContentBlock::ToolUse { id, name, input })
             }
             Self::WebSearch { .. } => None,
