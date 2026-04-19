@@ -187,17 +187,7 @@ fn get(args: &[String]) -> anyhow::Result<()> {
                     println!("  Stored OAuth tokens: present");
                 }
             }
-            let temp_config = McpConfig {
-                servers: [(name.clone(), McpServerEntry::Http(entry.clone()))]
-                    .into_iter()
-                    .collect(),
-            };
-            let status_hint = super::manager::McpManager::start(&temp_config);
-            let status_hint = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?
-                .block_on(status_hint);
-            if let Some(status) = status_hint.statuses().get(name) {
+            if let Some(status) = remote_status_hint(name, entry)? {
                 match status {
                     super::manager::McpStatus::NeedsAuth { .. } => {
                         println!("  Status: needs auth");
@@ -213,6 +203,29 @@ fn get(args: &[String]) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn remote_status_hint(
+    name: &str,
+    entry: &McpHttpServerEntry,
+) -> anyhow::Result<Option<super::manager::McpStatus>> {
+    let temp_config = McpConfig {
+        servers: [(name.to_owned(), McpServerEntry::Http(entry.clone()))]
+            .into_iter()
+            .collect(),
+    };
+
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return Ok(None);
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    Ok(runtime.block_on(async {
+        let manager = super::manager::McpManager::start(&temp_config).await;
+        manager.statuses().get(name).cloned()
+    }))
 }
 
 /// Parse either:
@@ -381,13 +394,24 @@ fn auth(args: &[String]) -> anyhow::Result<()> {
         anyhow::bail!("browser auth is only supported for remote MCP servers");
     };
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(super::oauth::ensure_authorizable(name, entry))?;
-    runtime
-        .block_on(super::oauth::authorize(name, entry))
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let thread = std::thread::spawn({
+        let name = name.clone();
+        let entry = entry.clone();
+        move || -> anyhow::Result<()> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(async {
+                super::oauth::ensure_authorizable(&name, &entry).await?;
+                super::oauth::authorize(&name, &entry)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+            })
+        }
+    });
+    thread
+        .join()
+        .map_err(|_| anyhow::anyhow!("mcp auth worker thread panicked"))??;
     println!("authorized MCP server '{name}'");
     Ok(())
 }

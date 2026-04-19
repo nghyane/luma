@@ -7,7 +7,8 @@ use crate::auth::oauth::shared::{
 };
 
 use super::auth::{
-    McpOAuthEntry, SqliteMcpOAuthRepository, clear_tokens, resolve_remote_auth, server_key,
+    McpOAuthEntry, SqliteMcpOAuthRepository, clear_tokens, register_client_if_needed,
+    resolve_remote_auth, server_key,
 };
 use super::config::McpHttpServerEntry;
 
@@ -31,7 +32,7 @@ pub async fn authorize(server_name: &str, config: &McpHttpServerEntry) -> Result
     })?;
     let client_id = auth.client_id.clone().ok_or_else(|| {
         OAuthError::ExchangeFailed(
-            "missing client_id — configure oauth.clientId or store it with `luma mcp set-secret`"
+            "missing client_id — configure oauth.clientId, run DCR, or store it with `luma mcp set-secret`"
                 .to_owned(),
         )
     })?;
@@ -255,20 +256,26 @@ pub async fn ensure_authorizable(
             }
         }
     }
+
     let refreshed = resolve_remote_auth(server_name, config)?;
-    if refreshed.authorization_endpoint.is_none() {
+    if refreshed.client_id.is_none() {
+        register_client_if_needed(server_name, config).await?;
+    }
+
+    let final_auth = resolve_remote_auth(server_name, config)?;
+    if final_auth.authorization_endpoint.is_none() {
         return Err(anyhow!(
             "missing authorization_endpoint for MCP server '{server_name}'"
         ))
         .with_context(|| format!("MCP server '{server_name}' is not ready for browser auth"));
     }
-    if refreshed.token_endpoint.is_none() {
+    if final_auth.token_endpoint.is_none() {
         return Err(anyhow!(
             "missing token_endpoint for MCP server '{server_name}'"
         ))
         .with_context(|| format!("MCP server '{server_name}' is not ready for browser auth"));
     }
-    if refreshed.client_id.is_none() {
+    if final_auth.client_id.is_none() {
         return Err(anyhow!("missing client_id for MCP server '{server_name}'"))
             .with_context(|| format!("MCP server '{server_name}' is not ready for browser auth"));
     }

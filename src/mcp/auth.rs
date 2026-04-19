@@ -14,6 +14,24 @@ struct AuthorizationServerMetadata {
     authorization_endpoint: Option<String>,
     token_endpoint: Option<String>,
     revocation_endpoint: Option<String>,
+    registration_endpoint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ClientRegistrationRequest {
+    client_name: String,
+    redirect_uris: Vec<String>,
+    grant_types: Vec<String>,
+    token_endpoint_auth_method: String,
+    response_types: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ClientRegistrationResponse {
+    client_id: String,
+    client_secret: Option<String>,
 }
 
 /// Resource-server metadata subset used for Protected Resource Metadata discovery.
@@ -312,6 +330,81 @@ pub async fn discover_from_url_hint(
     entry.token_endpoint = metadata.token_endpoint;
     repo.upsert(&entry)?;
     Ok(entry.authorization_endpoint.is_some() && entry.token_endpoint.is_some())
+}
+
+pub async fn register_client_if_needed(
+    server_name: &str,
+    config: &McpHttpServerEntry,
+) -> anyhow::Result<bool> {
+    let key = server_key(server_name, config);
+    let repo = SqliteMcpOAuthRepository::with_default_path();
+    let mut entry = repo.get(&key)?.unwrap_or(McpOAuthEntry {
+        server_key: key,
+        server_name: server_name.to_owned(),
+        server_url: config.url.clone(),
+        client_id: config.oauth.as_ref().and_then(|x| x.client_id.clone()),
+        client_secret: None,
+        access_token: None,
+        refresh_token: None,
+        auth_server_metadata_url: None,
+        resource_metadata_url: None,
+        authorization_endpoint: None,
+        revocation_endpoint: None,
+        scopes: None,
+        token_endpoint: None,
+        expires_at_unix_ms: None,
+    });
+
+    if entry.client_id.is_some() {
+        return Ok(true);
+    }
+
+    let metadata_url = entry.auth_server_metadata_url.clone().or_else(|| {
+        config
+            .oauth
+            .as_ref()
+            .and_then(|oauth| oauth.auth_server_metadata_url.clone())
+    });
+    let Some(metadata_url) = metadata_url else {
+        return Ok(false);
+    };
+    let metadata = fetch_authorization_server_metadata(&metadata_url).await?;
+    let Some(registration_endpoint) = metadata.registration_endpoint else {
+        return Ok(false);
+    };
+
+    let redirect_uri = "http://localhost/callback";
+    let registration_request = ClientRegistrationRequest {
+        client_name: format!("luma MCP ({server_name})"),
+        redirect_uris: vec![redirect_uri.to_owned()],
+        grant_types: vec!["authorization_code".to_owned(), "refresh_token".to_owned()],
+        token_endpoint_auth_method: "none".to_owned(),
+        response_types: vec!["code".to_owned()],
+        scope: entry.scopes.as_ref().map(|s| s.join(" ")),
+    };
+
+    let response: ClientRegistrationResponse = reqwest::Client::new()
+        .post(&registration_endpoint)
+        .json(&registration_request)
+        .send()
+        .await
+        .with_context(|| format!("failed to call registration endpoint {registration_endpoint}"))?
+        .error_for_status()
+        .with_context(|| format!("registration failed at {registration_endpoint}"))?
+        .json()
+        .await
+        .with_context(|| {
+            format!("failed to parse client registration response from {registration_endpoint}")
+        })?;
+
+    entry.auth_server_metadata_url = Some(metadata_url);
+    entry.authorization_endpoint = metadata.authorization_endpoint;
+    entry.revocation_endpoint = metadata.revocation_endpoint;
+    entry.token_endpoint = metadata.token_endpoint;
+    entry.client_id = Some(response.client_id);
+    entry.client_secret = response.client_secret.filter(|s| !s.is_empty());
+    repo.upsert(&entry)?;
+    Ok(true)
 }
 
 /// Refresh a bearer token using an OAuth refresh token if enough metadata is available.
