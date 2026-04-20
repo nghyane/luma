@@ -345,6 +345,13 @@ fn msg_images(
         .collect()
 }
 
+/// Kiro/Q Developer API has no `system` role. System messages are injected as
+/// a synthetic user→assistant pair at the start of history, matching the
+/// approach used by the official Q Developer CLI (`context_messages`).
+const SYSTEM_ACK: &str = "I will fully incorporate this information when \
+    generating my responses, and explicitly acknowledge relevant parts when \
+    answering questions.";
+
 fn build_history(
     messages: &[Message],
     model_id: &str,
@@ -354,6 +361,23 @@ fn build_history(
     let mut result = Vec::new();
     for msg in messages {
         match msg.role {
+            Role::System => {
+                let content = msg_text(msg);
+                if !content.is_empty() {
+                    result.push(build_user_input_message(
+                        &content,
+                        model_id,
+                        &env_state,
+                        None,
+                        None,
+                        msg,
+                        resolve,
+                    ));
+                    result.push(
+                        json!({ "assistantResponseMessage": { "content": SYSTEM_ACK } }),
+                    );
+                }
+            }
             Role::User => {
                 let tool_results = extract_tool_results(msg);
                 let content = if tool_results.is_empty() {
@@ -380,7 +404,6 @@ fn build_history(
                 }
                 result.push(json!({ "assistantResponseMessage": assistant_msg }));
             }
-            _ => {}
         }
     }
     result

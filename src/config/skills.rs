@@ -35,10 +35,12 @@ pub fn discover() -> Vec<Skill> {
 pub fn discovery_roots() -> Vec<PathBuf> {
     let home = super::home_dir();
     vec![
+        PathBuf::from(".luma/skills"),
         PathBuf::from(".agents/skills"),
         PathBuf::from(".claude/skills"),
         PathBuf::from(".kiro/skills"),
         PathBuf::from(".codex/skills"),
+        home.join(".luma/skills"),
         home.join(".agents/skills"),
         home.join(".claude/skills"),
         home.join(".kiro/skills"),
