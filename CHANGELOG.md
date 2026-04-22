@@ -8,10 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.5.0-beta.2] - 2025-07-17
 
 ### Fixed
+- **Kimi reasoning not streamed** — OpenAI Chat decoder only read `delta.reasoning_content` (DeepSeek shape). Kimi via OpenCode Go returns reasoning via `delta.reasoning` (string) and `delta.reasoning_details[].text` (array). Added fallbacks for all three shapes.
 - **Kiro system prompt dropped** — Kiro/Q Developer API has no `system` role; system messages (skills, tool descriptions, project instructions) were silently discarded. Now injected as a synthetic user→assistant pair at the start of history, matching the official Q Developer CLI behavior
 
 ### Added
 - **`.luma/skills/` discovery root** — skill scan now checks `.luma/skills/` (workspace) and `~/.luma/skills/` (user-wide) with highest priority
+- **OpenCode Go models** — added `kimi-k2.6`, `qwen3.5-plus`, `qwen3.6-plus`; updated `context_window` and `max_output_tokens` for all opencode-go models to match current provider specs
 
 ## [0.5.0-beta.1] - 2026-04-19
 
