@@ -240,7 +240,19 @@ impl ChatDecoder {
         }
         let delta = &choice["delta"];
         if !delta.is_null() {
+            // Reasoning — multiple OpenAI-compatible providers use
+            // different field names for the same concept. Check in
+            // priority order so the first non-empty match wins.
             if let Some(t) = delta["reasoning_content"].as_str()
+                && !t.is_empty()
+            {
+                self.out.push_back(StreamEvent::ThinkingDelta(t.to_owned()));
+            } else if let Some(t) = delta["reasoning"].as_str()
+                && !t.is_empty()
+            {
+                self.out.push_back(StreamEvent::ThinkingDelta(t.to_owned()));
+            } else if let Some(details) = delta["reasoning_details"].as_array()
+                && let Some(t) = details.first().and_then(|d| d["text"].as_str())
                 && !t.is_empty()
             {
                 self.out.push_back(StreamEvent::ThinkingDelta(t.to_owned()));
@@ -593,5 +605,71 @@ mod tests {
         assert_eq!(api[0]["content"].as_str(), Some("hello"));
         // No "omitted" note for text-only results.
         assert!(!api[0]["content"].as_str().unwrap().contains("omitted"));
+    }
+
+    /// Kimi (via OpenCode Go) returns reasoning via `delta.reasoning`
+    /// and `delta.reasoning_details[].text` rather than the more common
+    /// `delta.reasoning_content`. The decoder must emit `ThinkingDelta`
+    /// for all three shapes.
+    #[test]
+    fn reasoning_delta_from_reasoning_content() {
+        let mut d = ChatDecoder::new();
+        d.feed(&serde_json::json!({
+            "choices": [{
+                "delta": { "reasoning_content": "Let me think" },
+                "finish_reason": null
+            }]
+        }));
+        let evt = d.out.pop_front().unwrap();
+        assert!(matches!(evt, StreamEvent::ThinkingDelta(ref t) if t == "Let me think"));
+    }
+
+    #[test]
+    fn reasoning_delta_from_reasoning_field() {
+        let mut d = ChatDecoder::new();
+        d.feed(&serde_json::json!({
+            "choices": [{
+                "delta": { "reasoning": "Hmm, ", "content": "" },
+                "finish_reason": null
+            }]
+        }));
+        let evt = d.out.pop_front().unwrap();
+        assert!(matches!(evt, StreamEvent::ThinkingDelta(ref t) if t == "Hmm, "));
+    }
+
+    #[test]
+    fn reasoning_delta_from_reasoning_details() {
+        let mut d = ChatDecoder::new();
+        d.feed(&serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "content": "",
+                    "reasoning_details": [{
+                        "type": "reasoning.text",
+                        "text": "First step:"
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }));
+        let evt = d.out.pop_front().unwrap();
+        assert!(matches!(evt, StreamEvent::ThinkingDelta(ref t) if t == "First step:"));
+    }
+
+    #[test]
+    fn reasoning_field_does_not_leak_into_text() {
+        // `reasoning` must NOT be treated as normal content.
+        let mut d = ChatDecoder::new();
+        d.feed(&serde_json::json!({
+            "choices": [{
+                "delta": { "reasoning": "thinking...", "content": "Answer: 42" },
+                "finish_reason": null
+            }]
+        }));
+        // First event should be ThinkingDelta, second TextDelta.
+        let e1 = d.out.pop_front().unwrap();
+        let e2 = d.out.pop_front().unwrap();
+        assert!(matches!(e1, StreamEvent::ThinkingDelta(ref t) if t == "thinking..."));
+        assert!(matches!(e2, StreamEvent::TextDelta(ref t) if t == "Answer: 42"));
     }
 }
