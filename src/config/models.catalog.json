@@ -117,34 +117,40 @@
         ]
     },
     {
-        "id": "kimi-k2.5",
-        "source": "opencode-go",
-        "context_window": 200000,
-        "max_output_tokens": 16000
-    },
-    {
         "id": "glm-5",
         "source": "opencode-go",
-        "context_window": 200000,
-        "max_output_tokens": 16000
+        "context_window": 204800,
+        "max_output_tokens": 131072
     },
     {
         "id": "glm-5.1",
         "source": "opencode-go",
-        "context_window": 200000,
-        "max_output_tokens": 16000
+        "context_window": 204800,
+        "max_output_tokens": 131072
+    },
+    {
+        "id": "kimi-k2.5",
+        "source": "opencode-go",
+        "context_window": 262144,
+        "max_output_tokens": 65536
+    },
+    {
+        "id": "kimi-k2.6",
+        "source": "opencode-go",
+        "context_window": 262144,
+        "max_output_tokens": 65536
     },
     {
         "id": "mimo-v2-pro",
         "source": "opencode-go",
-        "context_window": 200000,
-        "max_output_tokens": 16000
+        "context_window": 1048576,
+        "max_output_tokens": 64000
     },
     {
         "id": "mimo-v2-omni",
         "source": "opencode-go",
-        "context_window": 200000,
-        "max_output_tokens": 16000,
+        "context_window": 262144,
+        "max_output_tokens": 64000,
         "capabilities": [
             "vision"
         ]
@@ -152,14 +158,26 @@
     {
         "id": "minimax-m2.5",
         "source": "opencode-go",
-        "context_window": 200000,
-        "max_output_tokens": 16000
+        "context_window": 204800,
+        "max_output_tokens": 65536
     },
     {
         "id": "minimax-m2.7",
         "source": "opencode-go",
-        "context_window": 200000,
-        "max_output_tokens": 16000
+        "context_window": 204800,
+        "max_output_tokens": 131072
+    },
+    {
+        "id": "qwen3.5-plus",
+        "source": "opencode-go",
+        "context_window": 262144,
+        "max_output_tokens": 65536
+    },
+    {
+        "id": "qwen3.6-plus",
+        "source": "opencode-go",
+        "context_window": 262144,
+        "max_output_tokens": 65536
     },
     {
         "id": "auto",

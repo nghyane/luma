@@ -21,10 +21,13 @@ const MODELS: &[(&str, ProtocolId)] = &[
     ("glm-5", ProtocolId::OpenAIChat),
     ("glm-5.1", ProtocolId::OpenAIChat),
     ("kimi-k2.5", ProtocolId::OpenAIChat),
+    ("kimi-k2.6", ProtocolId::OpenAIChat),
     ("mimo-v2-pro", ProtocolId::OpenAIChat),
     ("mimo-v2-omni", ProtocolId::OpenAIChat),
     ("minimax-m2.5", ProtocolId::AnthropicMessages),
     ("minimax-m2.7", ProtocolId::AnthropicMessages),
+    ("qwen3.5-plus", ProtocolId::OpenAIChat),
+    ("qwen3.6-plus", ProtocolId::OpenAIChat),
 ];
 
 impl Gateway for OpenCodeGo {
