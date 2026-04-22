@@ -147,7 +147,8 @@ impl Line {
             bg: None,
             margin: false,
             indent: 0,
-            bleed: 0, deco: 0,
+            bleed: 0,
+            deco: 0,
         }
     }
     /// Create an empty line.
@@ -157,7 +158,8 @@ impl Line {
             bg: None,
             margin: false,
             indent: 0,
-            bleed: 0, deco: 0,
+            bleed: 0,
+            deco: 0,
         }
     }
     /// Total visible character width.

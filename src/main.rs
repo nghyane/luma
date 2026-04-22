@@ -89,6 +89,7 @@ async fn main() {
         }
         Some("auth") => {
             for provider in [
+                config::auth::AuthVendor::Alibaba,
                 config::auth::AuthVendor::Anthropic,
                 config::auth::AuthVendor::OpenAI,
                 config::auth::AuthVendor::OpenCodeGo,

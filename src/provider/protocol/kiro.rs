@@ -365,17 +365,9 @@ fn build_history(
                 let content = msg_text(msg);
                 if !content.is_empty() {
                     result.push(build_user_input_message(
-                        &content,
-                        model_id,
-                        &env_state,
-                        None,
-                        None,
-                        msg,
-                        resolve,
+                        &content, model_id, &env_state, None, None, msg, resolve,
                     ));
-                    result.push(
-                        json!({ "assistantResponseMessage": { "content": SYSTEM_ACK } }),
-                    );
+                    result.push(json!({ "assistantResponseMessage": { "content": SYSTEM_ACK } }));
                 }
             }
             Role::User => {

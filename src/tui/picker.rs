@@ -97,7 +97,8 @@ impl Picker {
                     bg: Some(palette::SURFACE),
                     margin: false,
                     indent: 0,
-                    bleed: 0, deco: 0,
+                    bleed: 0,
+                    deco: 0,
                 });
             } else {
                 lines.push(Line {
@@ -116,7 +117,8 @@ impl Picker {
                     bg: None,
                     margin: false,
                     indent: 0,
-                    bleed: 0, deco: 0,
+                    bleed: 0,
+                    deco: 0,
                 });
             }
         }

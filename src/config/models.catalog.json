@@ -1,9 +1,98 @@
 [
     {
-        "id": "claude-haiku-4-5-20251001",
-        "source": "anthropic",
+        "id": "qwen3.5-plus",
+        "source": "alibaba",
+        "context_window": 262144,
+        "max_output_tokens": 65536,
+        "capabilities": [
+            "vision"
+        ]
+    },
+    {
+        "id": "qwen3-coder-plus",
+        "source": "alibaba",
+        "context_window": 262144,
+        "max_output_tokens": 65536,
+        "capabilities": []
+    },
+    {
+        "id": "qwen3-coder-next",
+        "source": "alibaba",
+        "context_window": 256000,
+        "max_output_tokens": 65536,
+        "capabilities": []
+    },
+    {
+        "id": "qwen3-max-2026-01-23",
+        "source": "alibaba",
+        "context_window": 1000000,
+        "max_output_tokens": 65536,
+        "capabilities": [
+            "vision"
+        ]
+    },
+    {
+        "id": "glm-4.7",
+        "source": "alibaba",
+        "context_window": 204800,
+        "max_output_tokens": 131072,
+        "capabilities": []
+    },
+    {
+        "id": "glm-5",
+        "source": "alibaba",
+        "context_window": 204800,
+        "max_output_tokens": 131072,
+        "capabilities": []
+    },
+    {
+        "id": "kimi-k2.5",
+        "source": "alibaba",
+        "context_window": 262144,
+        "max_output_tokens": 65536,
+        "capabilities": [
+            "vision"
+        ]
+    },
+    {
+        "id": "minimax-m2.5",
+        "source": "alibaba",
+        "context_window": 204800,
+        "max_output_tokens": 65536,
+        "capabilities": []
+    },
+    {
+        "id": "claude-sonnet-4-5",
+        "source": "alibaba",
         "context_window": 200000,
         "max_output_tokens": 64000,
+        "capabilities": [
+            "vision"
+        ]
+    },
+    {
+        "id": "claude-sonnet-4-6",
+        "source": "alibaba",
+        "context_window": 1000000,
+        "max_output_tokens": 64000,
+        "capabilities": [
+            "vision"
+        ]
+    },
+    {
+        "id": "claude-opus-4-5",
+        "source": "alibaba",
+        "context_window": 200000,
+        "max_output_tokens": 64000,
+        "capabilities": [
+            "vision"
+        ]
+    },
+    {
+        "id": "claude-opus-4-6",
+        "source": "alibaba",
+        "context_window": 1000000,
+        "max_output_tokens": 128000,
         "capabilities": [
             "vision"
         ]

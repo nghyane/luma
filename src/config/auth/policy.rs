@@ -18,6 +18,9 @@ impl AuthVendor {
         scopes: Option<&[String]>,
     ) -> RefreshRequest {
         match self {
+            Self::Alibaba => {
+                unreachable!("alibaba coding plan does not use OAuth refresh")
+            }
             Self::Anthropic => {
                 let mut body = serde_json::json!({
                     "grant_type": "refresh_token",

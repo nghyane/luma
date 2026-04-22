@@ -423,7 +423,8 @@ mod tests {
             bg: Some(palette::USER_BG),
             margin: false,
             indent: 0,
-            bleed: 0, deco: 0,
+            bleed: 0,
+            deco: 0,
         };
         let reg = r.slots[0].region.clone();
         paint::paint_region(&mut r.buf, &reg, [user_line].iter());
