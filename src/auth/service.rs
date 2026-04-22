@@ -196,6 +196,16 @@ impl<R: AuthRepository> AuthService<R> {
     }
 
     pub fn save_api_key(&self, vendor: AuthVendor, token: &str) -> Result<AccountView, AuthError> {
+        self.save_api_key_with_url(vendor, token, None)
+    }
+
+    /// Save an API key with an optional per-account base URL.
+    pub fn save_api_key_with_url(
+        &self,
+        vendor: AuthVendor,
+        token: &str,
+        base_url: Option<String>,
+    ) -> Result<AccountView, AuthError> {
         let fingerprint = api_key_fingerprint(token);
         let display_name = format!("{}:key:{}", vendor.as_str(), fingerprint);
         let record = AccountRecord {
@@ -209,7 +219,10 @@ impl<R: AuthRepository> AuthService<R> {
                 token: token.to_owned(),
             }),
             health: AccountHealth::Active,
-            metadata: AccountMetadata::default(),
+            metadata: AccountMetadata {
+                base_url,
+                ..AccountMetadata::default()
+            },
         };
 
         self.mutate(|store| upsert_account(store, record.clone()))?;
@@ -365,6 +378,7 @@ impl<R: AuthRepository> AuthService<R> {
             label: refreshed.display_name,
             profile_arn: refreshed.metadata.profile_arn,
             account_key: Some(refreshed.key),
+            base_url: refreshed.metadata.base_url,
         })
     }
 
@@ -474,6 +488,7 @@ fn credential_from_record(record: AccountRecord) -> crate::config::auth::Credent
         label: record.display_name,
         profile_arn: record.metadata.profile_arn,
         account_key: Some(record.key),
+        base_url: record.metadata.base_url,
     }
 }
 

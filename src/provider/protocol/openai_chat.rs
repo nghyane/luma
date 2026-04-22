@@ -9,6 +9,38 @@ use anyhow::Result;
 use futures::stream::{BoxStream, StreamExt};
 use std::collections::{HashMap, VecDeque};
 
+/// Provider-specific request customizations for OpenAI-compatible chat.
+#[derive(Debug, Clone, Default)]
+pub struct OpenAIChatConfig {
+    extra_body: Option<serde_json::Value>,
+    endpoint_path: Option<&'static str>,
+    /// Override the default `Authorization` header name.
+    auth_header: Option<&'static str>,
+}
+
+impl OpenAIChatConfig {
+    /// Return a config with an extra JSON body merged at the top level.
+    pub fn with_extra_body(extra_body: serde_json::Value) -> Self {
+        Self {
+            extra_body: Some(extra_body),
+            endpoint_path: None,
+            auth_header: None,
+        }
+    }
+
+    /// Override the endpoint path appended to the base URL.
+    pub fn with_endpoint_path(mut self, endpoint_path: &'static str) -> Self {
+        self.endpoint_path = Some(endpoint_path);
+        self
+    }
+
+    /// Override the auth header name (default: `Authorization`).
+    pub fn with_auth_header(mut self, header: &'static str) -> Self {
+        self.auth_header = Some(header);
+        self
+    }
+}
+
 /// OpenAI chat completions provider (also works with Codex).
 pub struct OpenAIChatRuntime {
     model: String,
@@ -16,6 +48,7 @@ pub struct OpenAIChatRuntime {
     base_url: String,
     api_key: String,
     account_label: String,
+    config: OpenAIChatConfig,
 }
 
 impl OpenAIChatRuntime {
@@ -24,12 +57,30 @@ impl OpenAIChatRuntime {
     /// slash (e.g. `https://api.openai.com`); the runtime appends
     /// `/v1/chat/completions`.
     pub fn new(model: &str, base_url: &str, api_key: &str, account_label: &str) -> Self {
+        Self::new_with_config(
+            model,
+            base_url,
+            api_key,
+            account_label,
+            OpenAIChatConfig::default(),
+        )
+    }
+
+    /// Create with provider-specific request customizations.
+    pub fn new_with_config(
+        model: &str,
+        base_url: &str,
+        api_key: &str,
+        account_label: &str,
+        config: OpenAIChatConfig,
+    ) -> Self {
         Self {
             model: model.to_owned(),
             max_tokens: DEFAULT_MAX_TOKENS,
             base_url: base_url.to_owned(),
             api_key: api_key.to_owned(),
             account_label: account_label.to_owned(),
+            config,
         }
     }
 
@@ -55,6 +106,14 @@ impl OpenAIChatRuntime {
         });
         if !api_tools.is_empty() {
             body["tools"] = api_tools.into();
+        }
+        if let Some(extra_body) = &self.config.extra_body
+            && let (Some(body_obj), Some(extra_obj)) =
+                (body.as_object_mut(), extra_body.as_object())
+        {
+            for (key, value) in extra_obj {
+                body_obj.insert(key.clone(), value.clone());
+            }
         }
         body
     }
@@ -106,12 +165,14 @@ impl Provider for OpenAIChatRuntime {
             );
 
             let auth_header = format!("Bearer {}", self.api_key);
-            let headers = [("Authorization", auth_header.as_str())];
+            let auth_name = self.config.auth_header.unwrap_or("Authorization");
+            let headers = [(auth_name, auth_header.as_str())];
 
+            let endpoint_path = self.config.endpoint_path.unwrap_or("/v1/chat/completions");
             let sse = post_sse(
                 "openai",
                 &self.account_label,
-                &format!("{}/v1/chat/completions", self.base_url),
+                &format!("{}{}", self.base_url, endpoint_path),
                 &headers,
                 &body,
                 &tx,
@@ -671,5 +732,29 @@ mod tests {
         let e2 = d.out.pop_front().unwrap();
         assert!(matches!(e1, StreamEvent::ThinkingDelta(ref t) if t == "thinking..."));
         assert!(matches!(e2, StreamEvent::TextDelta(ref t) if t == "Answer: 42"));
+    }
+
+    #[test]
+    fn request_body_merges_extra_body_top_level() {
+        let runtime = OpenAIChatRuntime::new_with_config(
+            "qwen3.5-plus",
+            "https://coding-intl.dashscope.aliyuncs.com/v1",
+            "sk-test",
+            "acct",
+            OpenAIChatConfig::with_extra_body(serde_json::json!({
+                "enable_thinking": true,
+            })),
+        );
+        let body =
+            runtime.build_request_body(&[], &[], &[], &|_| String::new(), DEFAULT_MAX_TOKENS);
+
+        assert_eq!(body["enable_thinking"], serde_json::json!(true));
+        assert_eq!(body["model"], serde_json::json!("qwen3.5-plus"));
+    }
+
+    #[test]
+    fn custom_endpoint_path_is_stored() {
+        let config = OpenAIChatConfig::default().with_endpoint_path("/chat/completions");
+        assert_eq!(config.endpoint_path, Some("/chat/completions"));
     }
 }

@@ -91,7 +91,9 @@ mod tests {
 
     #[test]
     fn from_source_known_and_fallback() {
+        assert_eq!(GatewayId::from_source("alibaba"), GatewayId::Alibaba);
         assert_eq!(GatewayId::from_source("anthropic"), GatewayId::Anthropic);
+        assert_eq!(GatewayId::from_source("cloudflare"), GatewayId::Cloudflare);
         assert_eq!(GatewayId::from_source("codex"), GatewayId::Codex);
         assert_eq!(GatewayId::from_source("openai"), GatewayId::OpenAI);
         assert_eq!(GatewayId::from_source("opencode-go"), GatewayId::OpenCodeGo);
@@ -100,6 +102,14 @@ mod tests {
 
     #[test]
     fn resolve_picks_per_model_protocol_on_opencode_go() {
+        assert_eq!(
+            resolve("alibaba", "qwen3-coder-next").protocol,
+            ProtocolId::OpenAIChat
+        );
+        assert_eq!(
+            resolve("alibaba", "claude-sonnet-4-6").protocol,
+            ProtocolId::AnthropicMessages
+        );
         assert_eq!(
             resolve("opencode-go", "kimi-k2.5").protocol,
             ProtocolId::OpenAIChat

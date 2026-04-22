@@ -21,7 +21,9 @@ use crate::provider::quirks::QuirkSet;
 /// entry; consumed by `AgentConfig.source` parsing and registry lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GatewayId {
+    Alibaba,
     Anthropic,
+    Cloudflare,
     Codex,
     Kiro,
     OpenAI,

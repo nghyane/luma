@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthVendor {
+    Alibaba,
     Anthropic,
+    Cloudflare,
     #[serde(rename = "openai")]
     OpenAI,
     #[serde(rename = "opencode-go")]
@@ -23,7 +25,9 @@ pub enum AuthVendor {
 impl AuthVendor {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Alibaba => "alibaba",
             Self::Anthropic => "anthropic",
+            Self::Cloudflare => "cloudflare",
             Self::OpenAI => "openai",
             Self::OpenCodeGo => "opencode-go",
             Self::Kiro => "kiro",
@@ -33,7 +37,9 @@ impl AuthVendor {
     #[allow(dead_code)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
+            "alibaba" => Some(Self::Alibaba),
             "anthropic" => Some(Self::Anthropic),
+            "cloudflare" => Some(Self::Cloudflare),
             "openai" | "codex" => Some(Self::OpenAI),
             "opencode-go" => Some(Self::OpenCodeGo),
             "kiro" => Some(Self::Kiro),
@@ -166,6 +172,10 @@ pub struct AccountMetadata {
     pub auth_flow: Option<AuthFlow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oidc_client: Option<SsoOidcClient>,
+    /// Custom base URL for gateways where the endpoint is user-specific
+    /// (e.g. Cloudflare AI Gateway).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
 }
 
 /// How this account was authenticated — determines refresh routing.
@@ -262,7 +272,9 @@ pub enum AuthFailure {
 impl From<crate::config::auth::AuthVendor> for AuthVendor {
     fn from(v: crate::config::auth::AuthVendor) -> Self {
         match v {
+            crate::config::auth::AuthVendor::Alibaba => Self::Alibaba,
             crate::config::auth::AuthVendor::Anthropic => Self::Anthropic,
+            crate::config::auth::AuthVendor::Cloudflare => Self::Cloudflare,
             crate::config::auth::AuthVendor::OpenAI => Self::OpenAI,
             crate::config::auth::AuthVendor::OpenCodeGo => Self::OpenCodeGo,
             crate::config::auth::AuthVendor::Kiro => Self::Kiro,
@@ -273,7 +285,9 @@ impl From<crate::config::auth::AuthVendor> for AuthVendor {
 impl From<AuthVendor> for crate::config::auth::AuthVendor {
     fn from(v: AuthVendor) -> Self {
         match v {
+            AuthVendor::Alibaba => Self::Alibaba,
             AuthVendor::Anthropic => Self::Anthropic,
+            AuthVendor::Cloudflare => Self::Cloudflare,
             AuthVendor::OpenAI => Self::OpenAI,
             AuthVendor::OpenCodeGo => Self::OpenCodeGo,
             AuthVendor::Kiro => Self::Kiro,
@@ -337,6 +351,7 @@ mod tests {
     #[test]
     fn vendor_roundtrip_from_str() {
         for (s, v) in [
+            ("alibaba", AuthVendor::Alibaba),
             ("anthropic", AuthVendor::Anthropic),
             ("openai", AuthVendor::OpenAI),
             ("opencode-go", AuthVendor::OpenCodeGo),
@@ -353,6 +368,7 @@ mod tests {
     fn legacy_vendor_conversion_roundtrip() {
         use crate::config::auth::AuthVendor as LegacyVendor;
         let pairs = [
+            (LegacyVendor::Alibaba, AuthVendor::Alibaba),
             (LegacyVendor::Anthropic, AuthVendor::Anthropic),
             (LegacyVendor::OpenAI, AuthVendor::OpenAI),
             (LegacyVendor::OpenCodeGo, AuthVendor::OpenCodeGo),

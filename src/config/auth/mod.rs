@@ -11,7 +11,9 @@ pub(crate) use codex_identity::{CODEX_ORIGINATOR, codex_user_agent, resolve_inst
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthVendor {
+    Alibaba,
     Anthropic,
+    Cloudflare,
     OpenAI,
     OpenCodeGo,
     Kiro,
@@ -20,7 +22,9 @@ pub enum AuthVendor {
 impl AuthVendor {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Alibaba => "alibaba",
             Self::Anthropic => "anthropic",
+            Self::Cloudflare => "cloudflare",
             Self::OpenAI => "openai",
             Self::OpenCodeGo => "opencode-go",
             Self::Kiro => "kiro",
@@ -36,6 +40,8 @@ pub struct Credential {
     pub label: String,
     pub profile_arn: Option<String>,
     pub account_key: Option<crate::auth::domain::AccountKey>,
+    /// Custom base URL for gateways with user-specific endpoints.
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]

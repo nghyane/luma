@@ -137,6 +137,27 @@ pub fn has_synced() -> bool {
     snapshot_path().exists()
 }
 
+/// Add custom models to the snapshot. Merges with existing models,
+/// deduplicating by `(source, id)`.
+pub fn add_custom_models(new_models: Vec<ModelEntry>) {
+    let mut models = all_models();
+    models.extend(new_models);
+    let snapshot = Snapshot {
+        models: normalize_models(models),
+        synced_at: now_unix(),
+        luma_version: env!("CARGO_PKG_VERSION").to_owned(),
+    };
+    let path = snapshot_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
+    )
+    .ok();
+}
+
 /// Whether the cached snapshot is missing, older than
 /// [`SNAPSHOT_TTL_SECS`], or was written by a different luma version.
 /// Callers surface this to decide whether to kick off a background sync.
@@ -246,12 +267,29 @@ pub async fn sync() -> Result<usize> {
             models.extend(builtin_models().into_iter().filter(|m| m.source == "kiro"))
         }
     }
+    // Alibaba Coding Plan currently has no dedicated list-models endpoint in
+    // this codebase; ship a curated builtin set until a stable discovery API
+    // is available.
+    models.extend(
+        builtin_models()
+            .into_iter()
+            .filter(|m| m.source == "alibaba"),
+    );
     // OpenCode Go has no list-models endpoint; ship the builtin set.
     models.extend(
         builtin_models()
             .into_iter()
             .filter(|m| m.source == "opencode-go"),
     );
+    // Preserve user-added custom models (e.g. Cloudflare) across syncs.
+    if let Some(existing) = load_snapshot() {
+        models.extend(
+            existing
+                .models
+                .into_iter()
+                .filter(|m| m.source == "cloudflare"),
+        );
+    }
     let snapshot = Snapshot {
         models: normalize_models(overlay_metadata(models)),
         synced_at: now_unix(),
@@ -422,6 +460,7 @@ mod tests {
     #[test]
     fn builtin_catalog_loads() {
         let models = builtin_models();
+        assert!(models.iter().any(|m| m.source == "alibaba"));
         assert!(models.iter().any(|m| m.source == "anthropic"));
         assert!(models.iter().any(|m| m.source == "codex"));
         assert!(models.iter().all(|m| m.context_window.is_some()));

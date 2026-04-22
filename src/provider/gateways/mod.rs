@@ -4,7 +4,9 @@
 //! enumeration site; adding a gateway = new module + one row here +
 //! one variant in `GatewayId`.
 
+pub mod alibaba;
 pub mod anthropic;
+pub mod cloudflare;
 pub mod codex;
 pub mod kiro;
 pub mod openai;
@@ -16,7 +18,9 @@ use crate::provider::gateway::{Gateway, GatewayId};
 /// used by anything that wants to enumerate (e.g. login picker, account
 /// listing).
 pub static GATEWAYS: &[&dyn Gateway] = &[
+    &alibaba::Alibaba,
     &anthropic::Anthropic,
+    &cloudflare::Cloudflare,
     &codex::Codex,
     &kiro::Kiro,
     &openai::OpenAI,
@@ -55,14 +59,18 @@ mod tests {
             let sample = GatewayId::OpenAI;
             // Exhaustive match: compiler flags any new variant.
             match sample {
-                GatewayId::Anthropic
+                GatewayId::Alibaba
+                | GatewayId::Anthropic
+                | GatewayId::Cloudflare
                 | GatewayId::Codex
                 | GatewayId::Kiro
                 | GatewayId::OpenAI
                 | GatewayId::OpenCodeGo => {}
             }
             out.extend([
+                GatewayId::Alibaba,
                 GatewayId::Anthropic,
+                GatewayId::Cloudflare,
                 GatewayId::Codex,
                 GatewayId::Kiro,
                 GatewayId::OpenAI,
