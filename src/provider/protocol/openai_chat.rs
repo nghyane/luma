@@ -16,15 +16,21 @@ pub struct OpenAIChatConfig {
     endpoint_path: Option<&'static str>,
     /// Override the default `Authorization` header name.
     auth_header: Option<&'static str>,
+    /// When true, the underlying model supports `enable_thinking` in the
+    /// request body (e.g. Alibaba Qwen models). The runtime sets this
+    /// based on the current `ThinkingLevel` via `set_thinking`.
+    supports_thinking: bool,
 }
 
 impl OpenAIChatConfig {
     /// Return a config with an extra JSON body merged at the top level.
+    #[cfg(test)]
     pub fn with_extra_body(extra_body: serde_json::Value) -> Self {
         Self {
             extra_body: Some(extra_body),
             endpoint_path: None,
             auth_header: None,
+            supports_thinking: false,
         }
     }
 
@@ -39,6 +45,12 @@ impl OpenAIChatConfig {
         self.auth_header = Some(header);
         self
     }
+
+    /// Declare that this model supports `enable_thinking` in the request body.
+    pub fn with_thinking_support(mut self) -> Self {
+        self.supports_thinking = true;
+        self
+    }
 }
 
 /// OpenAI chat completions provider (also works with Codex).
@@ -49,6 +61,7 @@ pub struct OpenAIChatRuntime {
     api_key: String,
     account_label: String,
     config: OpenAIChatConfig,
+    thinking: ThinkingLevel,
 }
 
 impl OpenAIChatRuntime {
@@ -81,11 +94,12 @@ impl OpenAIChatRuntime {
             api_key: api_key.to_owned(),
             account_label: account_label.to_owned(),
             config,
+            thinking: ThinkingLevel::Off,
         }
     }
 
     /// Build the OpenAI Chat Completions request body. Pure.
-    fn build_request_body(
+    pub(crate) fn build_request_body(
         &self,
         messages: &[crate::core::types::Message],
         tools: &[crate::core::types::ToolSchema],
@@ -107,6 +121,11 @@ impl OpenAIChatRuntime {
         if !api_tools.is_empty() {
             body["tools"] = api_tools.into();
         }
+        // Some OpenAI-compatible providers (e.g. Alibaba Qwen) use
+        // `enable_thinking` to toggle chain-of-thought output.
+        if self.config.supports_thinking && self.thinking != ThinkingLevel::Off {
+            body["enable_thinking"] = serde_json::json!(true);
+        }
         if let Some(extra_body) = &self.config.extra_body
             && let (Some(body_obj), Some(extra_obj)) =
                 (body.as_object_mut(), extra_body.as_object())
@@ -124,8 +143,8 @@ impl Provider for OpenAIChatRuntime {
         "openai"
     }
 
-    fn set_thinking(&mut self, _level: ThinkingLevel) {
-        // OpenAI Chat Completions has no reasoning/thinking parameter.
+    fn set_thinking(&mut self, level: ThinkingLevel) {
+        self.thinking = level;
     }
 
     fn tool_result_image_routing(&self) -> crate::core::provider::ToolResultImageRouting {

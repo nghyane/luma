@@ -5,7 +5,8 @@
 //! source while reusing the existing protocol runtimes.
 
 use crate::config::auth::{AuthVendor, Credential};
-use crate::core::provider::{Provider, ThinkingCapabilities};
+use crate::core::provider::{Provider, ThinkingCapabilities, ThinkingOption};
+use crate::core::types::ThinkingLevel;
 use crate::provider::binding::{ModelBinding, ProtocolId};
 use crate::provider::gateway::{Gateway, GatewayId};
 use crate::provider::protocol::anthropic::AnthropicRuntime;
@@ -48,6 +49,20 @@ impl Alibaba {
             }
         }
     }
+
+    /// Qwen-family models support `enable_thinking` via the OpenAI lane.
+    fn model_supports_thinking(model_id: &str) -> bool {
+        matches!(
+            model_id,
+            "qwen3.5-plus"
+                | "qwen3-coder-plus"
+                | "qwen3-coder-next"
+                | "qwen3-max-2026-01-23"
+                | "glm-4.7"
+                | "glm-5"
+                | "kimi-k2.5"
+        )
+    }
 }
 
 impl Gateway for Alibaba {
@@ -79,8 +94,22 @@ impl Gateway for Alibaba {
             .unwrap_or(ProtocolId::OpenAIChat)
     }
 
-    fn thinking(&self, _model_id: &str) -> ThinkingCapabilities {
-        ThinkingCapabilities::off_only()
+    fn thinking(&self, model_id: &str) -> ThinkingCapabilities {
+        if Self::model_supports_thinking(model_id) {
+            // Alibaba models expose on/off only — no granular levels.
+            ThinkingCapabilities::new(vec![
+                ThinkingOption {
+                    level: ThinkingLevel::Off,
+                    label: "off",
+                },
+                ThinkingOption {
+                    level: ThinkingLevel::High,
+                    label: "on",
+                },
+            ])
+        } else {
+            ThinkingCapabilities::off_only()
+        }
     }
 
     fn build(
@@ -100,11 +129,10 @@ impl Gateway for Alibaba {
                 &credential.label,
             )),
             ProtocolId::OpenAIChat => {
-                let config = if binding.model_id == "qwen3.5-plus" {
-                    OpenAIChatConfig::with_extra_body(serde_json::json!({
-                        "enable_thinking": true,
-                    }))
-                    .with_endpoint_path("/chat/completions")
+                let config = if Self::model_supports_thinking(&binding.model_id) {
+                    OpenAIChatConfig::default()
+                        .with_endpoint_path("/chat/completions")
+                        .with_thinking_support()
                 } else {
                     OpenAIChatConfig::default().with_endpoint_path("/chat/completions")
                 };
@@ -154,5 +182,28 @@ mod tests {
     #[test]
     fn glm_4_7_routes_to_openai() {
         assert_eq!(Alibaba.protocol_for("glm-4.7"), ProtocolId::OpenAIChat);
+    }
+
+    #[test]
+    fn qwen_models_have_thinking_capabilities() {
+        let caps = Alibaba.thinking("qwen3.5-plus");
+        let labels: Vec<_> = caps.options().iter().map(|o| o.label).collect();
+        assert_eq!(labels, ["off", "on"]);
+    }
+
+    #[test]
+    fn glm_models_have_thinking_capabilities() {
+        let caps = Alibaba.thinking("glm-4.7");
+        let labels: Vec<_> = caps.options().iter().map(|o| o.label).collect();
+        assert_eq!(labels, ["off", "on"]);
+    }
+
+    #[test]
+    fn claude_models_no_thinking_through_openai_lane() {
+        // Claude models use Anthropic lane; their thinking is handled
+        // by the Anthropic runtime, not the OpenAI enable_thinking flag.
+        let caps = Alibaba.thinking("claude-sonnet-4-6");
+        let labels: Vec<_> = caps.options().iter().map(|o| o.label).collect();
+        assert_eq!(labels, ["off"]);
     }
 }
