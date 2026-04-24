@@ -287,6 +287,7 @@ struct ResponsesDecoder {
     tool_calls: BTreeMap<u64, PendingTool>,
     arg_extractors: BTreeMap<u64, JsonStringExtractor>,
     extractor_probed: std::collections::BTreeSet<u64>,
+    reasoning_text_emitted: bool,
     usage: Usage,
     /// Terminal classifiers. Exactly one is set when the decoder finalises.
     saw_completed: bool,
@@ -303,6 +304,7 @@ impl ResponsesDecoder {
             tool_calls: BTreeMap::new(),
             arg_extractors: BTreeMap::new(),
             extractor_probed: std::collections::BTreeSet::new(),
+            reasoning_text_emitted: false,
             usage: Usage::default(),
             saw_completed: false,
             incomplete_reason: String::new(),
@@ -331,6 +333,7 @@ impl ResponsesDecoder {
             | "response.reasoning_summary.delta"
             | "response.reasoning_text.delta" => {
                 if let Some(delta) = event["delta"].as_str() {
+                    self.reasoning_text_emitted = true;
                     self.out
                         .push_back(StreamEvent::ThinkingDelta(delta.to_owned()));
                 }
@@ -399,6 +402,7 @@ impl ResponsesDecoder {
                 self.saw_completed = true;
                 if let Some(output) = event["response"]["output"].as_array() {
                     for (idx, item) in output.iter().enumerate() {
+                        self.emit_reasoning_item_if_needed(item);
                         maybe_store_tool_call(&mut self.tool_calls, Some(idx as u64), item);
                     }
                 }
@@ -411,6 +415,7 @@ impl ResponsesDecoder {
                     .to_owned();
                 if let Some(output) = event["response"]["output"].as_array() {
                     for (idx, item) in output.iter().enumerate() {
+                        self.emit_reasoning_item_if_needed(item);
                         maybe_store_tool_call(&mut self.tool_calls, Some(idx as u64), item);
                     }
                 }
@@ -431,6 +436,18 @@ impl ResponsesDecoder {
             }
             _ => {}
         }
+    }
+
+    fn emit_reasoning_item_if_needed(&mut self, item: &serde_json::Value) {
+        if self.reasoning_text_emitted || item["type"].as_str() != Some("reasoning") {
+            return;
+        }
+        let text = extract_reasoning_item_text(item);
+        if text.is_empty() {
+            return;
+        }
+        self.reasoning_text_emitted = true;
+        self.out.push_back(StreamEvent::ThinkingDelta(text));
     }
 
     fn record_usage(&mut self, usage_val: &serde_json::Value) {
@@ -536,6 +553,26 @@ fn decode_responses_sse(
         },
     )
     .boxed()
+}
+
+fn extract_reasoning_item_text(item: &serde_json::Value) -> String {
+    let mut parts = Vec::new();
+    if let Some(summary) = item["summary"].as_array() {
+        for entry in summary {
+            if let Some(text) = entry["text"].as_str()
+                && !text.is_empty()
+            {
+                parts.push(text);
+            }
+        }
+    }
+    if parts.is_empty()
+        && let Some(text) = item["text"].as_str()
+        && !text.is_empty()
+    {
+        parts.push(text);
+    }
+    parts.join("\n")
 }
 
 fn maybe_store_tool_call(
@@ -834,6 +871,44 @@ mod tests {
             }
         }
         assert_eq!(seen, "Hello world");
+    }
+
+    #[tokio::test]
+    async fn codex_stream_loop_emits_final_reasoning_summary_when_no_delta_arrived() {
+        let events = vec![Ok(SseEvent {
+            event_type: "response.completed".into(),
+            data: serde_json::json!({
+                "response": {
+                    "output": [{
+                        "type": "reasoning",
+                        "summary": [
+                            {"type": "summary_text", "text": "Checked constraints."},
+                            {"type": "summary_text", "text": "Chose the safe path."}
+                        ]
+                    }],
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 2,
+                        "input_tokens_details": {"cached_tokens": 0}
+                    }
+                }
+            }),
+        })];
+
+        let stream = stream_from_events(events, true);
+        let (tx, mut rx) = event_bus::channel();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        consume_responses_stream(stream, &[], &tx, &cancel, None)
+            .await
+            .unwrap();
+
+        let mut seen = String::new();
+        while let Some(event) = rx.try_recv() {
+            if let Event::Thinking(t) = event {
+                seen.push_str(&t);
+            }
+        }
+        assert_eq!(seen, "Checked constraints.\nChose the safe path.");
     }
 
     #[tokio::test]

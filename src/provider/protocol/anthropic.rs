@@ -384,8 +384,13 @@ impl AnthropicDecoder {
                 });
             }
             "thinking" => {
+                let thinking = block["thinking"].as_str().unwrap_or("").to_owned();
+                if !thinking.is_empty() {
+                    self.out
+                        .push_back(StreamEvent::ThinkingDelta(thinking.clone()));
+                }
                 self.pending = Some(PendingBlock::Thinking {
-                    thinking: block["thinking"].as_str().unwrap_or("").to_owned(),
+                    thinking,
                     signature: block["signature"].as_str().unwrap_or("").to_owned(),
                 });
             }
@@ -959,6 +964,51 @@ mod tests {
                 assert_eq!(a, "hi");
                 assert_eq!(b, " there");
                 assert_eq!(text, "hi there");
+            }
+            _ => panic!("unexpected: {events:?}"),
+        }
+    }
+
+    #[test]
+    fn decoder_emits_initial_thinking_from_block_start() {
+        let mut d = AnthropicDecoder::new(vec![]);
+        feed_frames(
+            &mut d,
+            &[
+                serde_json::json!({
+                    "type": "content_block_start",
+                    "content_block": {
+                        "type": "thinking",
+                        "thinking": "initial ",
+                        "signature": "sig-a"
+                    },
+                }),
+                serde_json::json!({
+                    "type": "content_block_delta",
+                    "delta": {"type": "thinking_delta", "thinking": "delta"},
+                }),
+                serde_json::json!({
+                    "type": "content_block_delta",
+                    "delta": {"type": "signature_delta", "signature": "sig-b"},
+                }),
+                serde_json::json!({"type": "content_block_stop"}),
+            ],
+        );
+
+        let events = drain(&mut d);
+        match &events[..] {
+            [
+                StreamEvent::ThinkingDelta(initial),
+                StreamEvent::ThinkingDelta(delta),
+                StreamEvent::BlockComplete(ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                }),
+            ] => {
+                assert_eq!(initial, "initial ");
+                assert_eq!(delta, "delta");
+                assert_eq!(thinking, "initial delta");
+                assert_eq!(signature, "sig-asig-b");
             }
             _ => panic!("unexpected: {events:?}"),
         }
