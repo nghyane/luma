@@ -29,6 +29,7 @@ pub struct OpenAIResponsesRuntime {
     api_key: String,
     account_id: Option<String>,
     thinking: ThinkingLevel,
+    service_tier: Option<String>,
     session_id: Option<String>,
     account_label: String,
 }
@@ -53,9 +54,16 @@ impl OpenAIResponsesRuntime {
             api_key: api_key.to_owned(),
             account_id,
             thinking: ThinkingLevel::Low,
+            service_tier: None,
             session_id: Some(session_id.to_owned()),
             account_label: account_label.to_owned(),
         }
+    }
+
+    /// Override the Responses API service tier for this runtime.
+    pub fn with_service_tier(mut self, service_tier: Option<String>) -> Self {
+        self.service_tier = service_tier;
+        self
     }
 
     /// Build the OpenAI Responses API request body. Pure.
@@ -86,6 +94,9 @@ impl OpenAIResponsesRuntime {
         }
         if let Some(key) = &self.session_id {
             body["prompt_cache_key"] = serde_json::json!(key);
+        }
+        if let Some(service_tier) = &self.service_tier {
+            body["service_tier"] = serde_json::json!(service_tier);
         }
         if let Some(installation_id) = resolve_installation_id() {
             body["client_metadata"] = serde_json::json!({
@@ -789,6 +800,23 @@ mod tests {
     use crate::event::Event;
     use crate::event_bus;
     use crate::provider::sse::{SseEvent, stream_from_events};
+
+    #[test]
+    fn request_body_includes_configured_service_tier() {
+        let runtime = OpenAIResponsesRuntime::new(
+            "gpt-5.4",
+            "https://chatgpt.com/backend-api/codex",
+            "token",
+            None,
+            "session",
+            "acct",
+        )
+        .with_service_tier(Some("priority".into()));
+
+        let body = runtime.build_request_body(&[], &[], &[], &|_| String::new());
+
+        assert_eq!(body["service_tier"], "priority");
+    }
 
     #[test]
     fn stores_tool_call_from_incremental_codex_events() {
