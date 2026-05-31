@@ -55,6 +55,11 @@ impl PromptState {
         }
     }
 
+    /// Whether `name` is an exact registered slash command.
+    pub fn is_registered_command(&self, name: &str) -> bool {
+        self.comp.commands.iter().any(|cmd| cmd.name == name)
+    }
+
     /// Attach an image at cursor position.
     pub fn attach_image(&mut self, media_type: String, data: Vec<u8>) {
         self.buf.attach_image(media_type, data);
@@ -284,6 +289,14 @@ mod tests {
         p.add_command("new", "new thread");
         type_str(&mut p, "/new");
         assert_eq!(submit_text(&mut p).unwrap(), "/new");
+    }
+
+    #[test]
+    fn unknown_slash_prefix_submits_as_chat() {
+        let mut p = PromptState::new();
+        p.add_command("new", "new thread");
+        type_str(&mut p, "/explain this path");
+        assert_eq!(submit_text(&mut p).unwrap(), "/explain this path");
     }
 
     #[test]

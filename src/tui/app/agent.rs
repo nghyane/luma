@@ -15,6 +15,7 @@ impl super::App {
         // Command: first text block starts with /
         if let Some(crate::core::types::ContentBlock::Text { text }) = content.first()
             && let Some(cmd) = text.strip_prefix('/')
+            && self.ui.prompt.is_registered_command(cmd)
         {
             return self.handle_command(cmd);
         }

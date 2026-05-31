@@ -165,8 +165,8 @@ impl super::PromptState {
             }
             let query = self.command_query();
             let found = self.comp.commands.iter().any(|c| c.name == query);
-            self.buf.clear();
             if found {
+                self.buf.clear();
                 return PromptAction::Submit(
                     vec![ContentBlock::Text {
                         text: format!("/{query}"),
@@ -174,7 +174,6 @@ impl super::PromptState {
                     vec![],
                 );
             }
-            return PromptAction::Redraw;
         }
         if self.buf.is_empty() {
             return PromptAction::Redraw;
