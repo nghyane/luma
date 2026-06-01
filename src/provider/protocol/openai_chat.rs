@@ -169,6 +169,7 @@ impl Provider for OpenAIChatRuntime {
                 tools,
                 server_tools,
                 resolve_image,
+                provider_state: _,
                 max_tokens_override,
                 tx,
                 cancel,
@@ -255,7 +256,8 @@ async fn consume_chat_stream(
             StreamEvent::ToolSelected { .. }
             | StreamEvent::ToolInput { .. }
             | StreamEvent::WebSearchStart { .. }
-            | StreamEvent::WebSearchDone { .. } => {}
+            | StreamEvent::WebSearchDone { .. }
+            | StreamEvent::ProviderMetadata(_) => {}
         }
     }
 
@@ -280,6 +282,7 @@ async fn consume_chat_stream(
         usage,
         stop_reason,
         context_usage_emitted: false,
+        provider_state: None,
     })
 }
 

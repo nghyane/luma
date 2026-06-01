@@ -765,6 +765,7 @@ impl<'a> FrameDecoder<'a> {
             usage: Usage::default(),
             stop_reason: self.stop_reason,
             context_usage_emitted: self.server_context_usage,
+            provider_state: None,
         }
     }
 }

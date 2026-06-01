@@ -104,6 +104,21 @@ impl Document {
                             }
                             self.replay_thinking(thinking);
                         }
+                        ContentBlock::CodexReasoning { summary, .. } if !summary.is_empty() => {
+                            if !text_buf.is_empty() {
+                                self.assistant_message(&text_buf);
+                                text_buf.clear();
+                            }
+                            let text = summary
+                                .iter()
+                                .map(|part| part.text.as_str())
+                                .filter(|text| !text.is_empty())
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if !text.is_empty() {
+                                self.replay_thinking(&text);
+                            }
+                        }
                         ContentBlock::Text { text } | ContentBlock::Paste { text }
                             if !text.is_empty() =>
                         {
@@ -126,7 +141,8 @@ impl Document {
                         | ContentBlock::Image { .. }
                         | ContentBlock::Text { .. }
                         | ContentBlock::Paste { .. }
-                        | ContentBlock::Thinking { .. } => {}
+                        | ContentBlock::Thinking { .. }
+                        | ContentBlock::CodexReasoning { .. } => {}
                     }
                 }
 

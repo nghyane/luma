@@ -34,7 +34,10 @@ impl super::App {
         self.agent.turn_start = None;
 
         if tx
-            .try_send(AgentCommand::LoadSession { session, is_new })
+            .try_send(AgentCommand::LoadSession {
+                session: Box::new(session),
+                is_new,
+            })
             .is_err()
         {
             self.doc.warn(busy_message);

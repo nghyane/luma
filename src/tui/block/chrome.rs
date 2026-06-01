@@ -136,7 +136,8 @@ pub fn content_lines(content: &[crate::core::types::ContentBlock]) -> Vec<Line> 
             ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. }
             | ContentBlock::Thinking { .. }
-            | ContentBlock::RedactedThinking { .. } => {
+            | ContentBlock::RedactedThinking { .. }
+            | ContentBlock::CodexReasoning { .. } => {
                 // Not a user-facing prompt block — skip.
             }
         }

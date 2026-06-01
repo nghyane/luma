@@ -3,6 +3,7 @@ pub mod audit;
 pub mod evidence;
 pub mod improve;
 pub mod provider;
+pub mod provider_state;
 pub mod registry;
 pub mod session;
 pub mod tool;

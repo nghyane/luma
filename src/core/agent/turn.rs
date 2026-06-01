@@ -233,6 +233,7 @@ struct RunTurnCtx<'a> {
 async fn stream_with_retry(
     ctx: &TurnCtx<'_>,
     messages: &[Message],
+    provider_state: Option<crate::core::provider_state::ProviderRequestState<'_>>,
     max_tokens_override: Option<u32>,
     tool_use_tx: Option<tokio::sync::mpsc::Sender<crate::core::types::ContentBlock>>,
 ) -> Result<StreamResponse> {
@@ -268,6 +269,7 @@ async fn stream_with_retry(
             tools: ctx.schemas,
             server_tools: ctx.server_schemas,
             resolve_image: ctx.resolve_image,
+            provider_state,
             max_tokens_override,
             tx: ctx.tx.clone(),
             cancel: ctx.cancel.clone(),
@@ -308,6 +310,10 @@ async fn run_turn(ctx: RunTurnCtx<'_>) -> Result<()> {
     let schemas = registry.schemas();
     let server_schemas = provider.server_tool_schemas(registry.server_capabilities());
     let resolve_image = crate::core::session::image_resolver(&session.id);
+    let provider_state_kind = provider.session_state_kind();
+    if let Some(kind) = provider_state_kind {
+        session.ensure_provider_state(kind);
+    }
     let ctx = TurnCtx {
         provider,
         model_id,
@@ -320,6 +326,7 @@ async fn run_turn(ctx: RunTurnCtx<'_>) -> Result<()> {
 
     let mut output_recovery_count: u8 = 0;
     let mut stream_error_count: u8 = 0;
+    let mut codex_turn_state: Option<String> = None;
 
     loop {
         if cancel.is_cancelled() {
@@ -341,7 +348,9 @@ async fn run_turn(ctx: RunTurnCtx<'_>) -> Result<()> {
         // → tu_rx closes). Tools that arrived mid-stream are already
         // queued and execute immediately, overlapping with any post-stream
         // bookkeeping.
-        let stream_future = stream_with_retry(&ctx, &routed, None, Some(tu_tx));
+        let provider_state = provider_state_kind
+            .and_then(|kind| session.request_state_for_turn(kind, codex_turn_state.as_deref()));
+        let stream_future = stream_with_retry(&ctx, &routed, provider_state, None, Some(tu_tx));
 
         // Collect tool_use blocks that arrive mid-stream.
         let mut early_tool_uses: Vec<ToolUseRef> = Vec::new();
@@ -396,7 +405,17 @@ async fn run_turn(ctx: RunTurnCtx<'_>) -> Result<()> {
                 ),
             })
             .await;
-            match stream_with_retry(&ctx, &routed, Some(ESCALATED_MAX_TOKENS), None).await {
+            match stream_with_retry(
+                &ctx,
+                &routed,
+                provider_state_kind.and_then(|kind| {
+                    session.request_state_for_turn(kind, codex_turn_state.as_deref())
+                }),
+                Some(ESCALATED_MAX_TOKENS),
+                None,
+            )
+            .await
+            {
                 Ok(r) => result = r,
                 Err(e) => {
                     if cancel.is_cancelled() {
@@ -424,8 +443,16 @@ async fn run_turn(ctx: RunTurnCtx<'_>) -> Result<()> {
             message: response,
             usage,
             stop_reason,
+            provider_state,
             ..
         } = result;
+        if let Some(provider_state) = provider_state {
+            let crate::core::provider_state::ProviderStateUpdate::Codex(update) = &provider_state;
+            if let Some(turn_state) = update.turn_state.clone() {
+                codex_turn_state = Some(turn_state);
+            }
+            session.apply_provider_state(provider_state);
+        }
 
         // Snapshot current context window — replaces previous turn, not cumulative.
         session.usage.input_tokens = usage.input_tokens;

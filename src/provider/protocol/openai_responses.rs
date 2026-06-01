@@ -1,8 +1,13 @@
 /// Codex provider — OpenAI Responses API at chatgpt.com/backend-api/codex.
 use crate::config::auth::{CODEX_ORIGINATOR, codex_user_agent, resolve_installation_id};
 use crate::core::provider::{Provider, StopReason, StreamEvent, StreamRequest, StreamResponse};
+use crate::core::provider_state::{
+    CodexSessionState, CodexStateUpdate, ProviderRequestState, ProviderStateKind,
+    ProviderStateUpdate,
+};
 use crate::core::types::{
-    ContentBlock, Message, Role, ThinkingLevel, ToolResultBody, ToolResultItem, ToolSchema, Usage,
+    CodexReasoningSummaryPart, ContentBlock, Message, Role, ThinkingLevel, ToolResultBody,
+    ToolResultItem, ToolSchema, Usage,
 };
 use crate::event::Event;
 use crate::event_bus::Sender as EventSender;
@@ -12,6 +17,20 @@ use anyhow::Result;
 use futures::stream::{BoxStream, StreamExt};
 use std::collections::{BTreeMap, VecDeque};
 
+const REASONING_ENCRYPTED_CONTENT_INCLUDE: &str = "reasoning.encrypted_content";
+const CODEX_TOOL_CHOICE_AUTO: &str = "auto";
+const CODEX_PARALLEL_TOOL_CALLS: bool = true;
+const HEADER_AUTHORIZATION: &str = "Authorization";
+const HEADER_ORIGINATOR: &str = "originator";
+const HEADER_USER_AGENT: &str = "User-Agent";
+const HEADER_CHATGPT_ACCOUNT_ID: &str = "chatgpt-account-id";
+const HEADER_SESSION_ID: &str = "session-id";
+const HEADER_THREAD_ID: &str = "thread-id";
+const HEADER_CODEX_TURN_STATE: &str = "x-codex-turn-state";
+const HEADER_CODEX_INSTALLATION_ID: &str = "x-codex-installation-id";
+const HEADER_REQUEST_ID: &str = "x-request-id";
+const HEADER_OPENAI_MODEL: &str = "openai-model";
+
 /// Per-output-index tool-call accumulator used while the Codex Responses
 /// stream is in flight. Converted to `ContentBlock::ToolUse` at commit time.
 #[derive(Default, Clone, Debug)]
@@ -20,6 +39,30 @@ struct PendingTool {
     name: String,
     /// Raw accumulated argument bytes — parsed once on commit.
     arguments: String,
+}
+
+#[derive(Clone, Debug)]
+struct PendingReasoning {
+    id: Option<String>,
+    summary: Vec<CodexReasoningSummaryPart>,
+    encrypted_content: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+enum PendingOutput {
+    Reasoning(PendingReasoning),
+    Tool(PendingTool),
+}
+
+fn append_codex_routing_headers<'a>(
+    headers: &mut Vec<(&'static str, &'a str)>,
+    session: &'a CodexSessionState,
+    turn_state: Option<&'a str>,
+) {
+    headers.push((HEADER_THREAD_ID, session.thread_id.as_str()));
+    if let Some(turn_state) = turn_state {
+        headers.push((HEADER_CODEX_TURN_STATE, turn_state));
+    }
 }
 
 /// Codex provider using the Responses API.
@@ -83,6 +126,8 @@ impl OpenAIResponsesRuntime {
         let mut body = serde_json::json!({
             "model": self.model,
             "input": input,
+            "tool_choice": CODEX_TOOL_CHOICE_AUTO,
+            "parallel_tool_calls": CODEX_PARALLEL_TOOL_CALLS,
             "store": false,
             "stream": true,
         });
@@ -114,6 +159,7 @@ impl OpenAIResponsesRuntime {
                 "effort": effort,
                 "summary": "auto",
             });
+            body["include"] = serde_json::json!([REASONING_ENCRYPTED_CONTENT_INCLUDE]);
         }
         body
     }
@@ -122,6 +168,10 @@ impl OpenAIResponsesRuntime {
 impl Provider for OpenAIResponsesRuntime {
     fn name(&self) -> &str {
         "codex"
+    }
+
+    fn session_state_kind(&self) -> Option<ProviderStateKind> {
+        Some(ProviderStateKind::Codex)
     }
 
     fn set_thinking(&mut self, level: ThinkingLevel) {
@@ -159,6 +209,7 @@ impl Provider for OpenAIResponsesRuntime {
                 tools,
                 server_tools,
                 resolve_image,
+                provider_state,
                 // Ignored — see `supports_max_tokens_override` impl above.
                 max_tokens_override: _,
                 tx,
@@ -172,20 +223,31 @@ impl Provider for OpenAIResponsesRuntime {
             // Any drift breaks the backend's first-party client check.
             let auth_header = format!("Bearer {}", self.api_key);
             let user_agent = codex_user_agent();
+            let installation_id = resolve_installation_id();
             let mut header_vec: Vec<(&str, &str)> = vec![
-                ("Authorization", &auth_header),
-                ("originator", CODEX_ORIGINATOR),
-                ("User-Agent", user_agent.as_str()),
+                (HEADER_AUTHORIZATION, &auth_header),
+                (HEADER_ORIGINATOR, CODEX_ORIGINATOR),
+                (HEADER_USER_AGENT, user_agent.as_str()),
             ];
             if let Some(aid) = &self.account_id {
-                header_vec.push(("chatgpt-account-id", aid.as_str()));
+                header_vec.push((HEADER_CHATGPT_ACCOUNT_ID, aid.as_str()));
             }
             if let Some(sid) = &self.session_id {
-                header_vec.push(("session_id", sid.as_str()));
+                header_vec.push((HEADER_SESSION_ID, sid.as_str()));
+            }
+            if let Some(installation_id) = installation_id.as_deref() {
+                header_vec.push((HEADER_CODEX_INSTALLATION_ID, installation_id));
+            }
+            if let Some(ProviderRequestState::Codex {
+                session,
+                turn_state,
+            }) = provider_state
+            {
+                append_codex_routing_headers(&mut header_vec, session, turn_state);
             }
 
             let endpoint = format!("{}/responses", self.base_url);
-            let sse = crate::provider::sse::post_sse(
+            let sse = crate::provider::sse::post_sse_with_headers(
                 "codex",
                 &self.account_label,
                 &endpoint,
@@ -195,7 +257,8 @@ impl Provider for OpenAIResponsesRuntime {
                 &cancel,
             )
             .await?;
-            consume_responses_stream(sse, tools, &tx, &cancel, tool_use_tx).await
+            let headers = sse.headers;
+            consume_responses_stream(sse.stream, tools, &tx, &cancel, tool_use_tx, headers).await
         })
     }
 }
@@ -207,12 +270,14 @@ async fn consume_responses_stream(
     tx: &EventSender,
     cancel: &tokio_util::sync::CancellationToken,
     tool_use_tx: Option<tokio::sync::mpsc::Sender<ContentBlock>>,
+    headers: crate::provider::sse::ResponseHeaders,
 ) -> Result<StreamResponse> {
     let mut events = decode_responses_sse(sse, tools.to_vec());
     let mut blocks: Vec<ContentBlock> = Vec::new();
     let mut usage = Usage::default();
     let mut stop_reason = StopReason::default();
     let mut saw_done = false;
+    let mut response_id = None;
 
     loop {
         let evt = tokio::select! {
@@ -262,6 +327,11 @@ async fn consume_responses_stream(
                 saw_done = true;
                 break;
             }
+            StreamEvent::ProviderMetadata(metadata) => match metadata {
+                crate::core::provider::ProviderStreamMetadata::Codex { response_id: id } => {
+                    response_id = id;
+                }
+            },
         }
     }
 
@@ -284,7 +354,23 @@ async fn consume_responses_stream(
         usage,
         stop_reason,
         context_usage_emitted: false,
+        provider_state: codex_state_update(&headers, response_id),
     })
+}
+
+fn codex_state_update(
+    headers: &crate::provider::sse::ResponseHeaders,
+    response_id: Option<String>,
+) -> Option<ProviderStateUpdate> {
+    let update = CodexStateUpdate {
+        turn_state: headers.get_str(HEADER_CODEX_TURN_STATE),
+        request_id: headers.get_str(HEADER_REQUEST_ID),
+        response_id,
+        server_model: headers.get_str(HEADER_OPENAI_MODEL),
+    };
+    update
+        .has_any()
+        .then_some(ProviderStateUpdate::Codex(update))
 }
 
 /// Pure decoder for the Codex Responses SSE dialect.
@@ -295,11 +381,12 @@ async fn consume_responses_stream(
 struct ResponsesDecoder {
     tools: Vec<ToolSchema>,
     text: String,
-    tool_calls: BTreeMap<u64, PendingTool>,
+    outputs: BTreeMap<u64, PendingOutput>,
     arg_extractors: BTreeMap<u64, JsonStringExtractor>,
     extractor_probed: std::collections::BTreeSet<u64>,
     reasoning_text_emitted: bool,
     usage: Usage,
+    response_id: Option<String>,
     /// Terminal classifiers. Exactly one is set when the decoder finalises.
     saw_completed: bool,
     incomplete_reason: String,
@@ -312,11 +399,12 @@ impl ResponsesDecoder {
         Self {
             tools,
             text: String::new(),
-            tool_calls: BTreeMap::new(),
+            outputs: BTreeMap::new(),
             arg_extractors: BTreeMap::new(),
             extractor_probed: std::collections::BTreeSet::new(),
             reasoning_text_emitted: false,
             usage: Usage::default(),
+            response_id: None,
             saw_completed: false,
             incomplete_reason: String::new(),
             failure_error: None,
@@ -356,8 +444,8 @@ impl ResponsesDecoder {
             }
             "response.web_search_call.searching" => {}
             "response.output_item.added" => {
-                maybe_store_tool_call(
-                    &mut self.tool_calls,
+                store_output_item(
+                    &mut self.outputs,
                     event["output_index"].as_u64(),
                     &event["item"],
                 );
@@ -374,7 +462,7 @@ impl ResponsesDecoder {
                 if let Some(idx) = event["output_index"].as_u64()
                     && let Some(delta) = event["delta"].as_str()
                 {
-                    let entry = self.tool_calls.entry(idx).or_default();
+                    let entry = pending_tool_mut(&mut self.outputs, idx);
                     entry.arguments.push_str(delta);
                     if !self.extractor_probed.contains(&idx) && !entry.name.is_empty() {
                         self.extractor_probed.insert(idx);
@@ -396,8 +484,8 @@ impl ResponsesDecoder {
                 }
             }
             "response.function_call_arguments.done" | "response.output_item.done" => {
-                maybe_store_tool_call(
-                    &mut self.tool_calls,
+                store_output_item(
+                    &mut self.outputs,
                     event["output_index"].as_u64(),
                     &event["item"],
                 );
@@ -411,15 +499,17 @@ impl ResponsesDecoder {
             }
             "response.completed" => {
                 self.saw_completed = true;
+                self.response_id = event["response"]["id"].as_str().map(str::to_owned);
                 if let Some(output) = event["response"]["output"].as_array() {
                     for (idx, item) in output.iter().enumerate() {
                         self.emit_reasoning_item_if_needed(item);
-                        maybe_store_tool_call(&mut self.tool_calls, Some(idx as u64), item);
+                        store_output_item(&mut self.outputs, Some(idx as u64), item);
                     }
                 }
                 self.record_usage(&event["response"]["usage"]);
             }
             "response.incomplete" => {
+                self.response_id = event["response"]["id"].as_str().map(str::to_owned);
                 self.incomplete_reason = event["response"]["incomplete_details"]["reason"]
                     .as_str()
                     .unwrap_or("unknown")
@@ -427,7 +517,7 @@ impl ResponsesDecoder {
                 if let Some(output) = event["response"]["output"].as_array() {
                     for (idx, item) in output.iter().enumerate() {
                         self.emit_reasoning_item_if_needed(item);
-                        maybe_store_tool_call(&mut self.tool_calls, Some(idx as u64), item);
+                        store_output_item(&mut self.outputs, Some(idx as u64), item);
                     }
                 }
                 self.record_usage(&event["response"]["usage"]);
@@ -489,25 +579,47 @@ impl ResponsesDecoder {
         if let Some(err) = self.failure_error.take() {
             return Err(err);
         }
+        if self.response_id.is_some() {
+            self.out.push_back(StreamEvent::ProviderMetadata(
+                crate::core::provider::ProviderStreamMetadata::Codex {
+                    response_id: self.response_id.take(),
+                },
+            ));
+        }
         if !self.text.is_empty() {
             let text = std::mem::take(&mut self.text);
             self.out
                 .push_back(StreamEvent::BlockComplete(ContentBlock::Text { text }));
         }
-        for (_, tool) in std::mem::take(&mut self.tool_calls) {
-            if tool.id.is_empty() || tool.name.is_empty() {
-                continue;
+        for (_, output) in std::mem::take(&mut self.outputs) {
+            match output {
+                PendingOutput::Reasoning(reasoning) => {
+                    if reasoning.encrypted_content.is_none() {
+                        continue;
+                    }
+                    self.out
+                        .push_back(StreamEvent::BlockComplete(ContentBlock::CodexReasoning {
+                            id: reasoning.id,
+                            summary: reasoning.summary,
+                            encrypted_content: reasoning.encrypted_content,
+                        }));
+                }
+                PendingOutput::Tool(tool) => {
+                    if tool.id.is_empty() || tool.name.is_empty() {
+                        continue;
+                    }
+                    let input = crate::provider::json_stream::finalize_tool_input(
+                        &tool.arguments,
+                        &format!("{} ({})", tool.id, tool.name),
+                    );
+                    self.out
+                        .push_back(StreamEvent::BlockComplete(ContentBlock::ToolUse {
+                            id: tool.id,
+                            name: tool.name,
+                            input,
+                        }));
+                }
             }
-            let input = crate::provider::json_stream::finalize_tool_input(
-                &tool.arguments,
-                &format!("{} ({})", tool.id, tool.name),
-            );
-            self.out
-                .push_back(StreamEvent::BlockComplete(ContentBlock::ToolUse {
-                    id: tool.id,
-                    name: tool.name,
-                    input,
-                }));
         }
 
         let stop = if self.incomplete_reason.is_empty() {
@@ -586,16 +698,32 @@ fn extract_reasoning_item_text(item: &serde_json::Value) -> String {
     parts.join("\n")
 }
 
-fn maybe_store_tool_call(
-    tool_calls: &mut BTreeMap<u64, PendingTool>,
+fn pending_tool_mut(outputs: &mut BTreeMap<u64, PendingOutput>, idx: u64) -> &mut PendingTool {
+    let should_replace = !matches!(outputs.get(&idx), Some(PendingOutput::Tool(_)));
+    if should_replace {
+        outputs.insert(idx, PendingOutput::Tool(PendingTool::default()));
+    }
+    let Some(PendingOutput::Tool(tool)) = outputs.get_mut(&idx) else {
+        unreachable!("pending output was normalized to a tool")
+    };
+    tool
+}
+
+fn store_output_item(
+    outputs: &mut BTreeMap<u64, PendingOutput>,
     output_index: Option<u64>,
     item: &serde_json::Value,
 ) {
-    if item["type"].as_str().unwrap_or("") != "function_call" {
-        return;
-    }
     let Some(idx) = output_index else { return };
-    let entry = tool_calls.entry(idx).or_default();
+    match item["type"].as_str().unwrap_or("") {
+        "function_call" => store_tool_item(outputs, idx, item),
+        "reasoning" => store_reasoning_item(outputs, idx, item),
+        _ => {}
+    }
+}
+
+fn store_tool_item(outputs: &mut BTreeMap<u64, PendingOutput>, idx: u64, item: &serde_json::Value) {
+    let entry = pending_tool_mut(outputs, idx);
     if let Some(call_id) = item["call_id"].as_str()
         && !call_id.is_empty()
     {
@@ -612,6 +740,63 @@ fn maybe_store_tool_call(
     {
         entry.arguments = arguments.to_owned();
     }
+}
+
+fn store_reasoning_item(
+    outputs: &mut BTreeMap<u64, PendingOutput>,
+    idx: u64,
+    item: &serde_json::Value,
+) {
+    let summary = extract_reasoning_summary_parts(item);
+    let id = item["id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned);
+    let encrypted_content = item["encrypted_content"].as_str().map(str::to_owned);
+    let should_replace = !matches!(outputs.get(&idx), Some(PendingOutput::Reasoning(_)));
+    if should_replace {
+        outputs.insert(
+            idx,
+            PendingOutput::Reasoning(PendingReasoning {
+                id,
+                summary,
+                encrypted_content,
+            }),
+        );
+        return;
+    }
+
+    let Some(PendingOutput::Reasoning(existing)) = outputs.get_mut(&idx) else {
+        unreachable!("pending output was normalized to reasoning")
+    };
+    if id.is_some() {
+        existing.id = id;
+    }
+    if !summary.is_empty() {
+        existing.summary = summary;
+    }
+    if encrypted_content.is_some() {
+        existing.encrypted_content = encrypted_content;
+    }
+}
+
+fn extract_reasoning_summary_parts(item: &serde_json::Value) -> Vec<CodexReasoningSummaryPart> {
+    item["summary"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let text = entry["text"].as_str()?;
+            if text.is_empty() {
+                return None;
+            }
+            let kind = entry["type"].as_str().unwrap_or("summary_text").to_owned();
+            Some(CodexReasoningSummaryPart {
+                kind,
+                text: text.to_owned(),
+            })
+        })
+        .collect()
 }
 
 fn extract_system(messages: &[Message]) -> String {
@@ -744,11 +929,25 @@ fn build_input(
                 }
             }
             Role::Assistant => {
-                // Walk content blocks in order: ToolUse → function_call
-                // item; Text → assistant content. Thinking blocks aren't
-                // representable on the Codex wire and are dropped.
+                // Walk content blocks in order and reconstruct the Codex
+                // Responses item stream, including opaque reasoning state.
                 for block in &msg.content {
                     match block {
+                        ContentBlock::CodexReasoning {
+                            id,
+                            summary,
+                            encrypted_content: Some(encrypted_content),
+                        } => {
+                            let mut item = serde_json::json!({
+                                "type": "reasoning",
+                                "summary": summary,
+                                "encrypted_content": encrypted_content,
+                            });
+                            if let Some(id) = id {
+                                item["id"] = serde_json::json!(id);
+                            }
+                            input.push(item);
+                        }
                         ContentBlock::ToolUse {
                             id,
                             name,
@@ -819,8 +1018,94 @@ mod tests {
     }
 
     #[test]
+    fn request_body_enables_auto_parallel_tools() {
+        let runtime = OpenAIResponsesRuntime::new(
+            "gpt-5.4",
+            "https://chatgpt.com/backend-api/codex",
+            "token",
+            None,
+            "session",
+            "acct",
+        );
+
+        let body = runtime.build_request_body(&[], &[], &[], &|_| String::new());
+
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["parallel_tool_calls"], true);
+    }
+
+    #[test]
+    fn codex_state_update_uses_selected_response_headers() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(HEADER_CODEX_TURN_STATE, "turn-state".parse().unwrap());
+        headers.insert(HEADER_REQUEST_ID, "req_1".parse().unwrap());
+        headers.insert(HEADER_OPENAI_MODEL, "gpt-5.4".parse().unwrap());
+
+        let update = codex_state_update(
+            &crate::provider::sse::ResponseHeaders::new(&headers),
+            Some("resp_1".into()),
+        );
+
+        let Some(ProviderStateUpdate::Codex(update)) = update else {
+            panic!("expected codex state update")
+        };
+        assert_eq!(update.turn_state.as_deref(), Some("turn-state"));
+        assert_eq!(update.request_id.as_deref(), Some("req_1"));
+        assert_eq!(update.response_id.as_deref(), Some("resp_1"));
+        assert_eq!(update.server_model.as_deref(), Some("gpt-5.4"));
+    }
+
+    #[test]
+    fn build_input_roundtrips_codex_reasoning_state() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::CodexReasoning {
+                id: Some("rs_1".into()),
+                summary: vec![CodexReasoningSummaryPart {
+                    kind: "summary_text".into(),
+                    text: "Checked constraints.".into(),
+                }],
+                encrypted_content: Some("encrypted-state".into()),
+            }],
+            origin: Some(crate::core::types::MessageOrigin {
+                provider: "codex".into(),
+                model: Some("gpt-5.4".into()),
+            }),
+        }];
+
+        let input = build_input(&messages, &|_| String::new());
+
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "reasoning");
+        assert_eq!(input[0]["id"], "rs_1");
+        assert_eq!(input[0]["summary"][0]["type"], "summary_text");
+        assert_eq!(input[0]["summary"][0]["text"], "Checked constraints.");
+        assert_eq!(input[0]["encrypted_content"], "encrypted-state");
+    }
+
+    #[test]
+    fn request_body_includes_encrypted_reasoning_content_when_reasoning_enabled() {
+        let runtime = OpenAIResponsesRuntime::new(
+            "gpt-5.4",
+            "https://chatgpt.com/backend-api/codex",
+            "token",
+            None,
+            "session",
+            "acct",
+        );
+
+        let body = runtime.build_request_body(&[], &[], &[], &|_| String::new());
+
+        assert_eq!(body["reasoning"]["effort"], "low");
+        assert_eq!(
+            body["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
+    }
+
+    #[test]
     fn stores_tool_call_from_incremental_codex_events() {
-        let mut tool_calls = BTreeMap::new();
+        let mut outputs = BTreeMap::new();
         let item = serde_json::json!({
             "type": "function_call",
             "call_id": "call_1",
@@ -828,8 +1113,8 @@ mod tests {
             "arguments": ""
         });
 
-        maybe_store_tool_call(&mut tool_calls, Some(0), &item);
-        let entry = tool_calls.get_mut(&0).unwrap();
+        store_output_item(&mut outputs, Some(0), &item);
+        let entry = pending_tool_mut(&mut outputs, 0);
         entry.arguments.push_str("{\"command\":\"git status\"}");
 
         assert_eq!(entry.id, "call_1");
@@ -839,7 +1124,7 @@ mod tests {
 
     #[test]
     fn completed_snapshot_fills_missing_codex_tool_fields() {
-        let mut tool_calls = BTreeMap::new();
+        let mut outputs = BTreeMap::new();
         let partial = serde_json::json!({"type": "function_call", "name": "exec_command"});
         let done = serde_json::json!({
             "type": "function_call",
@@ -848,12 +1133,39 @@ mod tests {
             "arguments": "{\"command\":\"pwd\"}"
         });
 
-        maybe_store_tool_call(&mut tool_calls, Some(1), &partial);
-        maybe_store_tool_call(&mut tool_calls, Some(1), &done);
+        store_output_item(&mut outputs, Some(1), &partial);
+        store_output_item(&mut outputs, Some(1), &done);
 
-        let entry = tool_calls.get(&1).unwrap();
+        let Some(PendingOutput::Tool(entry)) = outputs.get(&1) else {
+            panic!("expected tool output")
+        };
         assert_eq!(entry.id, "call_2");
         assert_eq!(entry.arguments, "{\"command\":\"pwd\"}");
+    }
+
+    #[test]
+    fn reasoning_snapshots_preserve_existing_encrypted_content() {
+        let mut outputs = BTreeMap::new();
+        let with_state = serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "summary": [{"type": "summary_text", "text": "first"}],
+            "encrypted_content": "encrypted-state"
+        });
+        let without_state = serde_json::json!({
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "latest"}]
+        });
+
+        store_output_item(&mut outputs, Some(0), &with_state);
+        store_output_item(&mut outputs, Some(0), &without_state);
+
+        let Some(PendingOutput::Reasoning(entry)) = outputs.get(&0) else {
+            panic!("expected reasoning output")
+        };
+        assert_eq!(entry.id.as_deref(), Some("rs_1"));
+        assert_eq!(entry.summary[0].text, "latest");
+        assert_eq!(entry.encrypted_content.as_deref(), Some("encrypted-state"));
     }
 
     #[tokio::test]
@@ -885,7 +1197,7 @@ mod tests {
         let stream = stream_from_events(events, true);
         let (tx, mut rx) = event_bus::channel();
         let cancel = tokio_util::sync::CancellationToken::new();
-        let result = consume_responses_stream(stream, &[], &tx, &cancel, None)
+        let result = consume_responses_stream(stream, &[], &tx, &cancel, None, Default::default())
             .await
             .unwrap();
 
@@ -926,7 +1238,7 @@ mod tests {
         let stream = stream_from_events(events, true);
         let (tx, mut rx) = event_bus::channel();
         let cancel = tokio_util::sync::CancellationToken::new();
-        consume_responses_stream(stream, &[], &tx, &cancel, None)
+        consume_responses_stream(stream, &[], &tx, &cancel, None, Default::default())
             .await
             .unwrap();
 
@@ -937,6 +1249,58 @@ mod tests {
             }
         }
         assert_eq!(seen, "Checked constraints.\nChose the safe path.");
+    }
+
+    #[tokio::test]
+    async fn codex_stream_loop_preserves_encrypted_reasoning_without_leaking_it_to_ui() {
+        let events = vec![Ok(SseEvent {
+            event_type: "response.completed".into(),
+            data: serde_json::json!({
+                "response": {
+                    "output": [{
+                        "type": "reasoning",
+                        "id": "rs_1",
+                        "summary": [{"type": "summary_text", "text": "Checked constraints."}],
+                        "encrypted_content": "encrypted-state"
+                    }],
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 2,
+                        "input_tokens_details": {"cached_tokens": 0}
+                    }
+                }
+            }),
+        })];
+
+        let stream = stream_from_events(events, true);
+        let (tx, mut rx) = event_bus::channel();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = consume_responses_stream(stream, &[], &tx, &cancel, None, Default::default())
+            .await
+            .unwrap();
+
+        assert_eq!(result.message.content.len(), 1);
+        match &result.message.content[0] {
+            ContentBlock::CodexReasoning {
+                id,
+                summary,
+                encrypted_content,
+            } => {
+                assert_eq!(id.as_deref(), Some("rs_1"));
+                assert_eq!(summary[0].text, "Checked constraints.");
+                assert_eq!(encrypted_content.as_deref(), Some("encrypted-state"));
+            }
+            other => panic!("expected codex reasoning, got {other:?}"),
+        }
+
+        let mut seen = String::new();
+        while let Some(event) = rx.try_recv() {
+            if let Event::Thinking(t) = event {
+                seen.push_str(&t);
+            }
+        }
+        assert_eq!(seen, "Checked constraints.");
+        assert!(!seen.contains("encrypted-state"));
     }
 
     #[tokio::test]
@@ -990,9 +1354,10 @@ mod tests {
         let stream = stream_from_events(events, true);
         let (tx, mut rx) = event_bus::channel();
         let cancel = tokio_util::sync::CancellationToken::new();
-        let result = consume_responses_stream(stream, &[tool], &tx, &cancel, None)
-            .await
-            .unwrap();
+        let result =
+            consume_responses_stream(stream, &[tool], &tx, &cancel, None, Default::default())
+                .await
+                .unwrap();
 
         let tool_uses: Vec<_> = result.message.tool_uses().collect();
         assert_eq!(tool_uses.len(), 1);
@@ -1026,7 +1391,7 @@ mod tests {
         let stream = stream_from_events(events, false);
         let (tx, _rx) = event_bus::channel();
         let cancel = tokio_util::sync::CancellationToken::new();
-        let err = consume_responses_stream(stream, &[], &tx, &cancel, None)
+        let err = consume_responses_stream(stream, &[], &tx, &cancel, None, Default::default())
             .await
             .unwrap_err()
             .to_string();

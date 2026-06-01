@@ -45,6 +45,9 @@ pub fn estimate_context_chars(
                     }
                 },
                 ContentBlock::Thinking { thinking, .. } => chars += thinking.len(),
+                ContentBlock::CodexReasoning { summary, .. } => {
+                    chars += summary.iter().map(|part| part.text.len()).sum::<usize>();
+                }
                 _ => {}
             }
         }

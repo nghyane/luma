@@ -393,7 +393,7 @@ fn load_session(
     // Feed the loaded session into the agent loop.
     if let Some(tx) = agent_tx {
         let _ = tx.try_send(AgentCommand::LoadSession {
-            session,
+            session: Box::new(session),
             is_new: false,
         });
     }
@@ -473,6 +473,26 @@ fn replay_history(sid: &str, session: &crate::core::session::Session) {
                                     }
                                 }),
                             );
+                        }
+                        ContentBlock::CodexReasoning { summary, .. } if !summary.is_empty() => {
+                            let text = summary
+                                .iter()
+                                .map(|part| part.text.as_str())
+                                .filter(|text| !text.is_empty())
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if !text.is_empty() {
+                                transport::notify(
+                                    "session/update",
+                                    serde_json::json!({
+                                        "sessionId": sid,
+                                        "update": {
+                                            "sessionUpdate": "agent_reasoning_chunk",
+                                            "content": { "type": "text", "text": text }
+                                        }
+                                    }),
+                                );
+                            }
                         }
                         ContentBlock::ToolUse { id, name, .. } => {
                             _tool_seq += 1;

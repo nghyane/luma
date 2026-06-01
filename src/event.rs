@@ -123,7 +123,7 @@ pub enum AgentCommand {
     /// Replace the current thread with a specific session.
     /// `is_new` is set by the caller (App) — true for `/new`, false for resume.
     LoadSession {
-        session: crate::core::session::Session,
+        session: Box<crate::core::session::Session>,
         is_new: bool,
     },
 }

@@ -135,6 +135,7 @@ pub struct StreamResponse {
     /// Provider already emitted `Event::ContextUsage` during the stream.
     /// When true, the turn-layer fallback estimator is skipped.
     pub context_usage_emitted: bool,
+    pub provider_state: Option<crate::core::provider_state::ProviderStateUpdate>,
 }
 
 /// Normalized event emitted by a `Protocol` decoder.
@@ -168,8 +169,16 @@ pub enum StreamEvent {
     /// A content block has been committed in document order. The
     /// assembler appends to `Vec<ContentBlock>` in emission order.
     BlockComplete(crate::core::types::ContentBlock),
+    /// Provider-specific stream metadata that is not rendered to the UI.
+    ProviderMetadata(ProviderStreamMetadata),
     /// Terminal event. Decoder MUST NOT emit further events after this.
     Done { stop: StopReason },
+}
+
+/// Provider metadata emitted by a decoder before completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderStreamMetadata {
+    Codex { response_id: Option<String> },
 }
 
 /// Resolves image id → base64 data. Passed to providers so they don't touch filesystem.
@@ -196,6 +205,7 @@ pub struct StreamRequest<'a> {
     pub tools: &'a [ToolSchema],
     pub server_tools: &'a [serde_json::Value],
     pub resolve_image: &'a ImageResolver,
+    pub provider_state: Option<crate::core::provider_state::ProviderRequestState<'a>>,
     /// Override the provider's default max output tokens. `None` = use default.
     pub max_tokens_override: Option<u32>,
     pub tx: EventSender,
@@ -320,6 +330,11 @@ pub enum SearchPreference {
 pub trait Provider: Send + Sync {
     /// Provider display name (e.g. "claude", "openai").
     fn name(&self) -> &str;
+
+    /// Provider-specific session state needed for request routing.
+    fn session_state_kind(&self) -> Option<crate::core::provider_state::ProviderStateKind> {
+        None
+    }
 
     /// Set thinking level. Called once after construction before boxing.
     fn set_thinking(&mut self, level: ThinkingLevel);

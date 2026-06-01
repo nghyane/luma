@@ -27,6 +27,37 @@ pub struct SseEvent {
     pub data: serde_json::Value,
 }
 
+/// HTTP response headers returned before an SSE stream begins.
+#[derive(Debug, Clone, Default)]
+pub struct ResponseHeaders {
+    inner: reqwest::header::HeaderMap,
+}
+
+impl ResponseHeaders {
+    /// Capture response headers for provider-specific extraction.
+    pub fn new(headers: &reqwest::header::HeaderMap) -> Self {
+        Self {
+            inner: headers.clone(),
+        }
+    }
+
+    /// Return one non-empty header as UTF-8 text.
+    pub fn get_str(&self, name: &'static str) -> Option<String> {
+        self.inner
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    }
+}
+
+/// SSE stream plus response metadata available after the HTTP handshake.
+pub struct SseResponse {
+    pub stream: SseEventStream,
+    pub headers: ResponseHeaders,
+}
+
 /// Byte-level SSE line buffer.
 ///
 /// Accumulates raw bytes from the HTTP response and yields complete SSE
@@ -169,6 +200,23 @@ pub async fn post_sse(
     tx: &EventSender,
     cancel: &CancellationToken,
 ) -> Result<SseEventStream> {
+    Ok(
+        post_sse_with_headers(provider, account_label, url, headers, body, tx, cancel)
+            .await?
+            .stream,
+    )
+}
+
+/// Build and POST an SSE request, returning the stream and selected headers.
+pub async fn post_sse_with_headers(
+    provider: &str,
+    account_label: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &serde_json::Value,
+    tx: &EventSender,
+    cancel: &CancellationToken,
+) -> Result<SseResponse> {
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
         .build()?;
@@ -187,6 +235,7 @@ pub async fn post_sse(
             req.send()
         })
         .await?;
+    let response_headers = ResponseHeaders::new(response.headers());
 
     let (event_tx, event_rx) = mpsc::channel::<Result<SseEvent>>(SSE_EVENT_CHANNEL_CAPACITY);
     let saw_done = Arc::new(AtomicBool::new(false));
@@ -197,10 +246,13 @@ pub async fn post_sse(
         reader_loop(response, event_tx, saw_done_task, cancel_task).await;
     });
 
-    Ok(SseEventStream {
-        rx: event_rx,
-        saw_done,
-        _task: AbortOnDropHandle::new(handle),
+    Ok(SseResponse {
+        stream: SseEventStream {
+            rx: event_rx,
+            saw_done,
+            _task: AbortOnDropHandle::new(handle),
+        },
+        headers: response_headers,
     })
 }
 
@@ -287,6 +339,17 @@ mod tests {
         };
         assert_eq!(event.event_type, "message");
         assert_eq!(event.data["text"], "hi");
+    }
+
+    #[test]
+    fn response_headers_reads_non_empty_utf8_values() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-request-id", "req_1".parse().unwrap());
+
+        let selected = ResponseHeaders::new(&headers);
+
+        assert_eq!(selected.get_str("x-request-id").as_deref(), Some("req_1"));
+        assert_eq!(selected.get_str("missing"), None);
     }
 
     #[test]

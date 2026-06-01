@@ -154,6 +154,7 @@ impl Provider for AnthropicRuntime {
                 tools,
                 server_tools,
                 resolve_image,
+                provider_state: _,
                 max_tokens_override,
                 tx,
                 cancel,
@@ -269,6 +270,7 @@ impl Provider for AnthropicRuntime {
                         saw_done = true;
                         break;
                     }
+                    StreamEvent::ProviderMetadata(_) => {}
                 }
             }
 
@@ -296,6 +298,7 @@ impl Provider for AnthropicRuntime {
                 usage,
                 stop_reason,
                 context_usage_emitted: false,
+                provider_state: None,
             })
         })
     }
@@ -749,7 +752,9 @@ fn content_block_to_api(
                 "data": data,
             }))
         }
-        ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => None,
+        ContentBlock::Thinking { .. }
+        | ContentBlock::RedactedThinking { .. }
+        | ContentBlock::CodexReasoning { .. } => None,
     }
 }
 

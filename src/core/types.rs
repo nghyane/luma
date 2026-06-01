@@ -57,6 +57,25 @@ pub enum ContentBlock {
     /// Opaque thinking block redacted by the backend's safety layer.
     /// Must still be echoed back on later turns.
     RedactedThinking { data: String },
+    /// Opaque Codex Responses reasoning state. `encrypted_content` is
+    /// provider-owned state that must be echoed back verbatim; UI may render
+    /// only the summary text.
+    CodexReasoning {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        summary: Vec<CodexReasoningSummaryPart>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<String>,
+    },
+}
+
+/// One visible summary part attached to a Codex reasoning item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexReasoningSummaryPart {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub text: String,
 }
 
 /// Body of a [`ContentBlock::ToolResult`].
@@ -208,7 +227,8 @@ impl Message {
             ContentBlock::Image { .. } | ContentBlock::ToolUse { .. } => true,
             ContentBlock::ToolResult { .. }
             | ContentBlock::Thinking { .. }
-            | ContentBlock::RedactedThinking { .. } => false,
+            | ContentBlock::RedactedThinking { .. }
+            | ContentBlock::CodexReasoning { .. } => false,
         })
     }
 
@@ -265,6 +285,7 @@ impl Message {
     ///
     /// Tool results always ride on user messages in the Anthropic wire
     /// format; `Role::Tool` is gone from the unified schema.
+    #[cfg(test)]
     pub fn tool_result(id: impl Into<String>, content: impl Into<ToolResultBody>) -> Self {
         Self {
             role: Role::User,

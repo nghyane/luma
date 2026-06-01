@@ -179,7 +179,7 @@ async fn agent_loop(
                 is_new,
             } => {
                 writer.enqueue(&session);
-                session = loaded;
+                session = *loaded;
                 if !config.system_prompt.is_empty()
                     && !session
                         .messages
@@ -254,8 +254,8 @@ fn apply_config_cmd(
 /// immediately following user message.
 ///
 /// Walks backwards to find the last assistant message with tool_use blocks
-/// and appends placeholder "[aborted]" tool_result blocks for any missing
-/// ids to a new (or existing) user message.
+/// and inserts placeholder "[aborted]" tool_result blocks into the
+/// immediately following user message (creating one if needed).
 fn fix_orphaned_tool_uses(messages: &mut Vec<Message>) {
     use crate::core::types::ContentBlock;
 
@@ -271,20 +271,93 @@ fn fix_orphaned_tool_uses(messages: &mut Vec<Message>) {
         .map(|(id, _, _)| id.to_owned())
         .collect();
 
-    // Collect tool_result ids from user messages after this assistant.
-    let existing_ids: std::collections::HashSet<String> = messages[asst_idx + 1..]
+    let user_idx = if messages
+        .get(asst_idx + 1)
+        .is_some_and(|m| m.role == Role::User)
+    {
+        asst_idx + 1
+    } else {
+        messages.insert(
+            asst_idx + 1,
+            Message {
+                role: Role::User,
+                content: Vec::new(),
+                origin: None,
+            },
+        );
+        asst_idx + 1
+    };
+
+    let user_msg = &mut messages[user_idx];
+    let existing_ids: std::collections::HashSet<String> = user_msg
+        .content
         .iter()
-        .filter(|m| m.role == Role::User)
-        .flat_map(|m| m.content.iter())
         .filter_map(|b| match b {
             ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
             _ => None,
         })
         .collect();
 
-    for id in &expected_ids {
-        if !existing_ids.contains(id) {
-            messages.push(Message::tool_result(id.clone(), "[aborted]"));
+    for id in expected_ids {
+        if existing_ids.contains(&id) {
+            continue;
+        }
+        user_msg.content.push(ContentBlock::ToolResult {
+            tool_use_id: id,
+            content: "[aborted]".into(),
+            is_error: true,
+            evidence_id: None,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::types::{ContentBlock, MessageOrigin, Role};
+
+    #[test]
+    fn fixes_orphaned_tool_use_into_immediately_following_user_message() {
+        let mut messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "exec_command".into(),
+                    input: serde_json::json!({"command": "pwd"}),
+                }],
+                origin: Some(MessageOrigin {
+                    provider: "codex".into(),
+                    model: Some("gpt-5.4".into()),
+                }),
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "Output token limit hit. Resume directly.".into(),
+                }],
+                origin: None,
+            },
+        ];
+
+        fix_orphaned_tool_uses(&mut messages);
+
+        assert_eq!(messages.len(), 2);
+        let user = &messages[1];
+        assert_eq!(user.role, Role::User);
+        assert_eq!(user.content.len(), 2);
+        match &user.content[1] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                ..
+            } => {
+                assert_eq!(tool_use_id, "call_1");
+                assert_eq!(content.as_text(), "[aborted]");
+                assert!(*is_error);
+            }
+            other => panic!("expected tool_result, got {other:?}"),
         }
     }
 }

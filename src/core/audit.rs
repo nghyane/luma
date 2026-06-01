@@ -735,6 +735,7 @@ mod tests {
             usage: SessionUsage::default(),
             turn_durations: Vec::new(),
             evidence: Default::default(),
+            provider_state: Default::default(),
         }
     }
 

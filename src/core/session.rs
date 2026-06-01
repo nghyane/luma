@@ -1,5 +1,9 @@
 /// Session — persistent conversation with JSON storage.
 use crate::core::evidence::EvidenceStore;
+use crate::core::provider_state::{
+    CodexSessionState, ProviderRequestState, ProviderSessionState, ProviderStateKind,
+    ProviderStateUpdate,
+};
 use crate::core::types::Message;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -38,6 +42,8 @@ pub struct Session {
     /// `docs/rfcs/evidence-backed-handoff.md` and [`crate::core::evidence`].
     #[serde(default)]
     pub evidence: EvidenceStore,
+    #[serde(default)]
+    pub provider_state: ProviderSessionState,
 }
 
 /// Summary for listing sessions (no messages loaded).
@@ -65,6 +71,60 @@ impl Session {
             usage: SessionUsage::default(),
             turn_durations: Vec::new(),
             evidence: EvidenceStore::default(),
+            provider_state: ProviderSessionState::default(),
+        }
+    }
+
+    /// Ensure provider routing state exists for the requested kind.
+    pub fn ensure_provider_state(&mut self, kind: ProviderStateKind) {
+        match kind {
+            ProviderStateKind::Codex => {
+                self.provider_state
+                    .codex
+                    .get_or_insert_with(|| CodexSessionState::new(generate_thread_id()));
+            }
+        }
+    }
+
+    /// Typed provider state view plus transient turn-scoped routing state.
+    pub fn request_state_for_turn<'a>(
+        &'a self,
+        kind: ProviderStateKind,
+        turn_state: Option<&'a str>,
+    ) -> Option<ProviderRequestState<'a>> {
+        match kind {
+            ProviderStateKind::Codex => {
+                self.provider_state
+                    .codex
+                    .as_ref()
+                    .map(|session| ProviderRequestState::Codex {
+                        session,
+                        turn_state,
+                    })
+            }
+        }
+    }
+
+    /// Apply provider state returned by a successful stream.
+    pub fn apply_provider_state(&mut self, update: ProviderStateUpdate) {
+        match update {
+            ProviderStateUpdate::Codex(update) => {
+                self.ensure_provider_state(ProviderStateKind::Codex);
+                let state = self
+                    .provider_state
+                    .codex
+                    .as_mut()
+                    .expect("codex state exists");
+                if let Some(request_id) = update.request_id {
+                    state.last_request_id = Some(request_id);
+                }
+                if let Some(response_id) = update.response_id {
+                    state.last_response_id = Some(response_id);
+                }
+                if let Some(server_model) = update.server_model {
+                    state.server_model = Some(server_model);
+                }
+            }
         }
     }
 
@@ -394,6 +454,10 @@ fn generate_id() -> String {
     format!("ses_{ts:x}")
 }
 
+fn generate_thread_id() -> String {
+    format!("thread_{}", generate_id().trim_start_matches("ses_"))
+}
+
 fn now_iso() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
@@ -413,6 +477,26 @@ mod tests {
         let s = Session::new();
         assert!(!s.id.is_empty());
         assert!(s.id.starts_with("ses_"));
+    }
+
+    #[test]
+    fn applies_codex_provider_state_update() {
+        let mut s = Session::new();
+
+        s.apply_provider_state(crate::core::provider_state::ProviderStateUpdate::Codex(
+            crate::core::provider_state::CodexStateUpdate {
+                turn_state: Some("turn-state".into()),
+                request_id: Some("req_1".into()),
+                response_id: Some("resp_1".into()),
+                server_model: Some("gpt-5.4".into()),
+            },
+        ));
+
+        let state = s.provider_state.codex.as_ref().unwrap();
+        assert!(state.thread_id.starts_with("thread_"));
+        assert_eq!(state.last_request_id.as_deref(), Some("req_1"));
+        assert_eq!(state.last_response_id.as_deref(), Some("resp_1"));
+        assert_eq!(state.server_model.as_deref(), Some("gpt-5.4"));
     }
 
     #[test]
@@ -638,6 +722,7 @@ mod tests {
                         ContentBlock::ToolResult { .. } => "tool_result",
                         ContentBlock::Thinking { .. } => "thinking",
                         ContentBlock::RedactedThinking { .. } => "redacted_thinking",
+                        ContentBlock::CodexReasoning { .. } => "codex_reasoning",
                     };
                     *block_kinds.entry(kind).or_default() += 1;
 
