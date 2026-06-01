@@ -48,6 +48,7 @@ pub struct AppConfig {
     pub env_context: String,
     pub thinking: ThinkingLevel,
     pub picker_mode: PickerMode,
+    pub is_mcp_loading: bool,
 }
 
 pub struct AgentHandle {

@@ -6,6 +6,27 @@ use crate::tui::status::StatusState;
 use tokio_util::sync::CancellationToken;
 
 impl super::App {
+    pub(super) fn start_mcp_discovery(&mut self) {
+        let config = crate::mcp::config::load();
+        if config.servers.is_empty() {
+            return;
+        }
+        let Some(tx) = self.tx.clone() else {
+            return;
+        };
+        self.config.is_mcp_loading = true;
+        tokio::spawn(async move {
+            let manager = crate::mcp::manager::McpManager::start(&config).await;
+            crate::mcp::bridge::set_global_manager(manager);
+            tx.send_or_log(crate::event::Event::McpReady).await;
+        });
+    }
+
+    pub(super) fn on_mcp_ready(&mut self) {
+        self.config.is_mcp_loading = false;
+        self.refresh_agent_context();
+    }
+
     /// Handle submit from prompt — command or chat.
     pub(super) fn on_submit(
         &mut self,
@@ -151,17 +172,7 @@ impl super::App {
         };
         let tx = self.tx.clone().expect("tx set in run()");
 
-        let skills = crate::config::skills::discover();
-        let skill_catalog = crate::config::skills::build_catalog(&skills);
-        let project_instructions = crate::config::instructions::discover();
-        let instructions_block =
-            crate::config::instructions::build_instructions(&project_instructions);
-        let style = crate::tool::ToolStyle::for_mode(self.config.mode, &model.source);
-        let base_prompt = crate::config::prompt::build(self.config.mode, style);
-        let system_prompt = format!(
-            "{base_prompt}\n{}{skill_catalog}{instructions_block}",
-            self.config.env_context
-        );
+        let system_prompt = self.build_system_prompt(self.config.mode, &model.source);
 
         let config = crate::core::agent::AgentConfig {
             model_id: model.id.clone(),
@@ -171,8 +182,7 @@ impl super::App {
             capabilities: model.capabilities.clone(),
         };
 
-        let search_pref = crate::tool::search_preference_for(&model.source);
-        let registry = crate::tool::build_registry(style, Self::search_backend(), search_pref);
+        let registry = self.build_registry(self.config.mode, &model.source);
 
         self.agent.tx = Some(crate::core::agent::spawn(config, registry, tx));
         self.agent.last_sent = Some(super::state::SentConfig {
@@ -181,6 +191,49 @@ impl super::App {
             source: model.source.clone(),
             thinking: self.config.thinking,
         });
+    }
+
+    pub(super) fn refresh_agent_context(&mut self) {
+        let Some(model) = self.config.model.clone() else {
+            return;
+        };
+        let Some(tx) = self.agent.tx.clone() else {
+            return;
+        };
+        let system_prompt = self.build_system_prompt(self.config.mode, &model.source);
+        let registry = self.build_registry(self.config.mode, &model.source);
+        let _ = tx.try_send(AgentCommand::SetContext {
+            system_prompt,
+            registry,
+        });
+    }
+
+    pub(super) fn build_system_prompt(
+        &self,
+        mode: crate::config::models::AgentMode,
+        source: &str,
+    ) -> String {
+        let skills = crate::config::skills::discover();
+        let skill_catalog = crate::config::skills::build_catalog(&skills);
+        let project_instructions = crate::config::instructions::discover();
+        let instructions_block =
+            crate::config::instructions::build_instructions(&project_instructions);
+        let style = crate::tool::ToolStyle::for_mode(mode, source);
+        let base_prompt = crate::config::prompt::build(mode, style);
+        format!(
+            "{base_prompt}\n{}{skill_catalog}{instructions_block}",
+            self.config.env_context
+        )
+    }
+
+    pub(super) fn build_registry(
+        &self,
+        mode: crate::config::models::AgentMode,
+        source: &str,
+    ) -> crate::core::registry::Registry {
+        let style = crate::tool::ToolStyle::for_mode(mode, source);
+        let search_pref = crate::tool::search_preference_for(source);
+        crate::tool::build_registry(style, Self::search_backend(), search_pref)
     }
 
     /// Pick a web-search backend based on available credentials/env,

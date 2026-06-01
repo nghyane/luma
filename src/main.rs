@@ -477,11 +477,6 @@ async fn main() {
 
             let env_context = build_env_context();
 
-            // Initialize MCP servers before TUI so tools are available on first turn.
-            let mcp_config = mcp::config::load();
-            let manager = mcp::manager::McpManager::start(&mcp_config).await;
-            mcp::bridge::set_global_manager(manager);
-
             let app = tui::app::App::new(env_context);
             if let Err(e) = app.run().await {
                 eprintln!("error: {e}");

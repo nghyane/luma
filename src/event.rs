@@ -85,6 +85,9 @@ pub enum Event {
     /// Async clipboard image result — None means no image found.
     ClipboardImage(Option<(String, Vec<u8>)>),
 
+    /// Background MCP discovery finished and global tools are available.
+    McpReady,
+
     Tick,
 }
 

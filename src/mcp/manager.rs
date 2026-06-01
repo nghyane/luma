@@ -8,7 +8,13 @@ use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig
 use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{RoleClient, ServiceExt};
 use std::collections::HashMap;
+use std::time::Duration;
 use tokio::process::Command;
+use tokio::task::JoinSet;
+
+const MCP_CONNECT_CONCURRENCY: usize = 4;
+const MCP_STDIO_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
+const MCP_REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Connection state for a single MCP server.
 pub struct McpConnection {
@@ -42,38 +48,18 @@ impl McpManager {
     pub async fn start(config: &McpConfig) -> Self {
         let mut connections = HashMap::new();
         let mut statuses = HashMap::new();
+        let mut servers = config.servers.iter();
+        let mut tasks = JoinSet::new();
 
-        for (name, entry) in &config.servers {
-            match connect(name, entry).await {
-                Ok(conn) => {
-                    let count = conn.tools.len();
-                    let transport = entry.transport_name();
-                    statuses.insert(
-                        name.clone(),
-                        McpStatus::Connected {
-                            tool_count: count,
-                            transport,
-                        },
-                    );
-                    crate::dbg_log!("mcp: connected to {name} via {transport} ({count} tools)");
-                    connections.insert(name.clone(), conn);
-                }
-                Err(e) => {
-                    let msg = format!("{} connection failed: {e:#}", entry.transport_name());
-                    crate::dbg_log!("mcp: failed to connect to {name}: {msg}");
-                    if is_needs_auth_message(&msg) {
-                        statuses.insert(
-                            name.clone(),
-                            McpStatus::NeedsAuth {
-                                transport: entry.transport_name(),
-                                message: msg,
-                            },
-                        );
-                    } else {
-                        statuses.insert(name.clone(), McpStatus::Failed(msg));
-                    }
-                }
+        for _ in 0..MCP_CONNECT_CONCURRENCY {
+            spawn_next_connect(&mut tasks, &mut servers);
+        }
+
+        while let Some(joined) = tasks.join_next().await {
+            if let Ok(result) = joined {
+                record_connect_result(result, &mut connections, &mut statuses);
             }
+            spawn_next_connect(&mut tasks, &mut servers);
         }
 
         Self {
@@ -159,6 +145,73 @@ impl McpManager {
     }
 }
 
+struct ConnectResult {
+    name: String,
+    transport: &'static str,
+    outcome: anyhow::Result<McpConnection>,
+}
+
+fn spawn_next_connect<'a>(
+    tasks: &mut JoinSet<ConnectResult>,
+    servers: &mut std::collections::hash_map::Iter<'a, String, McpServerEntry>,
+) {
+    let Some((name, entry)) = servers.next() else {
+        return;
+    };
+    let name = name.clone();
+    let entry = entry.clone();
+    let transport = entry.transport_name();
+    tasks.spawn(async move {
+        let outcome = connect(&name, &entry).await;
+        ConnectResult {
+            name,
+            transport,
+            outcome,
+        }
+    });
+}
+
+fn record_connect_result(
+    result: ConnectResult,
+    connections: &mut HashMap<String, McpConnection>,
+    statuses: &mut HashMap<String, McpStatus>,
+) {
+    let ConnectResult {
+        name,
+        transport,
+        outcome,
+    } = result;
+    match outcome {
+        Ok(conn) => {
+            let count = conn.tools.len();
+            statuses.insert(
+                name.clone(),
+                McpStatus::Connected {
+                    tool_count: count,
+                    transport,
+                },
+            );
+            crate::dbg_log!("mcp: connected to {name} via {transport} ({count} tools)");
+            connections.insert(name, conn);
+        }
+        Err(e) => {
+            let msg = format!("{transport} connection failed: {e:#}");
+            crate::dbg_log!("mcp: failed to connect to {name}: {msg}");
+            if is_needs_auth_message(&msg) {
+                statuses.insert(
+                    name,
+                    McpStatus::NeedsAuth {
+                        transport,
+                        message: msg,
+                    },
+                );
+            } else {
+                statuses.insert(name, McpStatus::Failed(msg));
+            }
+        }
+    }
+}
+
 async fn connect(name: &str, entry: &McpServerEntry) -> anyhow::Result<McpConnection> {
     match entry {
         McpServerEntry::Stdio(entry) => connect_stdio(name, entry).await,
@@ -206,14 +259,14 @@ async fn connect_stdio(name: &str, entry: &McpStdioServerEntry) -> anyhow::Resul
         });
     }
 
-    let connect_result =
-        tokio::time::timeout(std::time::Duration::from_secs(30), ().serve(transport)).await;
+    let connect_result = tokio::time::timeout(MCP_STDIO_CONNECT_TIMEOUT, ().serve(transport)).await;
 
     let service = match connect_result {
         Err(_) => {
             let stderr_tail = stderr_tail(&stderr_buf);
             anyhow::bail!(
-                "timeout connecting to MCP server '{name}' after 30s{}",
+                "timeout connecting to MCP server '{name}' after {}s{}",
+                MCP_STDIO_CONNECT_TIMEOUT.as_secs(),
                 stderr_tail
             );
         }
@@ -239,12 +292,15 @@ async fn connect_remote(name: &str, entry: &McpHttpServerEntry) -> anyhow::Resul
 
     let transport = StreamableHttpClientTransport::from_config(config);
 
-    let service =
-        match tokio::time::timeout(std::time::Duration::from_secs(30), ().serve(transport)).await {
-            Err(_) => anyhow::bail!("timeout connecting to MCP server '{name}' after 30s"),
-            Ok(Ok(service)) => service,
-            Ok(Err(err)) => return handle_remote_connect_error(name, entry, err).await,
-        };
+    let service = match tokio::time::timeout(MCP_REMOTE_CONNECT_TIMEOUT, ().serve(transport)).await
+    {
+        Err(_) => anyhow::bail!(
+            "timeout connecting to MCP server '{name}' after {}s",
+            MCP_REMOTE_CONNECT_TIMEOUT.as_secs()
+        ),
+        Ok(Ok(service)) => service,
+        Ok(Err(err)) => return handle_remote_connect_error(name, entry, err).await,
+    };
 
     finish_connection(name, service).await
 }

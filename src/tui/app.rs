@@ -182,6 +182,7 @@ impl App {
             env_context,
             thinking,
             picker_mode: PickerMode::Model,
+            is_mcp_loading: false,
         };
 
         let content_w = regions.output.content_width() as usize;
@@ -315,6 +316,7 @@ impl App {
             self.doc.warn("no model — run 'luma sync'");
         }
         self.render();
+        self.start_mcp_discovery();
 
         // On Windows, the console sends CTRL_C_EVENT to the process even in raw
         // mode. Without a handler the default action terminates the process.

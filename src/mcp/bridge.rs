@@ -2,23 +2,29 @@ use crate::core::tool::{ModelCaps, Tool, ToolExecution};
 use crate::core::types::ToolSchema;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::manager::McpManager;
 
-/// Global handle to the MCP manager, set once at startup.
-static MCP_MANAGER: std::sync::OnceLock<Arc<McpManager>> = std::sync::OnceLock::new();
+/// Global handle to the MCP manager. Replaced when background discovery finishes.
+static MCP_MANAGER: std::sync::OnceLock<RwLock<Option<Arc<McpManager>>>> =
+    std::sync::OnceLock::new();
 
 /// Initialize the global MCP manager. Called once from main/app startup.
 pub fn set_global_manager(manager: McpManager) {
-    let _ = MCP_MANAGER.set(Arc::new(manager));
+    let cell = MCP_MANAGER.get_or_init(|| RwLock::new(None));
+    if let Ok(mut guard) = cell.write() {
+        *guard = Some(Arc::new(manager));
+    }
 }
 
 /// Get the global MCP manager.
-pub fn global_manager() -> Option<&'static Arc<McpManager>> {
-    MCP_MANAGER.get()
+pub fn global_manager() -> Option<Arc<McpManager>> {
+    MCP_MANAGER
+        .get()
+        .and_then(|cell| cell.read().ok().and_then(|guard| guard.clone()))
 }
 
 /// A tool backed by an MCP server. Implements `core::tool::Tool` so it

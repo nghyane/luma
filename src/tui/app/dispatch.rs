@@ -126,6 +126,10 @@ impl super::App {
                 self.apply_loaded_session(&session, is_new);
                 Action::Render
             }
+            Event::McpReady => {
+                self.on_mcp_ready();
+                Action::Render
+            }
 
             // --- Streaming events — skipped while aborting ---
             _ if aborting => Action::Continue,

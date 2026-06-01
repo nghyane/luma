@@ -309,19 +309,8 @@ impl super::App {
         let thinking_dirty = sent.is_none_or(|s| s.thinking != desired.thinking);
 
         if prompt_dirty {
-            let skills = crate::config::skills::discover();
-            let skill_catalog = crate::config::skills::build_catalog(&skills);
-            let project_instructions = crate::config::instructions::discover();
-            let instructions_block =
-                crate::config::instructions::build_instructions(&project_instructions);
-            let style = crate::tool::ToolStyle::for_mode(desired.mode, &desired.source);
-            let base_prompt = crate::config::prompt::build(desired.mode, style);
-            let system_prompt = format!(
-                "{base_prompt}\n{}{skill_catalog}{instructions_block}",
-                self.config.env_context
-            );
-            let search_pref = crate::tool::search_preference_for(&desired.source);
-            let registry = crate::tool::build_registry(style, Self::search_backend(), search_pref);
+            let system_prompt = self.build_system_prompt(desired.mode, &desired.source);
+            let registry = self.build_registry(desired.mode, &desired.source);
             let _ = tx.try_send(AgentCommand::SetContext {
                 system_prompt,
                 registry,
