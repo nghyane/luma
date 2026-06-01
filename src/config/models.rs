@@ -5,8 +5,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{OnceLock, RwLock};
 
 const BUILTIN_MODELS_JSON: &str = include_str!("models.catalog.json");
+static MODEL_CACHE: OnceLock<RwLock<Vec<ModelEntry>>> = OnceLock::new();
 
 /// A discovered model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,8 +144,9 @@ pub fn has_synced() -> bool {
 pub fn add_custom_models(new_models: Vec<ModelEntry>) {
     let mut models = all_models();
     models.extend(new_models);
+    let models = normalize_models(models);
     let snapshot = Snapshot {
-        models: normalize_models(models),
+        models: models.clone(),
         synced_at: now_unix(),
         luma_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
@@ -156,6 +159,7 @@ pub fn add_custom_models(new_models: Vec<ModelEntry>) {
         serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
     )
     .ok();
+    set_model_cache(models);
 }
 
 /// Whether the cached snapshot is missing, older than
@@ -192,9 +196,24 @@ fn now_unix() -> u64 {
 
 /// All known models.
 pub fn all_models() -> Vec<ModelEntry> {
+    let cache = MODEL_CACHE.get_or_init(|| RwLock::new(load_models()));
+    cache
+        .read()
+        .map(|models| models.clone())
+        .unwrap_or_else(|_| load_models())
+}
+
+fn load_models() -> Vec<ModelEntry> {
     load_snapshot()
         .map(|s| s.models)
         .unwrap_or_else(builtin_models)
+}
+
+fn set_model_cache(models: Vec<ModelEntry>) {
+    let cache = MODEL_CACHE.get_or_init(|| RwLock::new(Vec::new()));
+    if let Ok(mut guard) = cache.write() {
+        *guard = models;
+    }
 }
 
 /// Context window for a model. Currently a constant default until per-model
@@ -290,8 +309,9 @@ pub async fn sync() -> Result<usize> {
                 .filter(|m| m.source == "cloudflare"),
         );
     }
+    let models = normalize_models(overlay_metadata(models));
     let snapshot = Snapshot {
-        models: normalize_models(overlay_metadata(models)),
+        models: models.clone(),
         synced_at: now_unix(),
         luma_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
@@ -301,6 +321,7 @@ pub async fn sync() -> Result<usize> {
         fs::create_dir_all(parent)?;
     }
     fs::write(&path, serde_json::to_string_pretty(&snapshot)?)?;
+    set_model_cache(models);
 
     let count = snapshot.models.len();
     Ok(count)
