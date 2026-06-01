@@ -214,11 +214,10 @@ impl App {
         app
     }
 
-    fn process_event(&mut self, event: Event) -> bool {
+    fn process_event(&mut self, event: Event) -> Action {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.handle(event)));
         match result {
-            Ok(Action::Continue | Action::Render) => false,
-            Ok(Action::Quit) => true,
+            Ok(action) => action,
             Err(panic) => {
                 let msg = if let Some(s) = panic.downcast_ref::<&str>() {
                     s.to_string()
@@ -229,7 +228,7 @@ impl App {
                 };
                 crate::dbg_log!("PANIC caught: {msg}");
                 self.doc.error(&format!("internal error: {msg}"));
-                false
+                Action::Render
             }
         }
     }
@@ -344,25 +343,38 @@ impl App {
 
         loop {
             let Some(event) = rx.recv().await else { break };
-            if self.process_event(event) {
-                break;
+            let mut should_render = false;
+            match self.process_event(event) {
+                Action::Continue => {}
+                Action::Render => should_render = true,
+                Action::Quit => break,
             }
             let mut drained = 1usize;
             while drained < DRAIN_BUDGET {
                 match rx.try_recv() {
-                    Some(event) => {
-                        if self.process_event(event) {
-                            self.render();
+                    Some(event) => match self.process_event(event) {
+                        Action::Continue => {
+                            drained += 1;
+                        }
+                        Action::Render => {
+                            should_render = true;
+                            drained += 1;
+                        }
+                        Action::Quit => {
+                            if should_render {
+                                self.render();
+                            }
                             Self::exit_terminal(&mut term);
                             drop(term);
                             std::process::exit(0);
                         }
-                        drained += 1;
-                    }
+                    },
                     None => break,
                 }
             }
-            self.render();
+            if should_render {
+                self.render();
+            }
         }
 
         Self::exit_terminal(&mut term);

@@ -148,8 +148,7 @@ impl super::App {
             Event::ToolInput { name, chunk } => {
                 crate::dbg_log!("tool_input {name}: {}B", chunk.len());
                 self.doc.tool_input(&name, &chunk);
-                self.render();
-                Action::Continue
+                Action::Render
             }
             Event::ToolOutput { name, chunk } => {
                 crate::dbg_log!(
@@ -157,8 +156,7 @@ impl super::App {
                     chunk.chars().take(60).collect::<String>()
                 );
                 self.doc.tool_output(&name, &chunk);
-                self.render();
-                Action::Continue
+                Action::Render
             }
             Event::ToolArtifact { name, artifact } => {
                 crate::dbg_log!("tool_artifact {name}");
