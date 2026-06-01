@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0-beta.5] - 2026-04-24
+
+### Added
+- **Cloudflare AI Gateway provider** — added first-class provider support for Cloudflare AI Gateway.
+- **Alibaba Cloud Coding Plan gateway** — added provider support for Alibaba Cloud's coding-plan gateway.
+
+### Fixed
+- **Alibaba thinking toggle** — wired the thinking toggle correctly for the Alibaba OpenAI-compatible lane.
+- **Buffered reasoning text** — Anthropic initial thinking blocks and final OpenAI Responses reasoning summaries are now emitted instead of being dropped when no delta arrives.
+
 ## [0.5.0-beta.2] - 2025-07-17
 
 ### Fixed
