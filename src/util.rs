@@ -53,6 +53,28 @@ pub fn is_uuid(s: &str) -> bool {
     true
 }
 
+/// Return the largest byte index `<= idx` that is a UTF-8 character boundary.
+pub(crate) fn floor_char_boundary(s: &str, idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    let mut i = idx;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Return a prefix no longer than `max_bytes` without splitting UTF-8 characters.
+pub(crate) fn byte_prefix(s: &str, max_bytes: usize) -> &str {
+    &s[..floor_char_boundary(s, max_bytes)]
+}
+
+/// Truncate a string to at most `max_bytes` without splitting UTF-8 characters.
+pub(crate) fn truncate_string_at_boundary(s: &mut String, max_bytes: usize) {
+    s.truncate(floor_char_boundary(s, max_bytes));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +109,20 @@ mod tests {
         assert!(!is_uuid("550e8400e29b41d4a716446655440000"));
         assert!(!is_uuid("550e8400-e29b-41d4-a716-44665544000z"));
         assert!(!is_uuid(""));
+    }
+
+    #[test]
+    fn byte_prefix_does_not_split_utf8() {
+        assert_eq!(byte_prefix("éclair", 1), "");
+        assert_eq!(byte_prefix("éclair", 2), "é");
+        assert_eq!(byte_prefix("éclair", 3), "éc");
+    }
+
+    #[test]
+    fn truncate_string_at_boundary_does_not_split_utf8() {
+        let mut s = format!("{}éx", "a".repeat(31_999));
+        truncate_string_at_boundary(&mut s, 32_000);
+        assert_eq!(s.len(), 31_999);
+        assert!(s.is_char_boundary(s.len()));
     }
 }

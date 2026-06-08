@@ -227,7 +227,7 @@ fn extract_error_message(body: &str) -> String {
                 .or_else(|| v["error"].as_str())
                 .map(std::borrow::ToOwned::to_owned)
         })
-        .unwrap_or_else(|| body[..body.len().min(200)].to_owned())
+        .unwrap_or_else(|| crate::util::byte_prefix(body, 200).to_owned())
 }
 
 /// Parse provider rate-limit headers into a normalized `UsageSnapshot`.
@@ -607,5 +607,12 @@ mod tests {
         );
         assert!(msg.contains("500"));
         assert!(msg.contains("something broke"));
+    }
+
+    #[test]
+    fn raw_error_message_clips_at_utf8_boundary() {
+        let body = format!("{}é", "a".repeat(199));
+        let msg = extract_error_message(&body);
+        assert_eq!(msg.len(), 199);
     }
 }

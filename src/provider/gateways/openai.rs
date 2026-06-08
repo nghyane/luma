@@ -36,6 +36,7 @@ impl Gateway for OpenAI {
         binding: &ModelBinding,
         credential: &Credential,
         _session_id: &str,
+        _options: crate::provider::gateway::ProviderOptions,
     ) -> Box<dyn Provider> {
         Box::new(OpenAIChatRuntime::new(
             &binding.model_id,

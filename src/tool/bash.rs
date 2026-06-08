@@ -193,7 +193,7 @@ async fn read_output(
     }
 
     if truncated {
-        out.truncate(HEAD_BYTES);
+        crate::util::truncate_string_at_boundary(&mut out, HEAD_BYTES);
         out.push_str(&format!(
             "\n\n[... {total_bytes} bytes total, middle truncated ...]\n\n"
         ));
@@ -221,13 +221,13 @@ fn accumulate(out: &mut String, tail: &mut String, truncated: &mut bool, chunk: 
         out.push_str(chunk);
         if out.len() > MAX_OUTPUT {
             *truncated = true;
-            let split = floor_char_boundary(out, out.len().saturating_sub(TAIL_BYTES));
+            let split = crate::util::floor_char_boundary(out, out.len().saturating_sub(TAIL_BYTES));
             *tail = out.split_off(split);
         }
     } else {
         tail.push_str(chunk);
         if tail.len() > TAIL_BYTES * 2 {
-            let start = floor_char_boundary(tail, tail.len() - TAIL_BYTES);
+            let start = crate::util::floor_char_boundary(tail, tail.len() - TAIL_BYTES);
             *tail = tail[start..].to_owned();
         }
     }
@@ -291,18 +291,6 @@ fn shell_single_quote(s: &str) -> String {
     }
     out.push('\'');
     out
-}
-
-/// Find the largest byte index `<= idx` that is a char boundary.
-fn floor_char_boundary(s: &str, idx: usize) -> usize {
-    if idx >= s.len() {
-        return s.len();
-    }
-    let mut i = idx;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
 }
 
 #[cfg(test)]

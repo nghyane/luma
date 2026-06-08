@@ -112,16 +112,18 @@ pub enum AgentCommand {
         files: Vec<FileAttach>,
         cancel: tokio_util::sync::CancellationToken,
     },
-    /// Switch model (agent rebuilds provider with auth on next turn).
-    SetModel { model_id: String, source: String },
     /// Update thinking level on current provider.
     SetThinking(crate::core::types::ThinkingLevel),
-    /// Hot-swap the system prompt and tool registry without dropping the
-    /// session transcript. Used when the user switches agent mode so
-    /// context (history, doc, status) is preserved across the change.
-    SetContext {
-        system_prompt: String,
-        registry: crate::core::registry::Registry,
+    /// Update request latency policy on current provider.
+    SetLatencyMode(crate::core::types::LatencyMode),
+    /// Atomically replace the runtime config before a queued chat turn.
+    SetRuntimeConfig {
+        model_id: String,
+        source: String,
+        system_prompt: Option<String>,
+        registry: Option<crate::core::registry::Registry>,
+        thinking: crate::core::types::ThinkingLevel,
+        latency: crate::core::types::LatencyMode,
     },
     /// Replace the current thread with a specific session.
     /// `is_new` is set by the caller (App) — true for `/new`, false for resume.

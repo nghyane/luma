@@ -161,11 +161,13 @@ impl App {
         prompt.add_command("sessions", "browse sessions");
         prompt.add_command("accounts", "view account pool");
         prompt.add_command("mcp", "MCP server status");
+        prompt.add_command("fast", "toggle fast mode");
         prompt.add_command("exit", "quit luma");
 
         let mode = crate::config::prefs::load_mode();
         let model = models::resolve_default(mode);
         let thinking = crate::config::prefs::load_thinking();
+        let latency = crate::config::prefs::load_latency_mode();
 
         let ui = UiComponents {
             prompt,
@@ -181,6 +183,7 @@ impl App {
             model,
             env_context,
             thinking,
+            latency,
             picker_mode: PickerMode::Model,
             is_mcp_loading: false,
         };
@@ -203,6 +206,9 @@ impl App {
             term,
         };
         app.update_status();
+        app.ui
+            .prompt
+            .set_command_visible("fast", app.current_model_supports_fast_mode());
         app.refresh_pool_health();
         let thinking_caps = app.current_thinking_capabilities();
         let thinking = thinking_caps.coerce(thinking);

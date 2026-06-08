@@ -1,5 +1,5 @@
 /// Centered modal dialog — accounts list with actions.
-use crate::tui::text::{Line, Span};
+use crate::tui::text::{Line, Span, char_width, display_width};
 use crate::tui::theme::{icon, palette};
 use smallvec::smallvec;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
@@ -116,7 +116,7 @@ impl Dialog {
 
         // ┌─ title ──────┐
         let title_str = format!(" {} ", self.title);
-        let dashes = box_w.saturating_sub(2 + title_str.len());
+        let dashes = box_w.saturating_sub(2 + display_width(&title_str));
         let dl = dashes / 2;
         let dr = dashes - dl;
         rows.push(Line::new(smallvec![
@@ -149,9 +149,10 @@ impl Dialog {
             // col2 is right-aligned; col1 fills the rest
             let col2 = &item.col2;
             // col1_max: content_w minus col2 length minus 1 separator space
-            let col1_max = content_w.saturating_sub(col2.len() + 1);
+            let col2_w = display_width(col2);
+            let col1_max = content_w.saturating_sub(col2_w + 1);
             let col1 = truncate(&item.col1, col1_max);
-            let pad = content_w.saturating_sub(col1.len() + col2.len() + 1);
+            let pad = content_w.saturating_sub(display_width(&col1) + col2_w + 1);
 
             if is_sel {
                 // │ ▶ ● col1 <pad> col2  │
@@ -189,7 +190,7 @@ impl Dialog {
         let hint = "enter: toggle  r: remove  esc: close";
         let hint_w = content_w + overhead - 4; // hint spans between │  and  │
         let hint_str = truncate(hint, hint_w);
-        let hint_pad = hint_w.saturating_sub(hint_str.len());
+        let hint_pad = hint_w.saturating_sub(display_width(&hint_str));
         rows.push(Line::new(smallvec![
             Span::new("│  ".to_owned(), palette::BORDER),
             Span::new(hint_str, palette::MUTED),
@@ -229,9 +230,38 @@ fn full_border_row(box_w: usize) -> Line {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if display_width(s) <= max {
         s.to_owned()
+    } else if max == 0 {
+        String::new()
     } else {
-        format!("{}…", &s[..max.saturating_sub(1)])
+        let text_w = max.saturating_sub(char_width('…'));
+        let mut out = String::new();
+        let mut width = 0;
+        for ch in s.chars() {
+            let ch_width = char_width(ch);
+            if width + ch_width > text_w {
+                break;
+            }
+            out.push(ch);
+            width += ch_width;
+        }
+        out.push('…');
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_does_not_split_utf8() {
+        assert_eq!(truncate("éclair", 2), "é…");
+    }
+
+    #[test]
+    fn truncate_respects_display_width() {
+        assert_eq!(display_width(&truncate("hello界", 6)), 6);
     }
 }

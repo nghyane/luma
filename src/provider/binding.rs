@@ -6,8 +6,9 @@
 
 use crate::config::auth::Credential;
 use crate::core::provider::{Provider, ThinkingCapabilities};
-use crate::core::types::ThinkingLevel;
+use crate::core::types::{LatencyMode, ThinkingLevel};
 pub use crate::provider::gateway::GatewayId;
+use crate::provider::gateway::ProviderOptions;
 use crate::provider::gateways;
 
 /// Identifier for a wire protocol. Decoupled from `GatewayId` so a
@@ -70,6 +71,11 @@ pub fn thinking_capabilities(gateway: GatewayId, model_id: &str) -> ThinkingCapa
     gateways::lookup(gateway).thinking(model_id)
 }
 
+/// Whether a gateway supports fast request routing.
+pub fn supports_fast_mode(gateway: GatewayId) -> bool {
+    gateways::lookup(gateway).supports_fast_mode()
+}
+
 /// Build a ready-to-stream provider. Thinking level is coerced to the
 /// gateway's supported set before the provider is returned.
 pub fn build_provider(
@@ -77,9 +83,10 @@ pub fn build_provider(
     credential: &Credential,
     session_id: &str,
     thinking: ThinkingLevel,
+    latency: LatencyMode,
 ) -> Box<dyn Provider> {
     let g = gateways::lookup(binding.gateway);
-    let mut provider = g.build(binding, credential, session_id);
+    let mut provider = g.build(binding, credential, session_id, ProviderOptions { latency });
     let coerced = g.coerce_thinking(&binding.model_id, thinking);
     provider.set_thinking(coerced);
     provider

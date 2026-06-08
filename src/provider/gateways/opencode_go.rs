@@ -61,6 +61,7 @@ impl Gateway for OpenCodeGo {
         binding: &ModelBinding,
         credential: &Credential,
         _session_id: &str,
+        _options: crate::provider::gateway::ProviderOptions,
     ) -> Box<dyn Provider> {
         match binding.protocol {
             ProtocolId::AnthropicMessages => Box::new(AnthropicRuntime::new(

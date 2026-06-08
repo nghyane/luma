@@ -119,6 +119,10 @@ impl super::App {
                 self.open_accounts_dialog();
                 Action::Render
             }
+            "fast" => {
+                self.toggle_fast_mode();
+                Action::Render
+            }
             "exit" => Action::Quit,
             "mcp" => {
                 self.enter_chat();
@@ -258,6 +262,7 @@ impl super::App {
             // see `commit_pending_config`. Keep this path local-only so
             // picking a model doesn't mutate the transcript.
             self.update_status();
+            self.sync_prompt_commands();
         }
     }
 
@@ -282,50 +287,52 @@ impl super::App {
         self.sync_prompt_commands();
     }
 
-    /// If the user's local config has drifted from what the agent loop is
-    /// running, push the minimal set of `Set*` commands to catch it up.
-    /// Called right before sending `AgentCommand::Chat`.
-    pub(super) fn commit_pending_config(&mut self) {
+    /// If local config drifted, atomically queue a runtime update before Chat.
+    pub(super) fn commit_pending_config(&mut self) -> bool {
         let Some(model) = self.config.model.clone() else {
-            return;
+            return true;
         };
         let Some(tx) = self.agent.tx.clone() else {
-            return;
+            return true;
         };
         let desired = super::state::SentConfig {
             mode: self.config.mode,
             model_id: model.id.clone(),
             source: model.source.clone(),
             thinking: self.config.thinking,
+            latency: self.config.latency,
         };
         if self.agent.last_sent.as_ref() == Some(&desired) {
-            return;
+            return true;
         }
         let sent = self.agent.last_sent.as_ref();
         let prompt_dirty =
             sent.is_none_or(|s| s.mode != desired.mode || s.source != desired.source);
-        let model_dirty =
-            sent.is_none_or(|s| s.model_id != desired.model_id || s.source != desired.source);
-        let thinking_dirty = sent.is_none_or(|s| s.thinking != desired.thinking);
+        let (system_prompt, registry) = if prompt_dirty {
+            (
+                Some(self.build_system_prompt(desired.mode, &desired.source)),
+                Some(self.build_registry(desired.mode, &desired.source)),
+            )
+        } else {
+            (None, None)
+        };
 
-        if prompt_dirty {
-            let system_prompt = self.build_system_prompt(desired.mode, &desired.source);
-            let registry = self.build_registry(desired.mode, &desired.source);
-            let _ = tx.try_send(AgentCommand::SetContext {
-                system_prompt,
-                registry,
-            });
-        }
-        if model_dirty {
-            let _ = tx.try_send(AgentCommand::SetModel {
+        if tx
+            .try_send(AgentCommand::SetRuntimeConfig {
                 model_id: desired.model_id.clone(),
                 source: desired.source.clone(),
-            });
-        }
-        if thinking_dirty {
-            let _ = tx.try_send(AgentCommand::SetThinking(desired.thinking));
+                system_prompt,
+                registry,
+                thinking: desired.thinking,
+                latency: desired.latency,
+            })
+            .is_err()
+        {
+            self.doc.warn("agent is busy; try again in a moment");
+            return false;
         }
         self.agent.last_sent = Some(desired);
+        true
     }
 
     pub(super) fn resume_session(&mut self, picker_id: &str) {
@@ -432,6 +439,48 @@ impl super::App {
             .set_thinking_level(thinking_caps.label(self.config.thinking));
     }
 
+    pub(super) fn toggle_fast_mode(&mut self) {
+        if !self.current_model_supports_fast_mode() {
+            self.doc.info("fast mode not available for this model");
+            return;
+        }
+        self.config.latency = self.config.latency.toggled();
+        if let Some(tx) = &self.agent.tx
+            && tx
+                .try_send(AgentCommand::SetLatencyMode(self.config.latency))
+                .is_err()
+        {
+            self.doc
+                .warn("agent is busy; fast mode change will apply next turn");
+        }
+        crate::config::prefs::save_latency_mode(self.config.latency);
+        self.update_status();
+        let suffix = if matches!(
+            self.agent.state,
+            super::state::RunState::Streaming
+                | super::state::RunState::PendingAbort
+                | super::state::RunState::Aborting
+        ) {
+            " (applies next turn)"
+        } else {
+            ""
+        };
+        let state = if self.config.latency.is_fast() {
+            "on"
+        } else {
+            "off"
+        };
+        self.doc.info(&format!("fast mode: {state}{suffix}"));
+    }
+
+    pub(super) fn current_model_supports_fast_mode(&self) -> bool {
+        let Some(model) = self.config.model.as_ref() else {
+            return false;
+        };
+        let gateway = crate::provider::binding::GatewayId::from_source(&model.source);
+        crate::provider::binding::supports_fast_mode(gateway)
+    }
+
     pub(super) fn update_status(&mut self) {
         let mode_color = match self.config.mode {
             AgentMode::Rush => palette::MODE_RUSH,
@@ -459,6 +508,9 @@ impl super::App {
             })
             .unwrap_or("");
         self.ui.status.set_provider(provider);
+        self.ui.status.set_fast_mode(
+            self.current_model_supports_fast_mode() && self.config.latency.is_fast(),
+        );
         let thinking_caps = self.current_thinking_capabilities();
         let thinking = thinking_caps.coerce(self.config.thinking);
         self.config.thinking = thinking;
@@ -472,6 +524,9 @@ impl super::App {
         let is_new_thread = !self.doc.has_user_content();
         self.ui.prompt.set_command_visible("resume", is_new_thread);
         self.ui.prompt.set_command_visible("new", !is_new_thread);
+        self.ui
+            .prompt
+            .set_command_visible("fast", self.current_model_supports_fast_mode());
     }
 }
 

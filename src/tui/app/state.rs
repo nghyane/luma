@@ -1,6 +1,6 @@
 /// App state decomposition.
 use crate::config::models::{AgentMode, ModelEntry};
-use crate::core::types::ThinkingLevel;
+use crate::core::types::{LatencyMode, ThinkingLevel};
 use crate::event::AgentCommand;
 use crate::tui::picker::Picker;
 use crate::tui::prompt::PromptState;
@@ -47,6 +47,7 @@ pub struct AppConfig {
     pub model: Option<ModelEntry>,
     pub env_context: String,
     pub thinking: ThinkingLevel,
+    pub latency: LatencyMode,
     pub picker_mode: PickerMode,
     pub is_mcp_loading: bool,
 }
@@ -83,6 +84,7 @@ pub struct SentConfig {
     pub model_id: String,
     pub source: String,
     pub thinking: ThinkingLevel,
+    pub latency: LatencyMode,
 }
 
 impl AgentHandle {

@@ -397,6 +397,46 @@ impl ThinkingLevel {
     }
 }
 
+/// User-selected request latency policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LatencyMode {
+    Standard,
+    #[default]
+    Fast,
+}
+
+impl LatencyMode {
+    /// Preference label persisted on disk.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Fast => "fast",
+        }
+    }
+
+    /// Parse a persisted latency preference.
+    pub fn from_pref(raw: &str) -> Option<Self> {
+        match raw {
+            "standard" => Some(Self::Standard),
+            "fast" => Some(Self::Fast),
+            _ => None,
+        }
+    }
+
+    /// Whether this policy prefers lower latency over standard routing.
+    pub const fn is_fast(self) -> bool {
+        matches!(self, Self::Fast)
+    }
+
+    /// Toggle between standard and fast routing.
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Standard => Self::Fast,
+            Self::Fast => Self::Standard,
+        }
+    }
+}
+
 /// Token usage from a provider response.
 #[derive(Debug, Clone, Default)]
 pub struct Usage {

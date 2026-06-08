@@ -70,7 +70,9 @@ impl super::App {
             return;
         }
         self.ensure_agent_loop();
-        self.commit_pending_config();
+        if !self.commit_pending_config() {
+            return;
+        }
         self.enter_chat();
         self.doc.user_message(&content);
         self.sync_prompt_commands();
@@ -179,6 +181,7 @@ impl super::App {
             source: model.source.clone(),
             system_prompt,
             thinking: self.config.thinking,
+            latency: self.config.latency,
             capabilities: model.capabilities.clone(),
         };
 
@@ -190,6 +193,7 @@ impl super::App {
             model_id: model.id.clone(),
             source: model.source.clone(),
             thinking: self.config.thinking,
+            latency: self.config.latency,
         });
     }
 
@@ -200,12 +204,27 @@ impl super::App {
         let Some(tx) = self.agent.tx.clone() else {
             return;
         };
-        let system_prompt = self.build_system_prompt(self.config.mode, &model.source);
-        let registry = self.build_registry(self.config.mode, &model.source);
-        let _ = tx.try_send(AgentCommand::SetContext {
-            system_prompt,
-            registry,
-        });
+        let system_prompt = Some(self.build_system_prompt(self.config.mode, &model.source));
+        let registry = Some(self.build_registry(self.config.mode, &model.source));
+        if tx
+            .try_send(AgentCommand::SetRuntimeConfig {
+                model_id: model.id.clone(),
+                source: model.source.clone(),
+                system_prompt,
+                registry,
+                thinking: self.config.thinking,
+                latency: self.config.latency,
+            })
+            .is_ok()
+        {
+            self.agent.last_sent = Some(super::state::SentConfig {
+                mode: self.config.mode,
+                model_id: model.id,
+                source: model.source,
+                thinking: self.config.thinking,
+                latency: self.config.latency,
+            });
+        }
     }
 
     pub(super) fn build_system_prompt(

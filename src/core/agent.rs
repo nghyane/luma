@@ -8,7 +8,7 @@ pub use summary::format_tool_summary;
 use crate::core::registry::Registry;
 use crate::core::session::Session;
 use crate::core::types::ContentBlock;
-use crate::core::types::{Message, Role, ThinkingLevel};
+use crate::core::types::{LatencyMode, Message, Role, ThinkingLevel};
 use crate::event::{AgentCommand, Event};
 use tokio::sync::mpsc;
 
@@ -18,6 +18,7 @@ pub struct AgentConfig {
     pub source: String,
     pub system_prompt: String,
     pub thinking: ThinkingLevel,
+    pub latency: LatencyMode,
     /// Capability flags from the model catalog (e.g. `"vision"`). Passed
     /// through to tool execution so tools can branch on what the model
     /// can consume.
@@ -131,9 +132,9 @@ async fn agent_loop(
                             r = &mut turn_fut => break r,
                             Some(mid_cmd) = cmd_rx.recv() => {
                                 match mid_cmd {
-                                    AgentCommand::SetModel { .. }
-                                    | AgentCommand::SetContext { .. }
-                                    | AgentCommand::SetThinking(_) => {
+                                    AgentCommand::SetThinking(_)
+                                    | AgentCommand::SetLatencyMode(_)
+                                    | AgentCommand::SetRuntimeConfig { .. } => {
                                         deferred_cmds.push(mid_cmd);
                                     }
                                     AgentCommand::LoadSession { .. }
@@ -198,9 +199,9 @@ async fn agent_loop(
                     })
                     .await;
             }
-            AgentCommand::SetModel { .. }
-            | AgentCommand::SetContext { .. }
-            | AgentCommand::SetThinking(_) => {
+            AgentCommand::SetThinking(_)
+            | AgentCommand::SetLatencyMode(_)
+            | AgentCommand::SetRuntimeConfig { .. } => {
                 apply_config_cmd(cmd, &mut config, &mut registry, &mut session);
             }
         }
@@ -218,28 +219,37 @@ fn apply_config_cmd(
     session: &mut Session,
 ) {
     match cmd {
-        AgentCommand::SetModel { model_id, source } => {
-            config.model_id = model_id;
-            config.source = source;
-        }
-        AgentCommand::SetContext {
-            system_prompt,
-            registry: new_registry,
-        } => {
-            config.system_prompt = system_prompt.clone();
-            *registry = new_registry;
-            if let Some(first) = session.messages.first_mut()
-                && first.role == Role::System
-            {
-                first.content = vec![ContentBlock::Text {
-                    text: system_prompt,
-                }];
-            } else if !system_prompt.is_empty() {
-                session.messages.insert(0, Message::system(system_prompt));
-            }
-        }
         AgentCommand::SetThinking(level) => {
             config.thinking = level;
+        }
+        AgentCommand::SetLatencyMode(mode) => {
+            config.latency = mode;
+        }
+        AgentCommand::SetRuntimeConfig {
+            model_id,
+            source,
+            system_prompt,
+            registry: new_registry,
+            thinking,
+            latency,
+        } => {
+            config.model_id = model_id;
+            config.source = source;
+            config.thinking = thinking;
+            config.latency = latency;
+            if let (Some(system_prompt), Some(new_registry)) = (system_prompt, new_registry) {
+                config.system_prompt = system_prompt.clone();
+                *registry = new_registry;
+                if let Some(first) = session.messages.first_mut()
+                    && first.role == Role::System
+                {
+                    first.content = vec![ContentBlock::Text {
+                        text: system_prompt,
+                    }];
+                } else if !system_prompt.is_empty() {
+                    session.messages.insert(0, Message::system(system_prompt));
+                }
+            }
         }
         _ => {}
     }

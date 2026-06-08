@@ -228,6 +228,7 @@ fn spawn_agent(event_tx: event_bus::Sender) -> (String, mpsc::Sender<AgentComman
         source: source.clone(),
         system_prompt,
         thinking: crate::core::types::ThinkingLevel::Off,
+        latency: crate::config::prefs::load_latency_mode(),
         capabilities,
     };
 

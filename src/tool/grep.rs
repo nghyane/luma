@@ -159,7 +159,12 @@ impl Tool for GrepTool {
             for m in &matches {
                 let _ = output_tx.send(format!("{}:{}", m.path, m.line_num)).await;
                 let line = if m.line.len() > MAX_LINE_LEN {
-                    format!("{}:{}:{}...", m.path, m.line_num, &m.line[..MAX_LINE_LEN])
+                    format!(
+                        "{}:{}:{}...",
+                        m.path,
+                        m.line_num,
+                        crate::util::byte_prefix(&m.line, MAX_LINE_LEN)
+                    )
                 } else {
                     format!("{}:{}:{}", m.path, m.line_num, m.line)
                 };
@@ -211,6 +216,24 @@ mod tests {
             .await
             .unwrap();
         assert!(result.result.as_text().contains("fn main"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn grep_truncates_long_utf8_line_at_char_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let line = format!("{}é needle\n", "a".repeat(MAX_LINE_LEN - 1));
+        std::fs::write(root.join("utf8.txt"), line).unwrap();
+
+        let (tx, _rx) = mpsc::channel(64);
+        let tool = GrepTool;
+        let args = serde_json::json!({"pattern": "needle", "path": root.to_str().unwrap()});
+        let result = tool
+            .execute(args, tx, CancellationToken::new(), Default::default())
+            .await
+            .unwrap();
+
+        assert!(result.result.as_text().contains("..."));
     }
 
     #[tokio::test]

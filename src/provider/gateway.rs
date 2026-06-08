@@ -13,9 +13,15 @@
 
 use crate::config::auth::{AuthVendor, Credential};
 use crate::core::provider::{Provider, ThinkingCapabilities};
-use crate::core::types::ThinkingLevel;
+use crate::core::types::{LatencyMode, ThinkingLevel};
 use crate::provider::binding::{ModelBinding, ProtocolId};
 use crate::provider::quirks::QuirkSet;
+
+/// Request-shaping options that are independent from model selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderOptions {
+    pub latency: LatencyMode,
+}
 
 /// Stable identifier for a gateway. One variant per `gateways::GATEWAYS`
 /// entry; consumed by `AgentConfig.source` parsing and registry lookup.
@@ -59,6 +65,11 @@ pub trait Gateway: Send + Sync {
     /// Thinking-control capabilities surfaced to the TUI.
     fn thinking(&self, model_id: &str) -> ThinkingCapabilities;
 
+    /// Whether this gateway can honor [`LatencyMode::Fast`].
+    fn supports_fast_mode(&self) -> bool {
+        false
+    }
+
     /// Materialise a streaming runtime for `binding` using `credential`.
     /// `session_id` is forwarded to runtimes that need per-turn session
     /// headers (Codex Responses).
@@ -67,6 +78,7 @@ pub trait Gateway: Send + Sync {
         binding: &ModelBinding,
         credential: &Credential,
         session_id: &str,
+        options: ProviderOptions,
     ) -> Box<dyn Provider>;
 
     /// Convenience: coerce `desired` to a level this gateway supports

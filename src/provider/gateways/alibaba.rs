@@ -117,6 +117,7 @@ impl Gateway for Alibaba {
         binding: &ModelBinding,
         credential: &Credential,
         _session_id: &str,
+        _options: crate::provider::gateway::ProviderOptions,
     ) -> Box<dyn Provider> {
         let base_url = Self::base_url_for(binding.protocol);
         match binding.protocol {

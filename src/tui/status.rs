@@ -47,6 +47,7 @@ pub struct StatusBar {
     info: ModelInfo,
     usage: UsageStats,
     thinking_level: String,
+    fast_mode: bool,
     spinner_idx: usize,
     pool: PoolHealth,
 }
@@ -69,6 +70,7 @@ impl StatusBar {
                 cache_write: 0,
             },
             thinking_level: String::new(),
+            fast_mode: false,
             spinner_idx: 0,
             pool: PoolHealth::default(),
         }
@@ -98,6 +100,11 @@ impl StatusBar {
     /// Set thinking level label.
     pub fn set_thinking_level(&mut self, level: &str) {
         self.thinking_level = level.to_owned();
+    }
+
+    /// Set whether the compact fast-mode chip is visible.
+    pub fn set_fast_mode(&mut self, enabled: bool) {
+        self.fast_mode = enabled;
     }
 
     /// Set context window usage — tokens and percentage.
@@ -159,6 +166,10 @@ impl StatusBar {
         if !self.thinking_level.is_empty() && self.thinking_level != "off" {
             spans.push(Span::new(" · ".to_owned(), palette::MUTED));
             spans.push(Span::new(self.thinking_level.clone(), palette::WARN));
+        }
+        if self.fast_mode {
+            spans.push(Span::new(" · ".to_owned(), palette::MUTED));
+            spans.push(Span::new("fast".to_owned(), palette::ACCENT));
         }
 
         Line::new(spans)
@@ -297,6 +308,21 @@ mod tests {
         let text: String = l.spans.iter().map(|s| s.text.as_str()).collect();
         assert!(text.contains("deep"));
         assert!(text.contains("o3"));
+    }
+
+    #[test]
+    fn mode_line_shows_fast_only_when_enabled() {
+        let mut sb = StatusBar::new();
+        sb.set_mode("deep", palette::MODE_DEEP);
+        sb.set_model("gpt-5.4");
+        let l = sb.mode_line();
+        let text: String = l.spans.iter().map(|s| s.text.as_str()).collect();
+        assert!(!text.contains("fast"));
+
+        sb.set_fast_mode(true);
+        let l = sb.mode_line();
+        let text: String = l.spans.iter().map(|s| s.text.as_str()).collect();
+        assert!(text.contains("fast"));
     }
 
     #[test]

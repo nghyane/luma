@@ -182,7 +182,7 @@ fn build_provider(
 ) -> Box<dyn Provider> {
     use crate::provider::binding;
     let binding = binding::resolve(&config.source, &config.model_id);
-    binding::build_provider(&binding, auth, session_id, config.thinking)
+    binding::build_provider(&binding, auth, session_id, config.thinking, config.latency)
 }
 
 /// Whether an error is a transient stream failure worth retrying.
@@ -691,7 +691,7 @@ fn maybe_promote_to_evidence(
         Err(e) => {
             crate::dbg_log!("evidence ingest failed for {tool_use_id}: {e}");
             if text.len() > SAFETY_FALLBACK_CAP {
-                text.truncate(SAFETY_FALLBACK_CAP);
+                crate::util::truncate_string_at_boundary(&mut text, SAFETY_FALLBACK_CAP);
                 text.push_str(crate::core::tool::TRUNCATION_MARKER);
             }
             (rebuild(text, images), None)

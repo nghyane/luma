@@ -18,6 +18,7 @@ pub enum PromptAction {
         Vec<(String, Vec<u8>)>,
     ),
     ToggleThinking,
+    ToggleFastMode,
 }
 
 /// Input prompt state.
@@ -55,9 +56,12 @@ impl PromptState {
         }
     }
 
-    /// Whether `name` is an exact registered slash command.
+    /// Whether `name` is an exact visible slash command.
     pub fn is_registered_command(&self, name: &str) -> bool {
-        self.comp.commands.iter().any(|cmd| cmd.name == name)
+        self.comp
+            .commands
+            .iter()
+            .any(|cmd| cmd.visible && cmd.name == name)
     }
 
     /// Attach an image at cursor position.
@@ -187,8 +191,11 @@ impl PromptState {
     pub(super) fn ghost(&self) -> String {
         if let Some(query) = self.at_file_query() {
             let matches = self.comp.file_matches(&query);
-            if matches.len() == 1 && matches[0] != query {
-                return matches[0][query.len()..].to_owned();
+            if matches.len() == 1
+                && matches[0] != query
+                && let Some(suffix) = matches[0].strip_prefix(&query)
+            {
+                return suffix.to_owned();
             }
             return String::new();
         }
@@ -200,10 +207,15 @@ impl PromptState {
             return String::new();
         }
         let q = self.command_query();
-        if matches[0].name == q {
+        let q_lower = q.to_lowercase();
+        if matches[0].name == q_lower {
             return String::new();
         }
-        matches[0].name[q.len()..].to_owned()
+        matches[0]
+            .name
+            .strip_prefix(&q_lower)
+            .unwrap_or_default()
+            .to_owned()
     }
 
     pub(super) fn apply_ghost(&mut self) {
@@ -284,6 +296,15 @@ mod tests {
     }
 
     #[test]
+    fn file_ghost_ignores_non_prefix_utf8_match() {
+        let mut p = PromptState::new();
+        p.comp.file_cache = vec!["a🙂".into()];
+        p.comp.file_cache_valid = true;
+        type_str(&mut p, "@🙂");
+        assert_eq!(p.ghost(), "");
+    }
+
+    #[test]
     fn command_submit() {
         let mut p = PromptState::new();
         p.add_command("new", "new thread");
@@ -305,6 +326,15 @@ mod tests {
         let mut p = PromptState::new();
         type_str(&mut p, "hello");
         assert!(matches!(p.handle_key(&ctrl('c')), PromptAction::None));
+    }
+
+    #[test]
+    fn ctrl_f_toggles_fast_mode() {
+        let mut p = PromptState::new();
+        assert!(matches!(
+            p.handle_key(&ctrl('f')),
+            PromptAction::ToggleFastMode
+        ));
     }
 
     #[test]
@@ -480,5 +510,14 @@ mod tests {
         type_str(&mut p, "/");
         assert_eq!(p.get_matches().len(), 1);
         assert_eq!(p.get_matches()[0].name, "new");
+    }
+
+    #[test]
+    fn hidden_command_is_not_dispatchable() {
+        let mut p = PromptState::new();
+        p.add_command("fast", "toggle fast mode");
+        assert!(p.is_registered_command("fast"));
+        p.set_command_visible("fast", false);
+        assert!(!p.is_registered_command("fast"));
     }
 }

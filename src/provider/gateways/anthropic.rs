@@ -74,6 +74,7 @@ impl Gateway for Anthropic {
         binding: &ModelBinding,
         credential: &Credential,
         _session_id: &str,
+        _options: crate::provider::gateway::ProviderOptions,
     ) -> Box<dyn Provider> {
         Box::new(AnthropicRuntime::new(
             &binding.model_id,

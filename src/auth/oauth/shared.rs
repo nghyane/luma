@@ -280,7 +280,7 @@ async fn post_token(
     if !status.is_success() {
         bail!(
             "token exchange HTTP {status}: {}",
-            &text[..text.len().min(300)]
+            crate::util::byte_prefix(&text, 300)
         );
     }
     serde_json::from_str(&text).context("bad token exchange json")

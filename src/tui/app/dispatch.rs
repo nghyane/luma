@@ -375,6 +375,10 @@ impl super::App {
                 self.cycle_thinking();
                 Action::Render
             }
+            PromptAction::ToggleFastMode => {
+                self.toggle_fast_mode();
+                Action::Render
+            }
         }
     }
 

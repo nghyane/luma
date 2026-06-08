@@ -1,6 +1,6 @@
 /// Preferences — persisted mode, model per mode, thinking level, last session.
 use crate::config::models::AgentMode;
-use crate::core::types::ThinkingLevel;
+use crate::core::types::{LatencyMode, ThinkingLevel};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -18,6 +18,10 @@ struct Prefs {
     mode: String,
     #[serde(default)]
     thinking: String,
+    #[serde(default)]
+    latency_mode: String,
+    #[serde(default, skip_serializing)]
+    codex_fast_mode: Option<bool>,
     #[serde(default)]
     modes: HashMap<String, ModePrefs>,
     #[serde(default)]
@@ -66,6 +70,26 @@ pub fn load_thinking() -> ThinkingLevel {
     }
 }
 
+/// Load the request latency policy.
+pub fn load_latency_mode() -> LatencyMode {
+    let prefs = fs::read_to_string(prefs_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Prefs>(&s).ok());
+    if let Some(prefs) = prefs {
+        if let Some(mode) = LatencyMode::from_pref(&prefs.latency_mode) {
+            return mode;
+        }
+        if let Some(enabled) = prefs.codex_fast_mode {
+            return if enabled {
+                LatencyMode::Fast
+            } else {
+                LatencyMode::Standard
+            };
+        }
+    }
+    LatencyMode::default()
+}
+
 /// Load per-mode preferences.
 pub fn load_mode_prefs(mode: AgentMode) -> ModePrefs {
     fs::read_to_string(prefs_path())
@@ -102,6 +126,11 @@ pub fn save_thinking(level: ThinkingLevel) {
     update_prefs(|p| p.thinking = label.to_owned());
 }
 
+/// Save the request latency policy.
+pub fn save_latency_mode(mode: LatencyMode) {
+    update_prefs(|p| p.latency_mode = mode.as_str().to_owned());
+}
+
 /// Load last session for current workspace.
 pub fn load_last_session() -> Option<String> {
     let cwd = std::env::current_dir().ok()?.to_string_lossy().into_owned();
@@ -130,6 +159,8 @@ fn update_prefs(f: impl FnOnce(&mut Prefs)) {
         .unwrap_or(Prefs {
             mode: "smart".into(),
             thinking: String::new(),
+            latency_mode: LatencyMode::default().as_str().to_owned(),
+            codex_fast_mode: None,
             modes: HashMap::new(),
             workspaces: HashMap::new(),
         });
@@ -160,5 +191,10 @@ mod tests {
     fn workspace_prefs_default() {
         let prefs = WorkspacePrefs::default();
         assert!(prefs.last_session.is_none());
+    }
+
+    #[test]
+    fn latency_mode_defaults_fast() {
+        assert_eq!(LatencyMode::default(), LatencyMode::Fast);
     }
 }

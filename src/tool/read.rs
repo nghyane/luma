@@ -222,7 +222,10 @@ impl Tool for ReadTool {
                     continue;
                 } // keep counting total_lines
                 if line.len() > MAX_LINE_LEN {
-                    result.push_str(&format!("{line_num}: {}...\n", &line[..MAX_LINE_LEN]));
+                    result.push_str(&format!(
+                        "{line_num}: {}...\n",
+                        crate::util::byte_prefix(&line, MAX_LINE_LEN)
+                    ));
                 } else {
                     result.push_str(&format!("{line_num}: {line}\n"));
                 }
@@ -626,6 +629,29 @@ mod tests {
 
         assert!(result.result.as_text().contains("1: line1"));
         assert!(result.result.as_text().contains("3: line3"));
+    }
+
+    #[tokio::test]
+    async fn read_truncates_long_utf8_line_at_char_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("utf8.txt");
+        let line = format!("{}é\n", "a".repeat(MAX_LINE_LEN - 1));
+        std::fs::write(&file, line).unwrap();
+
+        let tool = ReadTool;
+        let (tx, _rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let result = tool
+            .execute(
+                serde_json::json!({"path": file.to_str().unwrap()}),
+                tx,
+                cancel,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.result.as_text().contains("..."));
     }
 
     #[tokio::test]

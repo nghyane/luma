@@ -12,15 +12,27 @@ const MAX_EDIT_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
 
 /// Normalize curly quotes to straight quotes for fuzzy matching.
 fn normalize_quotes(s: &str) -> String {
+    normalize_quotes_with_offsets(s).0
+}
+
+fn normalize_quotes_with_offsets(s: &str) -> (String, Vec<usize>) {
     let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\u{2018}' | '\u{2019}' => out.push('\''),
-            '\u{201C}' | '\u{201D}' => out.push('"'),
-            _ => out.push(c),
+    let mut offsets = Vec::with_capacity(s.len() + 1);
+    offsets.push(0);
+    for (original_start, c) in s.char_indices() {
+        let original_end = original_start + c.len_utf8();
+        let replacement = match c {
+            '\u{2018}' | '\u{2019}' => '\'',
+            '\u{201C}' | '\u{201D}' => '"',
+            _ => c,
+        };
+        out.push(replacement);
+        while offsets.len() < out.len() {
+            offsets.push(original_start);
         }
+        offsets.push(original_end);
     }
-    out
+    (out, offsets)
 }
 
 /// Find actual string in file, accounting for curly-quote normalization.
@@ -35,10 +47,12 @@ pub(crate) fn find_actual_string(content: &str, search: &str) -> Option<String> 
     }
     // Try normalized quotes
     let norm_search = normalize_quotes(search);
-    let norm_content = normalize_quotes(content);
-    let idx = norm_content.find(&norm_search)?;
-    // Extract the actual substring from the original content at the same position
-    Some(content[idx..idx + search.len()].to_owned())
+    let (norm_content, offsets) = normalize_quotes_with_offsets(content);
+    let start = norm_content.find(&norm_search)?;
+    let end = start + norm_search.len();
+    let original_start = *offsets.get(start)?;
+    let original_end = *offsets.get(end)?;
+    content.get(original_start..original_end).map(str::to_owned)
 }
 
 /// Edits files by exact string replacement.
@@ -226,6 +240,14 @@ impl Tool for EditTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_actual_string_maps_normalized_quote_offsets_to_original_utf8() {
+        assert_eq!(
+            find_actual_string("“ é “a” 🙂", "\"a\""),
+            Some("“a”".into())
+        );
+    }
 
     #[tokio::test]
     async fn edit_single_replace() {

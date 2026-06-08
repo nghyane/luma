@@ -36,6 +36,7 @@ impl Gateway for Kiro {
         binding: &ModelBinding,
         credential: &Credential,
         session_id: &str,
+        _options: crate::provider::gateway::ProviderOptions,
     ) -> Box<dyn Provider> {
         Box::new(KiroRuntime::new(
             &binding.model_id,

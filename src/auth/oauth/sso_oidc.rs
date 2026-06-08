@@ -292,7 +292,7 @@ async fn post_json(
         let text = resp.text().await.unwrap_or_default();
         return Err(OAuthError::ExchangeFailed(format!(
             "{step} failed: {}",
-            &text[..text.len().min(300)]
+            crate::util::byte_prefix(&text, 300)
         )));
     }
     resp.json()

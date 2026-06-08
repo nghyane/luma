@@ -37,6 +37,7 @@ impl Gateway for Cloudflare {
         binding: &ModelBinding,
         credential: &Credential,
         _session_id: &str,
+        _options: crate::provider::gateway::ProviderOptions,
     ) -> Box<dyn Provider> {
         let base_url = credential.base_url.as_deref().unwrap_or(&binding.base_url);
         let config = OpenAIChatConfig::default()

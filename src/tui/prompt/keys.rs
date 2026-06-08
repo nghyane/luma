@@ -80,6 +80,7 @@ impl super::PromptState {
             }
             // Ctrl+C handled by dispatch — should not reach here
             KeyCode::Char('c') if ctrl => PromptAction::None,
+            KeyCode::Char('f') if ctrl => PromptAction::ToggleFastMode,
             KeyCode::Char('t') if ctrl => PromptAction::ToggleThinking,
             KeyCode::Char('a') if ctrl => {
                 self.buf.home();
